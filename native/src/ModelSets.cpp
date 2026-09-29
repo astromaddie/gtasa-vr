@@ -195,12 +195,11 @@ bool FileHooks(void* handle) {
 }
 
 void* OnLoadDb(const char* name, bool preload, int format) {
-    // Proper's supplied GPU payload is DXT (enum 1 in retail 2.11). Do not let
-    // auto-detection pair its listing with a stock ETC/PVR data file.
-    if (session[PROPER_FIXES] && name &&
-        (!std::strcmp(name,"gta3") || !std::strcmp(name,"gta_int") || !std::strcmp(name,"cutscene"))) format = 1;
     const bool trace = session[PROPER_FIXES] && name &&
         (!std::strcmp(name,"gta3") || !std::strcmp(name,"gta_int") || !std::strcmp(name,"cutscene"));
+    // Force DXT only for supplied databases; 2.1.1 uses retail cutscene textures.
+    if (trace && packs[PROPER_FIXES].files.contains(
+            std::string("texdb/")+name+"/"+name+".dxt.dat")) format = 1;
     char status[160];
     if (trace) {
         std::snprintf(status, sizeof(status), "loading database=%s format=%d", name, format);

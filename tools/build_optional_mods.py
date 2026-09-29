@@ -35,7 +35,9 @@ def proper_allowed(name):
         return True
     if name.startswith('data/decision/allowed/') and suffix == '.ped':
         return True
-    if name in ('data/carcols.dat', 'data/object.dat', 'data/plants.dat', 'data/water.dat'):
+    if name in ('data/carcols.dat', 'data/carmods.dat', 'data/furnitur.dat',
+                'data/object.dat', 'data/plants.dat', 'data/procobj.dat',
+                'data/vehicles.ide', 'data/water.dat'):
         return True
     if name.startswith('models/grass/') and suffix == '.dff':
         return True
@@ -61,6 +63,25 @@ def validate_img(path):
     return count
 
 
+def validate_texture_database(out, db, optional=False):
+    base = out / 'texdb' / db / db
+    paths = [Path(str(base) + s) for s in ('.txt', '.dxt.dat', '.dxt.toc', '.dxt.tmb', '.unc.tmb')]
+    present = [p.is_file() for p in paths]
+    # 2.1.1 omits cutscene textures; partial replacement databases still fail.
+    if optional and not any(present):
+        return False
+    if not all(present):
+        raise ValueError(f'Incomplete texture database: {db}')
+    toc = paths[2].read_bytes()
+    if len(toc) < 8 or len(toc) % 4 or struct.unpack_from('<I', toc)[0] != paths[1].stat().st_size:
+        raise ValueError(f'Invalid texture offsets: {db}')
+    limit = paths[1].stat().st_size
+    for offset, in struct.iter_unpack('<I', toc[4:]):
+        if offset != 0xffffffff and offset + 16 > limit:
+            raise ValueError(f'Texture offset outside DAT: {db}')
+    return True
+
+
 def build_proper(root, out):
     roots = [p.parent.parent for p in root.rglob('gta3.img') if p.parent.name.lower() == 'texdb']
     if len(roots) != 1:
@@ -81,24 +102,15 @@ def build_proper(root, out):
         shutil.copyfile(path, dest)
         if name.endswith('.img'):
             validate_img(dest)
-    for db in ('gta3', 'gta_int', 'cutscene'):
-        base = out / 'texdb' / db / db
-        paths = [Path(str(base) + s) for s in ('.txt', '.dxt.dat', '.dxt.toc', '.dxt.tmb', '.unc.tmb')]
-        if not all(p.is_file() for p in paths):
-            raise ValueError(f'Incomplete texture database: {db}')
-        toc = paths[2].read_bytes()
-        if len(toc) < 8 or len(toc) % 4 or struct.unpack_from('<I', toc)[0] != paths[1].stat().st_size:
-            raise ValueError(f'Invalid texture offsets: {db}')
-        limit = paths[1].stat().st_size
-        for offset, in struct.iter_unpack('<I', toc[4:]):
-            if offset != 0xffffffff and offset + 16 > limit:
-                raise ValueError(f'Texture offset outside DAT: {db}')
+    databases = [db for db in ('gta3', 'gta_int', 'cutscene')
+                 if validate_texture_database(out, db, optional=(db == 'cutscene'))]
     for required in ('anim/cuts.img', 'texdb/gta3.img', 'texdb/gta_int.img', 'texdb/cutscene.img'):
         if required not in copied:
             raise ValueError(f'Missing {required}')
     effects = proper_world_effects.apply(out / 'texdb/gta3.img')
     validate_img(out / 'texdb/gta3.img')
-    return {'files': len(copied), 'texture_format': 'dxt', 'savr_world_effects': effects}
+    return {'files': len(copied), 'texture_format': 'dxt',
+            'texture_databases': databases, 'savr_world_effects': effects}
 
 
 def build(root, out, kind):

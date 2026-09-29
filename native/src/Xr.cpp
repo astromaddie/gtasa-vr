@@ -68,12 +68,12 @@
 namespace savr::xr {
 namespace {
 
-constexpr char kModVersion[] = "0.3.0.0";  // internal build id (4th digit)
+constexpr char kModVersion[] = "0.3.1.0";  // internal build id (4th digit)
 #ifdef SAVR_DEV
-constexpr const char* kModVersionShown = "0.3.0.0 DEV";
+constexpr const char* kModVersionShown = "0.3.1.0 DEV";
 std::atomic<unsigned> g_profilerMode{PROFILER_OFF};
 #else
-constexpr const char* kModVersionShown = "0.3.0";
+constexpr const char* kModVersionShown = "0.3.1";
 #endif
 
 JavaVM*   g_hudTextVm{};

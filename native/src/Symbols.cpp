@@ -269,6 +269,7 @@ bool ResolveGameSymbols(void* handle) {
         {"_ZN18CVisibilityPlugins23RenderVehicleHiDetailCBEP8RpAtomic",           reinterpret_cast<void**>(&g.CVisibilityPlugins_RenderVehicleHiDetailCB), false},
         {"_ZN18CVisibilityPlugins28RenderVehicleHiDetailAlphaCBEP8RpAtomic",      reinterpret_cast<void**>(&g.CVisibilityPlugins_RenderVehicleHiDetailAlphaCB), false},
         {"_ZN18CVisibilityPlugins33RenderVehicleHiDetailAlphaCB_BoatEP8RpAtomic", reinterpret_cast<void**>(&g.CVisibilityPlugins_RenderVehicleHiDetailAlphaCB_Boat), false},
+        {"_ZN18CVisibilityPlugins28RenderVehicleHiDetailCB_BoatEP8RpAtomic", reinterpret_cast<void**>(&g.CVisibilityPlugins_RenderVehicleHiDetailCB_Boat), false},
         {"_ZN18CVisibilityPlugins21m_alphaBoatAtomicListE", reinterpret_cast<void**>(&g.CVisibilityPlugins_m_alphaBoatAtomicList), false},
         {"_ZN18CVisibilityPlugins12RenderAtomicEPvf", reinterpret_cast<void**>(&g.CVisibilityPlugins_RenderAtomic), false},
         {"_ZN18CVisibilityPlugins21ms_atomicPluginOffsetE", reinterpret_cast<void**>(&g.CVisibilityPlugins_ms_atomicPluginOffset), false},

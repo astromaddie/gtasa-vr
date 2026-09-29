@@ -4,7 +4,8 @@ from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-PRELUDE = r'''
+PRELUDE = r'''#include <initializer_list>
+
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -13,20 +14,36 @@ struct AlphaListNode {
     void* object; void* callback; float distance; std::uint32_t padding;
     AlphaListNode* previous; AlphaListNode* next;
 };
-int g_renderingStereoEyeIndex=0,pluginOffset=0x80,nativeCalls=0,draws=0;
-bool skipBlend=false,skipNonblend=false,stateValid=true,admit=true;
+int g_renderingStereoEyeIndex=0,pluginOffset=0x80,nativeCalls=0,draws=0,solidCalls=0;
+bool skipBlend=false,skipNonblend=false,stateValid=true,admit=true,full=false,far=false;
+bool lighting=true,paint=true;
 std::uintptr_t depthWrite=1;
-struct Draw { bool skipBlend,skipNonblend; std::uintptr_t write; } draw[8]{};
+struct Draw { bool hull,glass,lit,painted; std::uintptr_t write; } draw[128]{};
 AlphaListNode list[2]{},nodes[20]{};
 int nodeCount=0;
-void Render(void*,float) { draw[draws++]={skipBlend,skipNonblend,depthWrite}; }
+struct Material { char prefix[0xb]{}; std::uint8_t alpha=255; bool glass=false,blend=true; };
+struct Geometry { Material* materials[130]{}; int count=0; };
+void Render(void* atomic,float) {
+    auto* geometry=*reinterpret_cast<Geometry**>(static_cast<char*>(atomic)+0x30);
+    bool hull=!skipNonblend,glass=!skipBlend;
+    if (geometry) {
+        hull=glass=false;
+        for (int i=0;i<geometry->count;++i) {
+            auto& m=*geometry->materials[i];
+            if (!m.alpha||(m.blend?skipBlend:skipNonblend)) continue;
+            if (m.glass) glass=true; else hull=true;
+        }
+    }
+    draw[draws++]={hull,glass,lighting,paint,depthWrite};
+}
 struct Symbols {
     void* CVisibilityPlugins_m_alphaBoatAtomicList=list;
     void (*CVisibilityPlugins_RenderAtomic)(void*,float)=Render;
     int* CVisibilityPlugins_ms_atomicPluginOffset=&pluginOffset;
     bool* skipBlendRender=&skipBlend; bool* skipNonblendRender=&skipNonblend;
     void (*rpSkipBlendRender)(bool)=[](bool x) { skipBlend=x; };
-    void (*rpSkipNonblendRender)(bool)=[](bool x) { skipNonblend=x; };
+    // Verified ARM64 2.11 setter ignores its argument (STRB WZR).
+    void (*rpSkipNonblendRender)(bool)=[](bool) { skipNonblend=false; };
     int (*RwRenderStateGet)(int,void*)=[](int state,void* out) {
         if (!stateValid||state!=8) return 0;
         *static_cast<std::uintptr_t*>(out)=depthWrite; return 1;
@@ -35,13 +52,19 @@ struct Symbols {
         if (state!=8) std::abort();
         depthWrite=reinterpret_cast<std::uintptr_t>(value); return 1;
     };
+    void* (*RpGeometryForAllMaterials)(void*,void*(*)(void*,void*),void*)=
+        [](void* ptr,void*(*cb)(void*,void*),void* data)->void* {
+            auto* geometry=static_cast<Geometry*>(ptr);
+            for(int i=0;i<geometry->count;++i) cb(geometry->materials[i],data);
+            return ptr;
+        };
 } g;
 void* Native(void* atomic) {
     ++nativeCalls;
-    auto* flags=reinterpret_cast<std::uint16_t*>(static_cast<char*>(atomic)+pluginOffset+2);
-    *flags|=0x2000; // Native LOD update must survive temporary alpha tagging.
     if (!admit) return atomic;
-    if ((*flags&0x40)&&nodeCount<20) {
+    auto* flags=reinterpret_cast<std::uint16_t*>(static_cast<char*>(atomic)+pluginOffset+2);
+    if (far) *flags|=0x2000; else *flags&=~0x2000;
+    if ((*flags&0x40)&&!full&&nodeCount<20) {
         auto* n=&nodes[nodeCount++];
         *n={atomic,reinterpret_cast<void*>(&Render),1,0,list[1].previous,&list[1]};
         n->previous->next=n; list[1].previous=n;
@@ -49,16 +72,22 @@ void* Native(void* atomic) {
     return atomic;
 }
 void* (*g_origRenderBoatHiDetailAlpha)(void*)=Native;
+void* (*g_origRenderBoatHiDetail)(void*)=[](void* atomic)->void* {
+    ++solidCalls; Render(atomic,1); return atomic;
+};
 int checks=0;
 void Check(bool ok,const char* message) {
     ++checks; if (!ok) { std::fprintf(stderr,"FAIL: %s\n",message); std::exit(1); }
 }
 void Reset() {
     list[0].next=&list[1]; list[1].previous=&list[0];
-    nodeCount=nativeCalls=draws=0; depthWrite=1;
-    skipBlend=skipNonblend=false; stateValid=admit=true; g_renderingStereoEyeIndex=0;
+    nodeCount=nativeCalls=solidCalls=draws=0; depthWrite=1;
+    skipBlend=skipNonblend=full=far=false;
+    stateValid=admit=lighting=paint=true; g_renderingStereoEyeIndex=0;
 }
 void DrawList() {
+    // CRenderer ends vehicle lighting and resets editable materials before this list.
+    lighting=paint=false;
     for(auto* n=list[1].previous;n!=&list[0];n=n->previous)
         reinterpret_cast<void(*)(void*,float)>(n->callback)(n->object,n->distance);
 }
@@ -67,32 +96,85 @@ TESTS = r'''
 int main() {
     alignas(8) char atomic[0x100]{};
     auto& flags=*reinterpret_cast<std::uint16_t*>(atomic+pluginOffset+2);
-    Reset(); flags=0;
-    OnRenderBoatHiDetailAlpha(atomic);
-    Check(nodeCount==1&&draws==0,"untagged glass queues after world geometry");
-    Check(flags==0x2000,"temporary alpha bit restored while native LOD bit retained");
-    DrawList();
-    Check(draws==2&&draw[0].skipBlend&&!draw[0].skipNonblend&&draw[0].write==1,
-          "solid hull keeps its depth pass");
-    Check(!draw[1].skipBlend&&draw[1].skipNonblend&&draw[1].write==0,
-          "glass pass cannot occlude later foliage");
-    Check(depthWrite==1&&!skipBlend&&!skipNonblend,"render states restored");
-    g_renderingStereoEyeIndex=1;
-    OnRenderBoatHiDetailAlpha(atomic); DrawList();
-    Check(nativeCalls==1&&nodeCount==1&&draws==4,"right eye reuses one list entry");
-    Check(draw[2].write==draw[0].write&&draw[3].write==draw[1].write,
-          "both eyes receive identical material passes");
+    for (bool distant:{false,true}) {
+        Reset(); flags=0; far=distant;
+        OnRenderBoatHiDetailAlpha(atomic);
+        Check(nodeCount==1&&draws==1,"solid hull draws before vehicle paint/lights reset");
+        Check(draw[0].hull&&!draw[0].glass&&draw[0].lit&&draw[0].painted&&draw[0].write==1,
+              "near and distant hull keep their original colour and depth");
+        Check(flags==(distant?0x2000:0),"native distance/reflection flag survives alpha tagging");
+        DrawList();
+        Check(draws==2&&!draw[1].hull&&draw[1].glass&&draw[1].write==0,
+              "deferred glass cannot redraw the dark hull or occlude foliage");
+        Check(depthWrite==1&&!skipBlend&&!skipNonblend,"exact render states restored");
+        g_renderingStereoEyeIndex=1; lighting=paint=true;
+        OnRenderBoatHiDetailAlpha(atomic); DrawList();
+        Check(nativeCalls==2&&nodeCount==1&&draws==4,"each eye draws solid and shares one glass entry");
+        Check(draw[2].hull&&draw[2].lit&&draw[2].painted&&!draw[2].glass&&
+              !draw[3].hull&&draw[3].glass&&draw[3].write==0,"right eye matches left eye passes");
+    }
     Reset(); flags=0x40; OnRenderBoatHiDetailAlpha(atomic);
     Check((flags&0x40)!=0,"authored alpha flag preserved");
+    g_renderingStereoEyeIndex=1; far=true; OnRenderBoatHiDetailAlpha(atomic);
+    Check(flags==0x2040,"second eye still runs native distance update");
     skipBlend=true; skipNonblend=true; depthWrite=0; DrawList();
-    Check(skipBlend&&skipNonblend&&depthWrite==0,"nondefault incoming states restored");
+    Check(skipBlend&&skipNonblend&&depthWrite==0&&!draw[draws-1].hull&&!draw[draws-1].glass,
+          "nondefault incoming filters and depth are respected and restored");
     Reset(); flags=0; admit=false; OnRenderBoatHiDetailAlpha(atomic);
     Check(nodeCount==0&&draws==0,"native LOD culling preserved");
-    Reset(); flags=0; g_renderingStereoEyeIndex=-1;
-    OnRenderBoatHiDetailAlpha(atomic);
-    Check(nativeCalls==1&&draws==1&&nodeCount==0,"flat and reflection calls retain native behavior");
+    Reset(); flags=0x40; full=true; OnRenderBoatHiDetailAlpha(atomic);
+    Check(nodeCount==0&&draws==2&&draw[0].hull&&!draw[0].glass&&
+          !draw[1].hull&&draw[1].glass&&draw[1].write==0,"full list retains both material passes");
+    Check(flags==0x40&&depthWrite==1&&!skipBlend&&!skipNonblend,"overflow restores flags and render state");
+    Reset(); flags=0; g_renderingStereoEyeIndex=-1; OnRenderBoatHiDetailAlpha(atomic);
+    Check(nativeCalls==1&&draws==1&&nodeCount==0&&draw[0].hull&&draw[0].glass,
+          "flat and reflection calls retain native behaviour");
+    Reset(); flags=0; stateValid=false; OnRenderBoatHiDetailAlpha(atomic);
+    Check(draws==1&&nodeCount==0&&flags==0,"failed admission state query leaves retail path intact");
     Reset(); flags=0; OnRenderBoatHiDetailAlpha(atomic); stateValid=false; DrawList();
-    Check(draws==1&&depthWrite==1&&!skipBlend&&!skipNonblend,"failed state query uses retail draw");
+    Check(draws==1&&depthWrite==1&&!skipBlend&&!skipNonblend,
+          "failed deferred state query cannot repaint hull without its lights");
+    Reset(); flags=0;
+    Material hull{},window1{},window2{},invisible{};
+    window1.alpha=168; window2.alpha=128; invisible.alpha=0;
+    window1.glass=window2.glass=true;
+    Geometry geometry{{&hull,&window1,&window2,&hull,&invisible},5};
+    *reinterpret_cast<void**>(atomic+0x30)=&geometry;
+    OnRenderBoatHiDetail(atomic);
+    Check(nodeCount==1&&solidCalls==0&&draw[0].hull&&!draw[0].glass,
+          "Reefer boat_hi mixed materials enter the corrected split path");
+    DrawList(); Check(!draw[1].hull&&draw[1].glass&&draw[1].write==0,"Reefer windows retain depth fix");
+    Check(draw[0].lit&&draw[0].painted&&draw[0].write==1,"blended Reefer hull keeps lighting, paint and depth");
+    Check(hull.alpha==255&&window1.alpha==168&&window2.alpha==128&&invisible.alpha==0,
+          "shared and invisible materials restore original alpha after both passes");
+    g_renderingStereoEyeIndex=1; lighting=paint=true; far=true;
+    OnRenderBoatHiDetail(atomic); DrawList();
+    Check(nodeCount==1&&draws==4&&flags==0x2000&&draw[2].hull&&!draw[2].glass&&
+          draw[2].lit&&draw[2].write==1&&!draw[3].hull&&draw[3].glass,
+          "Reefer second eye preserves native distance update and material split");
+    Reset(); flags=0x40; full=true; OnRenderBoatHiDetail(atomic);
+    Check(draws==2&&nodeCount==0&&draw[0].hull&&!draw[0].glass&&!draw[1].hull&&
+          draw[1].glass&&draw[1].write==0&&flags==0x40,"Reefer list overflow draws both isolated passes");
+    Check(hull.alpha==255&&window1.alpha==168&&window2.alpha==128&&depthWrite==1,
+          "Reefer overflow restores materials and depth");
+    Reset(); flags=0; admit=false; OnRenderBoatHiDetail(atomic);
+    Check(draws==0&&nodeCount==0&&hull.alpha==255&&window1.alpha==168,"Reefer respects native LOD rejection");
+    Reset(); flags=0; OnRenderBoatHiDetail(atomic); stateValid=false; DrawList();
+    Check(draws==1&&hull.alpha==255&&window1.alpha==168,"failed deferred state query cannot redraw Reefer hull");
+    Reset(); flags=0; skipBlend=skipNonblend=true; OnRenderBoatHiDetail(atomic); DrawList();
+    Check(skipBlend&&skipNonblend&&draw[0].hull&&!draw[0].glass&&!draw[1].hull&&draw[1].glass,
+          "material passes do not inherit blend classification and restore incoming filters");
+    Material many[129]{};
+    Geometry large{}; large.count=129; many[128].alpha=128;
+    for(int i=0;i<129;++i) large.materials[i]=&many[i];
+    Reset(); *reinterpret_cast<void**>(atomic+0x30)=&large; OnRenderBoatHiDetail(atomic);
+    Check(solidCalls==1&&nodeCount==0&&many[0].alpha==255&&many[128].alpha==128,
+          "material capacity overflow falls back before changing any alpha");
+    *reinterpret_cast<void**>(atomic+0x30)=&geometry;
+    Reset(); geometry.count=1; OnRenderBoatHiDetail(atomic);
+    Check(solidCalls==1&&nativeCalls==0&&nodeCount==0,"opaque boat parts retain retail callback");
+    Reset(); geometry.count=5; g_renderingStereoEyeIndex=-1; OnRenderBoatHiDetail(atomic);
+    Check(solidCalls==1&&nativeCalls==0,"Reefer flat/reflection callback unchanged");
     list[0].next=nullptr;
     Check(FindBoatAlphaNode(atomic)==nullptr,"broken list is not dereferenced");
     std::printf("PASS: %d production boat rendering checks\n",checks);

@@ -1,6 +1,6 @@
 # GTA San Andreas VR for Quest
 
-Version `0.3.0 alpha`. Source code and build tools for the Quest VR mod.
+Version `0.3.1 alpha`. Source code and build tools for the Quest VR mod.
 
 ## Requirements
 

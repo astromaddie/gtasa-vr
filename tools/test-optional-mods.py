@@ -71,9 +71,11 @@ class PayloadTests(unittest.TestCase):
                 builder.safe_path(path)
 
     def test_proper_allowlist(self):
-        for path in ('texdb/gta3/gta3.dxt.dat', 'data/maps/la/lae.ide', 'anim/cuts.img'):
+        for path in ('texdb/gta3/gta3.dxt.dat', 'data/maps/la/lae.ide', 'anim/cuts.img',
+                     'data/carmods.dat', 'data/furnitur.dat', 'data/procobj.dat', 'data/vehicles.ide'):
             self.assertTrue(builder.proper_allowed(path))
-        for path in ('main.scm', 'data/script/main.scm', 'gta_sa.set', 'scripts/cheat.csa', 'libGame.so'):
+        for path in ('main.scm', 'data/script/main.scm', 'gta_sa.set', 'scripts/cheat.csa', 'libGame.so',
+                     'data/unknown.dat', 'data/unknown.ide', 'data/carmods.dat.bak'):
             self.assertFalse(builder.proper_allowed(path))
 
     def test_img_bounds(self):
@@ -85,6 +87,25 @@ class PayloadTests(unittest.TestCase):
             path.write_bytes(good)
             with self.assertRaises(ValueError):
                 builder.validate_img(path)
+
+    def test_optional_cutscene_database(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            self.assertFalse(builder.validate_texture_database(out, 'cutscene', optional=True))
+            with self.assertRaisesRegex(ValueError, 'Incomplete texture database: gta3'):
+                builder.validate_texture_database(out, 'gta3')
+            base = out/'texdb/cutscene'
+            base.mkdir(parents=True)
+            (base/'cutscene.txt').write_bytes(b'listing')
+            with self.assertRaisesRegex(ValueError, 'Incomplete texture database: cutscene'):
+                builder.validate_texture_database(out, 'cutscene', optional=True)
+            for suffix, data in (('dxt.dat', bytes(16)), ('dxt.toc', struct.pack('<II',16,0)),
+                                 ('dxt.tmb',b'tmb'), ('unc.tmb',b'tmb')):
+                (base/('cutscene.'+suffix)).write_bytes(data)
+            self.assertTrue(builder.validate_texture_database(out, 'cutscene', optional=True))
+            (base/'cutscene.dxt.toc').write_bytes(struct.pack('<II',16,16))
+            with self.assertRaisesRegex(ValueError, 'Texture offset outside DAT: cutscene'):
+                builder.validate_texture_database(out, 'cutscene', optional=True)
 
     def test_manifest_metadata(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -182,8 +203,10 @@ int main() {
     const std::string root=std::string(kFiles)+"optionalmods/properfixes/";
     std::filesystem::create_directories(root+"0123456789abcdef01234567/texdb/gta3");
     std::filesystem::create_directories(root+"0123456789abcdef01234567/anim");
+    std::filesystem::create_directories(root+"0123456789abcdef01234567/data");
     std::ofstream(root+"active.txt")<<"0123456789abcdef01234567\n";
-    std::string files[]={"texdb/gta3.img","texdb/gta_int.img","texdb/cutscene.img","anim/cuts.img","texdb/gta3/gta3.dxt.dat"};
+    std::string files[]={"texdb/gta3.img","texdb/gta_int.img","texdb/cutscene.img","anim/cuts.img","texdb/gta3/gta3.dxt.dat",
+        "data/carmods.dat","data/furnitur.dat","data/procobj.dat","data/vehicles.ide"};
     std::ofstream manifest(root+"0123456789abcdef01234567/manifest.tsv");
     manifest<<"SAVR_OPTIONAL_V1 properfixes\n";
     for(auto& p:files){std::ofstream(root+"0123456789abcdef01234567/"+p)<<"x";manifest<<"1\t"<<p<<"\n";} manifest.close();
@@ -191,6 +214,10 @@ int main() {
     packs[PROPER_FIXES].available=true;
     session[PROPER_FIXES]=true;
     check(Redirect("texdb\\gta3.img")!=nullptr);
+    for (auto path:{"data/carmods.dat","data/furnitur.dat","data/procobj.dat","data/vehicles.ide"}) {
+        const char* mapped=Redirect(path);
+        check(mapped&&std::string(mapped)==root+"0123456789abcdef01234567/"+path);
+    }
     check(Redirect("data/missing.ide")==nullptr);
     check(Redirect("gtasa1.b")==nullptr);
     static std::string opened;
@@ -241,7 +268,13 @@ int main() {
     static int formatSeen=-1;
     origLoadDb=[](const char*,bool,int format)->void*{formatSeen=format;return nullptr;};
     session[PROPER_FIXES]=true;
+    packs[PROPER_FIXES].files["texdb/gta3/gta3.dxt.dat"]="fixture";
     OnLoadDb("gta3",false,6);check(formatSeen==1);
+    OnLoadDb("cutscene",false,6);check(formatSeen==6);
+    OnLoadDb("cutscene",false,0);check(formatSeen==0);
+    packs[PROPER_FIXES].files["texdb/cutscene/cutscene.dxt.dat"]="fixture";
+    OnLoadDb("cutscene",false,6);check(formatSeen==1);
+    packs[PROPER_FIXES].files.erase("texdb/cutscene/cutscene.dxt.dat");
     OnLoadDb("hdweapons",false,0);check(formatSeen==0);
     session[PROPER_FIXES]=false;
     OnLoadDb("gta3",false,6);check(formatSeen==6);

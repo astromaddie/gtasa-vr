@@ -510,6 +510,7 @@ struct GameSymbols {
     void* (*CVisibilityPlugins_RenderVehicleHiDetailCB)(void* atomic);
     void* (*CVisibilityPlugins_RenderVehicleHiDetailAlphaCB)(void* atomic);
     void* (*CVisibilityPlugins_RenderVehicleHiDetailAlphaCB_Boat)(void* atomic);
+    void* (*CVisibilityPlugins_RenderVehicleHiDetailCB_Boat)(void* atomic);
     void* CVisibilityPlugins_m_alphaBoatAtomicList;
     void (*CVisibilityPlugins_RenderAtomic)(void* atomic,float distance);
     int* CVisibilityPlugins_ms_atomicPluginOffset;

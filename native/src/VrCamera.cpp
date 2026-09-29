@@ -8147,6 +8147,7 @@ RenderAlphaEntityFn g_origRenderAlphaEntity = nullptr;
 RenderVehicleHiDetailFn g_origRenderVehicleHiDetail = nullptr;
 RenderVehicleHiDetailAlphaFn g_origRenderVehicleHiDetailAlpha = nullptr;
 RenderVehicleHiDetailAlphaFn g_origRenderBoatHiDetailAlpha = nullptr;
+RenderVehicleHiDetailAlphaFn g_origRenderBoatHiDetail = nullptr;
 AtomicDefaultRenderFn g_origAtomicDefaultRender = nullptr;
 GetIsOnScreenFn g_origGetIsOnScreen = nullptr;
 thread_local void* g_visibilityCurrentRenderEntity = nullptr;
@@ -12225,55 +12226,178 @@ AlphaListNode* FindBoatAlphaNode(void* atomic) {
 
 void RenderBoatAlphaNoDepthWrite(void* atomic,float distance) {
     if (!g.CVisibilityPlugins_RenderAtomic) return;
-    // Transparent hull windows must not mask later foliage/effect passes.
-    // Preserve depth testing and restore the exact producer-side RW state.
     std::uintptr_t savedWrite=0;
     const bool scoped=g_renderingStereoEyeIndex>=0&&g.RwRenderStateSet&&
         g.RwRenderStateGet&&g.skipBlendRender&&g.skipNonblendRender&&
-        g.rpSkipBlendRender&&g.rpSkipNonblendRender&&g.RwRenderStateGet(8,&savedWrite);
-    if (!scoped) { g.CVisibilityPlugins_RenderAtomic(atomic,distance); return; }
-    // Boat atomics can contain both solid hull and glass materials. Keep the
-    // solid depth, then use the retail material filter for the blended meshes.
+        g.RwRenderStateGet(8,&savedWrite);
+    if (!scoped) return;
     const bool savedBlend=*g.skipBlendRender,savedNonblend=*g.skipNonblendRender;
-    g.rpSkipBlendRender(true);
-    g.rpSkipNonblendRender(false);
-    g.CVisibilityPlugins_RenderAtomic(atomic,distance);
-    g.rpSkipBlendRender(false);
-    g.rpSkipNonblendRender(true);
+    // Retail 2.11's _rpSkipNonblendRender always writes zero; set the flag directly.
+    *g.skipNonblendRender=true;
     g.RwRenderStateSet(8,nullptr);
     g.CVisibilityPlugins_RenderAtomic(atomic,distance);
     g.RwRenderStateSet(8,reinterpret_cast<void*>(savedWrite));
-    g.rpSkipBlendRender(savedBlend);
-    g.rpSkipNonblendRender(savedNonblend);
+    *g.skipBlendRender=savedBlend;
+    *g.skipNonblendRender=savedNonblend;
 }
 
 void* OnRenderBoatHiDetailAlpha(void* atomic) {
     if (!g_origRenderBoatHiDetailAlpha) return atomic;
     if (g_renderingStereoEyeIndex<0) return g_origRenderBoatHiDetailAlpha(atomic);
-    const auto stock=reinterpret_cast<void*>(g.CVisibilityPlugins_RenderAtomic);
-    const auto wrapped=reinterpret_cast<void*>(&RenderBoatAlphaNoDepthWrite);
-    if (auto* node=FindBoatAlphaNode(atomic)) {
-        if (node->callback==stock||node->callback==wrapped) {
-            node->callback=wrapped;
-            return atomic;
-        }
-    }
-    // The alpha callback is selected by material opacity, but retail only
-    // queues components also tagged ATOMIC_ALPHA by their model hierarchy.
-    // Queue these mixed/glass atomics as well, instead of writing glass depth
-    // before the world's fading entities and foliage have been drawn.
     const int offset=g.CVisibilityPlugins_ms_atomicPluginOffset?
         *g.CVisibilityPlugins_ms_atomicPluginOffset:0;
-    if (!atomic||offset<0x70||offset>0x400)
+    std::uintptr_t savedWrite=0;
+    if (!atomic||offset<0x70||offset>0x400||!g.CVisibilityPlugins_RenderAtomic||
+        !g.skipBlendRender||!g.skipNonblendRender||!g.RwRenderStateGet||
+        !g.RwRenderStateSet||!g.RwRenderStateGet(8,&savedWrite))
+        return g_origRenderBoatHiDetailAlpha(atomic);
+    const auto stock=reinterpret_cast<void*>(g.CVisibilityPlugins_RenderAtomic);
+    const auto wrapped=reinterpret_cast<void*>(&RenderBoatAlphaNoDepthWrite);
+    auto* node=FindBoatAlphaNode(atomic);
+    if (node&&node->callback!=stock&&node->callback!=wrapped)
         return g_origRenderBoatHiDetailAlpha(atomic);
     auto* flags=reinterpret_cast<std::uint16_t*>(static_cast<char*>(atomic)+offset+2);
     const bool wasAlpha=(*flags&0x40u)!=0;
-    *flags|=0x40u;
+    const bool savedBlend=*g.skipBlendRender,savedNonblend=*g.skipNonblendRender;
+    *g.skipBlendRender=true;
+    // Each eye needs native LOD admission and its own immediate hull pass.
+    if (node) *flags&=static_cast<std::uint16_t>(~0x40u);
+    else *flags|=0x40u;
     void* result=g_origRenderBoatHiDetailAlpha(atomic);
-    if (!wasAlpha) *flags&=static_cast<std::uint16_t>(~0x40u);
-    if (auto* node=FindBoatAlphaNode(atomic);node&&node->callback==stock)
-        node->callback=wrapped;
+    if (wasAlpha) *flags|=0x40u;
+    else *flags&=static_cast<std::uint16_t>(~0x40u);
+    if (!node) {
+        node=FindBoatAlphaNode(atomic);
+        if (node&&node->callback==stock) {
+            node->callback=wrapped;
+            // Draw the hull before ResetAfterRender removes vehicle paint and lighting.
+            g.CVisibilityPlugins_RenderAtomic(atomic,node->distance);
+        } else {
+            // A full list needs a local glass pass with the same LOD check.
+            *g.skipBlendRender=savedBlend;
+            *g.skipNonblendRender=true;
+            *flags&=static_cast<std::uint16_t>(~0x40u);
+            g.RwRenderStateSet(8,nullptr);
+            g_origRenderBoatHiDetailAlpha(atomic);
+            g.RwRenderStateSet(8,reinterpret_cast<void*>(savedWrite));
+            if (wasAlpha) *flags|=0x40u;
+        }
+    } else node->callback=wrapped;
+    *g.skipBlendRender=savedBlend;
+    *g.skipNonblendRender=savedNonblend;
     return result;
+}
+
+// Reefer hull textures can blend too. Filter by material alpha; alpha zero skips a mesh.
+struct BoatMaterialMask {
+    struct Entry { std::uint8_t* alpha; std::uint8_t saved; } entries[128]{};
+    int count=0;
+    bool overflow=false;
+    static void* Collect(void* material,void* context) {
+        auto& mask=*static_cast<BoatMaterialMask*>(context);
+        if (!material) return material;
+        auto* alpha=reinterpret_cast<std::uint8_t*>(static_cast<char*>(material)+0xb);
+        for (int i=0;i<mask.count;++i) if (mask.entries[i].alpha==alpha) return material;
+        if (mask.count==128) { mask.overflow=true; return material; }
+        mask.entries[mask.count++]={alpha,*alpha};
+        return material;
+    }
+    bool Gather(void* atomic) {
+        if (!atomic||!g.RpGeometryForAllMaterials) return false;
+        void* geometry=*reinterpret_cast<void**>(static_cast<char*>(atomic)+0x30);
+        if (!geometry) return false;
+        g.RpGeometryForAllMaterials(geometry,&Collect,this);
+        return count>0&&!overflow;
+    }
+    void Select(bool glass) {
+        for (int i=0;i<count;++i)
+            *entries[i].alpha=((entries[i].saved<255)==glass)?entries[i].saved:0;
+    }
+    ~BoatMaterialMask() {
+        for (int i=0;i<count;++i) *entries[i].alpha=entries[i].saved;
+    }
+};
+
+void RenderBoatMaterialGlass(void* atomic,float distance) {
+    std::uintptr_t savedWrite=0;
+    if (g_renderingStereoEyeIndex<0||!g.CVisibilityPlugins_RenderAtomic||
+        !g.skipBlendRender||!g.skipNonblendRender||!g.RwRenderStateSet||
+        !g.RwRenderStateGet||!g.RwRenderStateGet(8,&savedWrite)) return;
+    BoatMaterialMask materials;
+    if (!materials.Gather(atomic)) return;
+    const bool savedBlend=*g.skipBlendRender,savedNonblend=*g.skipNonblendRender;
+    materials.Select(true);
+    *g.skipBlendRender=*g.skipNonblendRender=false;
+    g.RwRenderStateSet(8,nullptr);
+    g.CVisibilityPlugins_RenderAtomic(atomic,distance);
+    g.RwRenderStateSet(8,reinterpret_cast<void*>(savedWrite));
+    *g.skipBlendRender=savedBlend;
+    *g.skipNonblendRender=savedNonblend;
+}
+
+void* RenderMixedBoatMaterials(void* atomic) {
+    const int offset=g.CVisibilityPlugins_ms_atomicPluginOffset?
+        *g.CVisibilityPlugins_ms_atomicPluginOffset:0;
+    std::uintptr_t savedWrite=0;
+    if (offset<0x70||offset>0x400||!g.CVisibilityPlugins_RenderAtomic||
+        !g.skipBlendRender||!g.skipNonblendRender||!g.RwRenderStateGet||
+        !g.RwRenderStateSet||!g.RwRenderStateGet(8,&savedWrite))
+        return g_origRenderBoatHiDetail(atomic);
+    const auto stock=reinterpret_cast<void*>(g.CVisibilityPlugins_RenderAtomic);
+    const auto wrapped=reinterpret_cast<void*>(&RenderBoatMaterialGlass);
+    auto* node=FindBoatAlphaNode(atomic);
+    if (node&&node->callback!=stock&&node->callback!=wrapped)
+        return g_origRenderBoatHiDetail(atomic);
+    BoatMaterialMask materials;
+    if (!materials.Gather(atomic)) return g_origRenderBoatHiDetail(atomic);
+    auto* flags=reinterpret_cast<std::uint16_t*>(static_cast<char*>(atomic)+offset+2);
+    const bool wasAlpha=(*flags&0x40u)!=0;
+    const bool savedBlend=*g.skipBlendRender,savedNonblend=*g.skipNonblendRender;
+    materials.Select(false);
+    *g.skipBlendRender=*g.skipNonblendRender=false;
+    if (node) *flags&=static_cast<std::uint16_t>(~0x40u);
+    else *flags|=0x40u;
+    void* result=g_origRenderBoatHiDetailAlpha(atomic);
+    if (wasAlpha) *flags|=0x40u;
+    else *flags&=static_cast<std::uint16_t>(~0x40u);
+    if (!node) {
+        node=FindBoatAlphaNode(atomic);
+        if (node&&node->callback==stock) {
+            node->callback=wrapped;
+            g.CVisibilityPlugins_RenderAtomic(atomic,node->distance);
+        } else {
+            materials.Select(true);
+            *flags&=static_cast<std::uint16_t>(~0x40u);
+            g.RwRenderStateSet(8,nullptr);
+            g_origRenderBoatHiDetailAlpha(atomic);
+            g.RwRenderStateSet(8,reinterpret_cast<void*>(savedWrite));
+            if (wasAlpha) *flags|=0x40u;
+        }
+    } else node->callback=wrapped;
+    *g.skipBlendRender=savedBlend;
+    *g.skipNonblendRender=savedNonblend;
+    return result;
+}
+
+void* FindBoatTranslucentMaterial(void* material,void* found) {
+    if (material&&*reinterpret_cast<const std::uint8_t*>(
+            static_cast<const char*>(material)+0xb)<255)
+        *static_cast<bool*>(found)=true;
+    return material;
+}
+
+void* OnRenderBoatHiDetail(void* atomic) {
+    if (!g_origRenderBoatHiDetail) return atomic;
+    // Retail assigns boat_hi to this callback even when it contains glass.
+    if (atomic&&g_renderingStereoEyeIndex>=0&&g_origRenderBoatHiDetailAlpha&&
+        g.RpGeometryForAllMaterials) {
+        void* geometry=*reinterpret_cast<void**>(static_cast<char*>(atomic)+0x30);
+        bool translucent=false;
+        if (geometry) g.RpGeometryForAllMaterials(
+            geometry,&FindBoatTranslucentMaterial,&translucent);
+        if (translucent) return RenderMixedBoatMaterials(atomic);
+    }
+    return g_origRenderBoatHiDetail(atomic);
 }
 
 void* OnRenderVehicleHiDetailAlpha(void* atomic) {
@@ -30154,7 +30278,6 @@ bool Install() {
     if (boatAlpha&&g.RwRenderStateGet&&g.RwRenderStateSet&&
         g.CVisibilityPlugins_ms_atomicPluginOffset&&
         g.skipBlendRender&&g.skipNonblendRender&&
-        g.rpSkipBlendRender&&g.rpSkipNonblendRender&&
         g.CVisibilityPlugins_RenderAtomic&&g.LoadBase&&
         reinterpret_cast<std::uintptr_t>(boatAlpha)==g.LoadBase+0x605250u&&
         reinterpret_cast<std::uintptr_t>(g.CVisibilityPlugins_m_alphaBoatAtomicList)==
@@ -30166,7 +30289,18 @@ bool Install() {
                               reinterpret_cast<void*>(&OnRenderBoatHiDetailAlpha),
                               g.LoadBase+0x83c000u));
     }
-    LOGI("[boat.alpha] stereo dedupe/depth hook active=%d",g_origRenderBoatHiDetailAlpha?1:0);
+    const auto boatSolid=g.CVisibilityPlugins_RenderVehicleHiDetailCB_Boat;
+    if (g_origRenderBoatHiDetailAlpha&&boatSolid&&g.RpGeometryForAllMaterials&&
+        reinterpret_cast<std::uintptr_t>(boatSolid)==g.LoadBase+0x6051d8u&&
+        std::memcmp(reinterpret_cast<const void*>(boatSolid),kBoatAlphaPrologue,
+                    sizeof(kBoatAlphaPrologue))==0) {
+        g_origRenderBoatHiDetail=reinterpret_cast<RenderVehicleHiDetailAlphaFn>(
+            InstallTrampoline(reinterpret_cast<void*>(boatSolid),
+                              reinterpret_cast<void*>(&OnRenderBoatHiDetail),
+                              g.LoadBase+0x83c000u));
+    }
+    LOGI("[boat.alpha] split-v3 opaque-immediate/glass-deferred=%d reefer-materials=%d",
+         g_origRenderBoatHiDetailAlpha?1:0,g_origRenderBoatHiDetail?1:0);
 
     // Mobile touch-widget bridge: player_parachute.scm polls
     // IsReleased(widget 187) for the canopy — see OnWidgetReleased above.
