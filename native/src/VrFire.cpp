@@ -1,4 +1,6 @@
+#include "JustBusiness.h"
 #include "VrFire.h"
+#include "Catalyst.h"
 
 #include "Basketball.h"
 
@@ -35,8 +37,10 @@ FireInstantHitFn g_origFireInstantHit{};
 FireSniperFn g_origFireSniper{};
 PadGetWeaponFn g_origPadGetWeaponBody{};
 thread_local bool g_insideHook = false;
+thread_local bool g_insideScriptedFire = false;
 std::atomic<bool> g_padTriggerDown[2]{};
 std::atomic<bool> g_directTriggerDown[2]{};
+bool g_detonatorReleaseRequired[2]{true, true};
 std::uint32_t g_directNextFireMs[2]{};
 int g_directWeaponType[2]{-1, -1};
 
@@ -59,8 +63,18 @@ constexpr std::uintptr_t kPadDisableFireOffset = 0x12F;
 constexpr std::uintptr_t kPedWeaponsOffset = 0x730;
 constexpr std::uintptr_t kPedActiveSlotOffset = 0x8DC;
 constexpr std::uintptr_t kWeaponStride = 0x20;
+constexpr std::uintptr_t kPedAttachedToOffset = 0x150;
+constexpr std::uintptr_t kPlayerWeaponModeOffset = 0x80c;
 constexpr float kTriggerPress = 0.55f;
 constexpr float kTriggerRelease = 0.45f;
+
+bool PlayerFireEnabled() {
+    const auto* pad = g.CPad_GetPad
+        ? static_cast<const std::uint8_t*>(g.CPad_GetPad(0)) : nullptr;
+    return pad && *reinterpret_cast<const std::uint16_t*>(
+                      pad + kPadDisableControlsOffset) == 0 &&
+           pad[kPadDisableFireOffset] == 0;
+}
 
 void ResetPadTriggerLatch() {
     g_padTriggerDown[0].store(false, std::memory_order_relaxed);
@@ -98,7 +112,8 @@ bool AreaEffectWeapon(int type) {
 // All weapons fired by the direct CWeapon::Fire path in Update() below. The
 // photo camera (43) joins so its shutter runs under the forced MODE_CAMERA.
 bool SupportedDirectFire(int type) {
-    return SupportedHitscan(type) || AreaEffectWeapon(type) || type == 43;
+    return SupportedHitscan(type) || AreaEffectWeapon(type) ||
+           type == 40 || type == 43;
 }
 
 bool AutomaticHitscan(int type) {
@@ -137,7 +152,18 @@ void ResetDirectTrigger() {
         g_directTriggerDown[hand].store(false, std::memory_order_relaxed);
         g_directNextFireMs[hand] = 0;
         g_directWeaponType[hand] = -1;
+        g_detonatorReleaseRequired[hand] = true;
     }
+}
+
+bool DetonatorTriggerReady(int weaponType, int hand, float trigger) {
+    if (weaponType != 40) return true;
+    if (hand < 0 || hand > 1 || !std::isfinite(trigger)) return false;
+    if (!g_detonatorReleaseRequired[hand]) return true;
+    if (trigger <= kTriggerRelease) g_detonatorReleaseRequired[hand] = false;
+    // A trigger held across a menu/control lock or a satchel-to-detonator
+    // handoff must be released before it can become a new detonation press.
+    return false;
 }
 
 bool Finite(Vec3 v) {
@@ -172,7 +198,7 @@ bool GetPhysicalRay(void* shooter, int weaponType, Vec3& origin, Vec3& direction
     // DEFAULT driving keeps the vanilla drive-by ownership rules.
     if (!g.FindPlayerVehicle) return false;
     if (g.FindPlayerVehicle(-1, false) != nullptr &&
-        !driving::VehicleWeaponsImmersive())
+        !driving::VehicleWeaponsImmersive() && !IsScriptedWeaponCamera())
         return false;
 
     const PhysicalFireQuery query =
@@ -208,7 +234,8 @@ bool GetPhysicalTrigger(void* ped, int& weaponType, int& hand, float& level) {
     if (!ped || !g.FindPlayerPed || ped != g.FindPlayerPed(-1)) return false;
     const bool inVehicle =
         g.FindPlayerVehicle && g.FindPlayerVehicle(-1, false) != nullptr;
-    if (inVehicle && !driving::VehicleWeaponsImmersive())
+    const bool scriptedGunner = IsScriptedWeaponCamera();
+    if (inVehicle && !driving::VehicleWeaponsImmersive() && !scriptedGunner)
         return false;
 
     const auto* bytes = reinterpret_cast<const std::uint8_t*>(ped);
@@ -228,7 +255,8 @@ bool GetPhysicalTrigger(void* ped, int& weaponType, int& hand, float& level) {
     xr::GetInput(input);
     // In a vehicle the triggers ARE accelerator/brake, so — like the Vice
     // City port — the held weapon fires with B instead.
-    level = inVehicle ? (input.b ? 1.0f : 0.0f) : input.triggers[hand];
+    level = inVehicle && !scriptedGunner
+        ? (input.b ? 1.0f : 0.0f) : input.triggers[hand];
     if (!std::isfinite(level)) return false;
     level = std::clamp(level, 0.0f, 1.0f);
     return true;
@@ -253,6 +281,7 @@ int OnPadGetWeapon(void* pad, void* ped, bool allowPassive) {
     // existing use-gun task. That is still the player pad, so resolve its ped
     // here; otherwise moving while firing can prematurely end the task.
     if (!g.CPad_GetPad || pad != g.CPad_GetPad(0)) return vanilla;
+    if (catalyst::Active()) { ResetPadTriggerLatch(); return 0; }
     void* const playerPed = ped ? ped : (g.FindPlayerPed ? g.FindPlayerPed(-1) : nullptr);
     int weaponType = 0;
     int hand = -1;
@@ -698,12 +727,34 @@ void SetPhysicalFireQuery(PhysicalFireQuery query) {
     LOGI("[vr.fire] physical-fire query %s", query ? "registered" : "cleared");
 }
 
+bool IsScriptedWeaponCamera() {
+    if (g_insideScriptedFire || justbusiness::Active()) return true;
+    if (!g.TheCamera || !g.FindPlayerPed) return false;
+    const auto* ped = static_cast<const std::uint8_t*>(g.FindPlayerPed(-1));
+    if (!ped || !*reinterpret_cast<void* const*>(ped + kPedAttachedToOffset))
+        return false;
+    // AttachPedToEntity @0x590cc8 sets +0x150; its player branch selects
+    // HELICANNON_1STPERSON (45), or AIMWEAPON_ATTACHED (65) for a pool-cue
+    // attachment. SetNewPlayerWeaponMode @0x4755f4 writes +0x80c.
+    const auto* camera = static_cast<const std::uint8_t*>(g.TheCamera);
+    const auto mode = *reinterpret_cast<const std::uint16_t*>(
+        camera + kPlayerWeaponModeOffset);
+    if (mode != 45 && mode != 65) return false;
+    const int slot = *reinterpret_cast<const std::int8_t*>(
+        ped + kPedActiveSlotOffset);
+    if (slot <= 0 || slot >= 13) return false;
+    const int type = *reinterpret_cast<const std::int32_t*>(
+        ped + kPedWeaponsOffset + slot * kWeaponStride);
+    return SupportedHitscan(type);
+}
+
 void Update(bool blocked) {
     if (blocked || !g_installed.load(std::memory_order_acquire) ||
+        !PlayerFireEnabled() ||
         !g.CWeapon_Fire || !g.CTimer_m_snTimeInMilliseconds ||
         !g.FindPlayerPed ||
         (g.FindPlayerVehicle && g.FindPlayerVehicle(-1, false) &&
-         !driving::VehicleWeaponsImmersive())) {
+         !driving::VehicleWeaponsImmersive() && !IsScriptedWeaponCamera())) {
         ResetDirectTrigger();
         return;
     }
@@ -731,6 +782,7 @@ void Update(bool blocked) {
         ResetDirectTrigger();
         return;
     }
+    if (!DetonatorTriggerReady(weaponType, hand, trigger)) return;
 
     g_directTriggerDown[1 - hand].store(false, std::memory_order_relaxed);
     const bool wasDown = g_directTriggerDown[hand].load(std::memory_order_relaxed);
@@ -777,7 +829,11 @@ void Update(bool blocked) {
 
     Vec3 origin{};
     Vec3 direction{};
-    if (!GetPhysicalRay(ped, weaponType, origin, direction)) {
+    // Retail type 40 calls CWorld::UseDetonator at 0x6f9f5c; it consumes
+    // neither a muzzle position nor an aim direction. It must still work
+    // when no calibrated detonator muzzle/model is available.
+    if (weaponType != 40 &&
+        !GetPhysicalRay(ped, weaponType, origin, direction)) {
         static double lastRayLog = 0.0;
         timespec ts{};
         clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -806,26 +862,26 @@ void Update(bool blocked) {
                     origin.z+direction.z*2.0f};
     Vec3* target=weaponType==33?&rifleTarget:
                  (AreaEffectWeapon(weaponType)?&areaTarget:nullptr);
-    // TakePhotograph's only gate on the 2.11 arm64 binary is the active CCam
-    // mode halfword == 46 (MODE_CAMERA); disasm @0x6fd03c-0x6fd050 reads
-    // TheCamera[+0x5f] as the active index, stride 0x228, mode at +0x186.
-    // Our VR viewfinder replaces that camera task, so force the mode only
-    // around the shutter call and restore it immediately.
-    std::uint16_t* cameraMode = nullptr;
-    std::uint16_t savedCameraMode = 0;
-    if (weaponType == 43 && g.TheCamera) {
-        auto* cameraBytes = reinterpret_cast<std::uint8_t*>(g.TheCamera);
-        const unsigned activeCam = cameraBytes[0x5f];
-        if (activeCam < 3u) {
-            cameraMode = reinterpret_cast<std::uint16_t*>(
-                cameraBytes + activeCam * 0x228u + 0x186u);
-            savedCameraMode = *cameraMode;
-            *cameraMode = 46; // MODE_CAMERA
-        }
+    // The attached gunner camera otherwise dispatches to FireM16_1stPerson
+    // @0x6f9f18, bypassing the tracked FireInstantHit hook. Scope the change
+    // to this physical shot; native camera ownership stays intact afterwards.
+    std::uint16_t* playerWeaponMode = nullptr;
+    std::uint16_t savedPlayerWeaponMode = 0;
+    if (SupportedHitscan(weaponType) && IsScriptedWeaponCamera()) {
+        playerWeaponMode = reinterpret_cast<std::uint16_t*>(
+            static_cast<std::uint8_t*>(g.TheCamera) + kPlayerWeaponModeOffset);
+        savedPlayerWeaponMode = *playerWeaponMode;
+        g_insideScriptedFire = true;
+        *playerWeaponMode = 0;
     }
-    const bool fired = g.CWeapon_Fire(
-        weapon, ped, &origin, &origin, nullptr, target, nullptr);
-    if (cameraMode) *cameraMode = savedCameraMode;
+    const float photoOrigin[]{origin.x,origin.y,origin.z};
+    const bool fired = weaponType==43
+        ? vrcam::FirePhotograph(weapon,ped,photoOrigin)
+        : g.CWeapon_Fire(weapon, ped, &origin, &origin, nullptr, target, nullptr);
+    if (playerWeaponMode) {
+        *playerWeaponMode = savedPlayerWeaponMode;
+        g_insideScriptedFire = false;
+    }
     if (!fired) {
         static double lastFireFail = 0.0;
         timespec ts{};
@@ -842,6 +898,7 @@ void Update(bool blocked) {
         return;
     }
 
+    justbusiness::RecordShot(weaponType,hand);
     g_directNextFireMs[hand] = now + PhysicalFireIntervalMs(ped, weaponType);
     static std::atomic<unsigned> directCount{0};
     const unsigned n = directCount.fetch_add(1, std::memory_order_relaxed) + 1;

@@ -1,20 +1,7 @@
 #!/usr/bin/env python3
-"""Build flight-only HLOD tiles from the user's installed GTA SA data.
+"""Build flight HLOD tiles from supplied retail IPL, IDE and native DFF data.
 
-This tool deliberately does not copy DFFs into the source tree.  It reads the
-retail map IPL/IDE files and War Drum native DFFs from a local data split,
-applies the IPL transforms offline and emits a small, renderer-independent
-tile pack.  Authored parent LODs form the city layer; rootless road/land models
-fill the terrain layer that GTA's camera-wedge admission can otherwise omit.
-
-The first pack format bakes a representative stock-texture colour into every
-vertex.  Missing thumbnails receive a conservative semantic fallback and the
-baked colours receive a mild luminance-preserving grade before welding.
-Transparent materials are omitted.  That makes it useful as an
-always-resident opaque safety layer without repeating the old collision-box
-proxy.  Texture names remain in the JSON report so a later atlas pass can
-replace the colour-only material without changing tile selection.
-"""
+Bake opaque stock-texture colors into transformed geometry and group it into tiles."""
 
 from __future__ import annotations
 
@@ -528,9 +515,7 @@ def select_instances(files, center, radius):
             if item.source_index in parent_indices:
                 item.layer = "authored_lod"
             elif item.lod_index < 0:
-                # Geometry size is checked after native DFF decode.  Name-only
-                # filtering missed many anonymous land blocks and was exactly
-                # the kind of heuristic that left blue holes in earlier work.
+                # Classify roots by name; validate geometry size after native DFF decode.
                 item.layer = ("ground_root" if any(token in low for token in GROUND_TOKENS)
                               else "ordinary_root")
             else:

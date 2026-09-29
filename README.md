@@ -1,320 +1,62 @@
-# GTA San Andreas VR for Quest — Source Kit
+# GTA San Andreas VR for Quest
 
-Version `0.2.0 alpha`. See the [changelog](CHANGELOG.md).
-
-This repository contains the source code and build/install tools for the GTA
-San Andreas VR Quest mod. It does **not** contain GTA San Andreas, Rockstar
-assets, the sound mod, a prebuilt APK, native binaries, or signing keys.
-
-> [!TIP]
-> **Join the Flat2VR Discord!** Development updates, player feedback, testing,
-> and discussion of the mod take place in the
-> [GTA San Andreas VR discussion channel](https://discord.com/channels/747967102895390741/1543691482861408276).
-> Join the Flat2VR server first if the channel link does not open for you.
+Version `0.3.0 alpha`. Source code and build tools for the Quest VR mod.
 
 ## Requirements
 
-- Your own installed copy of GTA San Andreas from Google Play, version
-  `2.11.311`, ARM64. Export the complete Play split set into one directory or
-  archive. A single `base.apk` is not sufficient.
-- A separate archive or extracted directory containing the supported PS2-style
-  sound mod. The recommended input is the exact file
-  `gta-sa-ps2-style-mod-pack_1786856007_737162.7z`. Download it from the
-  [LibertyCity mod page](https://libertycity.net/files/gta-san-andreas-ios-android/241069-gta-sa-classic-avanced-mod-pack.html),
-  then select **Original plan mod pack** dated **16 August 2026** (1.41 GB).
-  Do **not** select the newer **CLASSIC ADVANCED v1.0** download on the same
-  page; its audio banks are different and are not supported. The wizard copies
-  only 59 verified files from `CONFIG`, `SFX`, and `STREAMS`; CLEO scripts,
-  saves, models, launch configuration, and all other mod-pack content are
-  ignored.
-  In the original Play split set, `assets/audio` contains only the service
-  `config` subset. The required `SFX` and `STREAMS` data is not present in the
-  APKs, so seeing that directory in an archive browser or simply unpacking the
-  original APK is not enough.
-- Windows 10/11, Linux x86_64, or macOS. Internet access is required for the
-  initial toolchain download. Installing on Quest also requires Developer Mode
-  and authorized USB debugging.
-- Approximately 15 GB of free disk space on the computer and 6 GB on Quest.
+- A complete Google Play GTA San Andreas `2.11.311` ARM64 APK split set.
+- The supported audio archive `gta-sa-ps2-style-mod-pack_1786856007_737162.7z`,
+  or its extracted audio directory. Select **Original plan mod pack** on the
+  [download page](https://libertycity.net/files/gta-san-andreas-ios-android/241069-gta-sa-classic-avanced-mod-pack.html).
+- Windows 10/11, Linux x86_64, or macOS, with an internet connection for tools.
+- Quest Developer Mode and authorized USB debugging for installation.
 
-## Exporting your own Google Play APK set
+## Build and install
 
-Use an Android phone or tablet on which your legally owned Google Play copy of
-GTA San Andreas `2.11.311` is currently installed. Do not download an APK from a
-third-party APK site: the build wizard accepts only the original Google Play
-certificate and rejects modified, merged, or re-signed packages.
+1. Export the installed Google Play game from an Android device with
+   `EXPORT_PLAY_APKS.bat`. Keep `base.apk` and every exported split together.
+2. Run `BUILD_AND_INSTALL.bat` on Windows or `bash BUILD_AND_INSTALL.sh` on
+   Linux/macOS.
+3. Select the complete APK export and the supported audio input.
+4. Connect Quest, authorize USB debugging, and follow the installer prompts.
 
-### One-click Windows export
+The installer leaves the game stopped. Preserve the personal signing key for
+future installations. See [BUILDING.md](BUILDING.md) for command-line options.
 
-The easiest Windows method does not require installing ADB or typing commands:
+## Proper Fixes
 
-1. On the phone/tablet containing the Google Play game, open **Settings > About
-   phone > Software information** and tap **Build number** seven times. Then
-   open **Settings > System > Developer options** and enable **USB debugging**.
-2. Connect it by USB, unlock it, and approve the debugging prompt.
-3. Double-click `EXPORT_PLAY_APKS.bat`.
-4. Keep the device unlocked until the export completes.
-5. Disconnect the phone/tablet, run `BUILD_AND_INSTALL.bat`, and select the
-   exported `base.apk`. The builder automatically includes its sibling splits.
+1. Supply an SA Mobile - Proper Fixes archive or extracted directory containing
+   `com.rockstargames.gtasa/files`.
+2. Run `INSTALL_PROPER_FIXES.bat` and select that input.
+3. Start the game, open **VR MENU > MODEL SET**, enable **PROPER FIXES**, and
+   fully restart the game.
 
-`base.apk` is the correct filename. Do not rename it, and keep every exported
-`split_*.apk` in the same folder. Seeing the phone in Windows File Explorer only
-confirms an MTP file connection; the exporter waits up to two minutes for the
-separate USB-debugging authorization and continues automatically once approved.
-The complete export must include both `split_config.arm64_v8a.apk` and
-`split_data_main.apk`. If Google Play installed a different CPU variant, export
-from a real 64-bit ARM Android phone/tablet rather than an emulator or Windows
-Android subsystem.
+The script prepares and verifies the pack under `files/optionalmods/properfixes`.
+It retains the input pack and its credits. Set **PROPER FIXES** to **OFF** and
+restart to use the original game assets. `DISABLE_OPTIONAL_MODS.bat` disables
+optional model sets from the computer.
 
-The exporter downloads Google's pinned Platform Tools itself, verifies their
-SHA-256, checks GTA SA version `2.11.311` (`4234641`), exports every installed
-split, verifies the resulting files, and opens the finished folder.
-
-### Advanced Linux or macOS export
-
-Windows users should use `EXPORT_PLAY_APKS.bat`; no manual PowerShell or ADB
-commands are needed. Advanced Linux or macOS users with Google's official
-[SDK Platform Tools](https://developer.android.com/tools/releases/platform-tools)
-can use:
-
-```bash
-destination="$PWD/GTA-SA-Play-export"
-mkdir -p "$destination"
-apk_paths="$(adb shell pm path com.rockstargames.gtasa | tr -d '\r' | sed 's/^package://')"
-test -n "$apk_paths" || { echo 'GTA San Andreas is not installed'; exit 1; }
-for remote_path in $apk_paths; do
-  adb pull "$remote_path" "$destination/" || exit 1
-done
-```
-
-The resulting directory must contain the base APK, the ARM64 split, the
-`data_main`/assets split, and any locale or density splits returned by
-`pm path`. Do not rename, merge, modify, or re-sign these input files. Select
-the complete `GTA-SA-Play-export` directory when the build wizard asks for the
-original game package. The wizard performs the final version, ABI, game-library,
-split, and official-signer checks before building or accessing Quest.
-
-If the Android device refuses direct `adb pull` access to its installed APKs,
-use an on-device split-APK backup/export tool that preserves every installed APK
-unchanged, then select the exported `.apks` archive or directory. The same strict
-certificate and content checks still apply.
-
-## Quick start on Windows
-
-1. Double-click `BUILD_AND_INSTALL.bat`.
-2. Select the APK, archive, or directory containing the complete original-game
-   export.
-3. Select `gta-sa-ps2-style-mod-pack_1786856007_737162.7z` or its extracted
-   audio directory. On the LibertyCity page this is the **Original plan mod
-   pack**, not **CLASSIC ADVANCED v1.0**.
-4. Connect the Quest and approve USB debugging inside the headset.
-5. Review the installation summary.
-
-On the first run, type `ACCEPT` when asked only if you agree to the Google
-Android SDK licenses. The wizard then handles sdkmanager's repetitive `y/N`
-prompts. Dependency downloads report transferred size, total size, speed, and
-ETA every five seconds; a connection that receives no data for 90 seconds fails
-with a retry message instead of appearing to hang indefinitely.
-
-The wizard validates both inputs and completes the build on the computer before
-changing anything on Quest. It installs the APK set, deploys `data_main`, audio,
-and VR hands, verifies the resulting hashes, and leaves the game stopped. It
-never launches the game automatically.
-
-During validation, the wizard also generates the distant aircraft HLOD from
-the selected, verified retail `data_main` split. Generated geometry stays in
-the ignored per-run build directory; the repository ships only the open source
-generator and runtime renderer.
-
-The original Play APKs must be signed with a personal key. A first installation
-may therefore require removal of an installed copy that uses a different
-signature. The wizard backs up accessible saves and settings first and **always
-asks for separate confirmation** before removal. Keep the personal signing key
-stored in `%LOCALAPPDATA%\GTASAVRBuilder\signing`; it is required for updates.
-
-### Build only, without connecting a Quest
+To prepare the pack without installing it:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File .\tools\build-and-install.ps1 `
-  -GamePackage "D:\Backups\GTA-SA-Play-export" `
-  -AudioSource "D:\Mods\gta-sa-ps2-style-mod-pack_1786856007_737162.7z" `
-  -BuildOnly
+./tools/install-optional-mod.ps1 -Kind properfixes -Archive <path> -PrepareOnly
 ```
 
-The output and complete `build-manifest.json` are written to the run directory
-under `C:\SAVRBuild`, or under the directory passed through `-WorkDir`.
+## HD weapons
 
-## Linux and macOS
+Run `INSTALL_HD_WEAPONS.bat` with a compatible mobile weapon pack, then enable
+**HD WEAPONS** in **VR MENU > MODEL SET** and fully restart the game. Weapon
+packs are supplied separately.
 
-On Linux x86_64, install Bash, Python 3.10 or newer, `curl`, `tar` with xz
-support, and `unzip`. Installing on Quest also requires working USB access and
-appropriate Android udev rules. macOS requires the equivalent command-line
-tools and USB access. The wizard downloads the pinned JDK 21, Android SDK, and
-other build tools when needed.
+## Settings
 
-Run the interactive wizard with:
+- `RESET_VR_SETTINGS.bat` or `bash RESET_VR_SETTINGS.sh` restores default VR
+  settings after confirmation, preserving saves and game assets.
+- `tools/export-savr-settings.ps1` exports VR settings to the computer.
+- `COLLECT_RENDER_REPORT.bat` collects a render diagnostic report.
 
-```bash
-bash BUILD_AND_INSTALL.sh
-```
+## License
 
-The recommended `.7z` is extracted with the automatically downloaded, pinned
-7-Zip `26.02`. Both the archive and executable are verified by SHA-256. A
-system-wide 7-Zip installation and manual extraction are not required.
-
-To build and validate the output without connecting a Quest:
-
-```bash
-bash BUILD_AND_INSTALL.sh \
-  --game-package "$HOME/Backups/GTA-SA-Play-export" \
-  --audio-source "$HOME/Downloads/gta-sa-ps2-style-mod-pack_1786856007_737162.7z" \
-  --work-dir "$HOME/SAVRBuild" \
-  --build-only
-```
-
-Each run receives a separate `~/SAVRBuild/runs/<run-id>` directory, or
-`<work-dir>/runs/<run-id>`, so stale CMake caches are never reused. The
-persistent signing key is stored at
-`$XDG_DATA_HOME/gtasavr-builder/signing/savr.keystore`, or at
-`~/.local/share/gtasavr-builder/signing/savr.keystore` when `XDG_DATA_HOME` is
-unset. Do not delete or replace this key; it is required to update an installed
-build.
-
-If the Quest appears as `unauthorized`, approve USB debugging inside the headset
-and reconnect the cable. For an `offline` device, restart ADB and reconnect it.
-A permissions error or missing device on Linux usually means that Android udev
-rules must be installed or corrected before signing in again or reconnecting
-the Quest.
-
-Run `bash BUILD_AND_INSTALL.sh --help` for all options. Before its first Quest
-mutation, the wizard prints the selected device, APK and payload sizes, signing
-key path, and complete action list, then requires the word `INSTALL`.
-Automation requires both `--non-interactive` and `--yes`; destructive removal
-of a package with a foreign signature is never automated. ZIP executable bits
-are not required because every internal shell script is invoked through Bash.
-After installation, the wizard leaves GTA SA stopped and never launches it.
-
-## Resetting VR settings on Quest
-
-Remove old player overrides after compiled calibration defaults change:
-
-- Windows: double-click `RESET_VR_SETTINGS.bat`.
-- Linux/macOS: run `bash RESET_VR_SETTINGS.sh`.
-
-The script selects the connected Quest, prints the exact plan, and asks for the
-word `RESET`. It then stops GTA SA, removes only the nine exact VR settings
-files listed in [BUILDING.md](BUILDING.md), and verifies the result. Saves,
-`audio`, `vrhands`, game data, APKs, and performance CSV files remain intact.
-The game is not launched; new compiled defaults take effect after the next
-manual start. Version 0.2.0 embeds the author's release-Quest menu,
-weapon, HUD, holster, and vehicle calibration as its defaults. The sole quality
-override is the eye-buffer resolution, which resets to `100%`.
-
-For automation, use `-Yes -NonInteractive` in PowerShell or
-`--yes --non-interactive` in Bash. With multiple devices, specify
-`-Serial`/`--serial`.
-
-### Exporting VR settings for support or calibration sharing
-
-Windows users can run:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File .\tools\export-savr-settings.ps1
-```
-
-The helper copies the current VR `.ini` files into a timestamped folder on the
-PC. It deliberately excludes saves, logs, screenshots, game assets, and the raw
-Quest serial number. Add `-DrivingOnly` when only vehicle calibration is needed.
-
-## HD weapon models (optional)
-
-The mod can swap the low-poly weapons for higher-detail models. The models are
-**not** part of this kit — you download a community weapon pack yourself and an
-installer builds it into the game's own format and copies it to the headset.
-Nothing in the game APK is changed: the models live in the app's files folder
-and load only while the option is on, so you can turn them off any time.
-
-1. Install and run the mod once (`BUILD_AND_INSTALL.bat`) so Python and adb are
-   available and the game has been started at least once.
-2. Download a compatible mobile weapon model pack containing the weapon `.dff`
-   files (for example an "Original HD Weapons" mobile pack). The models are
-   third-party content and are intentionally not redistributed by this kit.
-3. Connect the Quest and double-click **`INSTALL_HD_WEAPONS.bat`**. Drag the
-   downloaded pack into the window when it asks, and press Enter. The installer
-   builds the weapon image + textures and copies everything to the headset on
-   its own, then verifies the files landed.
-   - You can drag in **either the archive** (`.zip`/`.7z`) **or an
-     already-extracted folder**. If it says it can't open a `.7z`/`.rar`
-     (no 7‑Zip installed), just extract the pack yourself — right-click →
-     Extract — and drag the extracted **folder** in instead.
-4. Put on the headset, open the VR menu → **GRAPHICS** → set
-   **WEAPON MODELS** to **HD** (the row shows a **[RESTART]** tag), then fully
-   close and reopen the game. Re-open GRAPHICS: the tag is gone once HD is
-   active. If the row shows **< NO FILES >**, the payload did not land — rerun
-   the installer.
-
-To go back to the stock weapons, set **WEAPON MODELS** to **ORIGINAL** (a
-restart applies it), or delete the `files/hdweapons` and
-`files/texdb/hdweapons` folders on the headset.
-
-Notes:
-
-- Each weapon keeps a **separate** grip/aim calibration per model set, so tuning
-  the HD models never disturbs your original-weapon calibration, and vice versa.
-  Sensible HD defaults ship compiled in, so most models are placed correctly out
-  of the box.
-- A couple of very large models in some packs are skipped automatically (they
-  exceed the game's streaming buffer) and keep their original model; everything
-  else swaps. Prefer optimised, lower-poly packs for best VR performance.
-- Advanced: `tools/install-hdweapons.ps1 -Archive <path-or-folder>` runs it
-  head-less, and `tools/build_hdweapons.py <pack-folder> --out <dir>` builds the
-  payload without pushing.
-
-## Supported original game
-
-The public wizard fails closed and accepts only the verified Google Play ARM64
-release:
-
-- package: `com.rockstargames.gtasa`
-- version: `2.11.311` (`versionCode 4234641`)
-- official signer SHA-256:
-  `FF5B7B6A083FE5994E3306B30AE19D311951D019A8DE7C3E6914F0E06D130A13`
-- `libGame.so` SHA-256:
-  `4C6A7445E30B27AFDDA781302E4DB9BAC89C28FC1181B68B1EEF16F84D6A282E`
-
-Locale and density splits may vary; the wizard identifies them from their
-manifests rather than filenames. Directories and `.zip`, `.apks`, `.xapk`,
-`.apkm`, `.7z`, and `.rar` archives are supported. On Linux and macOS, supported
-`.7z` and `.rar` inputs are handled by the pinned, verified 7-Zip downloaded by
-the wizard.
-
-## Source kit contents
-
-- `native/` — the ARM64 OpenXR/VR layer and permitted Khronos headers;
-- `loader/` — the minimal Android `Application` loader;
-- `tools/` — strict validation, assembly, and safe installation tools;
-- `assets/vrhands/` — MIT-licensed UltimateXR-derived hand assets;
-- `docs/` — public architecture and project-boundary documentation.
-
-See [BUILDING.md](BUILDING.md) and [NOTICE.md](NOTICE.md) for details.
-
-## Credits
-
-The VR layer is written independently against the retail mobile game binary,
-but understanding the original San Andreas behaviour is much easier thanks to
-the community reverse-engineering of the PC version,
-[gta-reversed / gta-reversed-modern](https://github.com/gta-reversed/gta-reversed-modern),
-which we consult as a behavioural reference. Thanks to its authors and
-contributors. Full attribution is in [NOTICE.md](NOTICE.md).
-
-## Validation boundary
-
-The source kit validates sources, builds, signatures, APK payloads, and file
-copying. This does not prove that the game works correctly inside a headset.
-After installation, the player starts GTA SA manually and performs the visual
-and runtime validation.
-
-GTA, Grand Theft Auto and Rockstar Games are trademarks of their respective
-owners. This independent project is not affiliated with or endorsed by
-Rockstar Games or Take-Two Interactive.
+See [LICENSE](LICENSE), [NOTICE.md](NOTICE.md), and the licenses alongside
+third-party files. Game APKs, game assets, audio packs, and signing keys are
+provided locally and are not included in this source kit.

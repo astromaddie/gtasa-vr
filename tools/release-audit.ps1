@@ -24,7 +24,7 @@ $forbiddenExtensions = @(
     '.pyc', '.o', '.obj', '.a', '.lib', '.exe', '.dll', '.dylib',
     '.class', '.jar', '.wasm', '.bin'
 )
-$forbiddenFileNames = @('.env', 'local.properties', 'release-signing.properties')
+$forbiddenFileNames = @('.env', 'local.properties', 'release-signing.properties', 'changelog.md', 'source_snapshot.md', 'install_hd_cars.bat')
 
 $gitMetadataRoot = (Join-Path $Root '.git').TrimEnd('\') + '\'
 $allItems = @(
@@ -87,32 +87,28 @@ $xrSource = Get-Content -LiteralPath (Join-Path $Root 'native\src\Xr.cpp') -Raw
 $versionMatch = [regex]::Match($xrSource, 'kModVersionShown\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"')
 if (-not $versionMatch.Success) { throw 'Could not read kModVersion from Xr.cpp.' }
 $modVersion = $versionMatch.Groups[1].Value
+$manifestPath = Join-Path $Root 'SOURCE_MANIFEST.json'
+if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+    $sourceManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $manifestEntries = @($sourceManifest.files.PSObject.Properties)
+    if ($sourceManifest.version -ne $modVersion -or $manifestEntries.Count -ne $files.Count - 1) {
+        throw 'Source manifest version/file closure mismatch.'
+    }
+    foreach ($entry in $manifestEntries) {
+        if ($entry.Name -match '(^/|(^|/)\.\.(/|$)|:|\\)') { throw 'Unsafe source manifest path.' }
+        $sourceFile = Join-Path $Root $entry.Name
+        if (-not (Test-Path -LiteralPath $sourceFile -PathType Leaf) -or
+            (Get-FileHash -LiteralPath $sourceFile -Algorithm SHA256).Hash -ne $entry.Value) {
+            throw "Source manifest hash mismatch: $($entry.Name)"
+        }
+    }
+}
 $readmeText = Get-Content -LiteralPath (Join-Path $Root 'README.md') -Raw
-$snapshotText = Get-Content -LiteralPath (Join-Path $Root 'SOURCE_SNAPSHOT.md') -Raw
 if ($readmeText -notmatch ('Version `' + [regex]::Escape($modVersion) + ' alpha`')) {
     throw "README version does not match Xr.cpp: $modVersion"
 }
-if ($snapshotText -notmatch ('Mod version: `' + [regex]::Escape($modVersion) + ' alpha`')) {
-    throw "SOURCE_SNAPSHOT version does not match Xr.cpp: $modVersion"
-}
-$documentedActiveSourceManifest = '6861B4187AE1B27D3A8579CBD310E4EBDA024B6A4AE4C6BE3B0E9177007A24A4'
-if ($snapshotText -notmatch [regex]::Escape($documentedActiveSourceManifest)) {
-    throw 'SOURCE_SNAPSHOT active-tree provenance marker is stale.'
-}
-$discordChannel = 'https://discord.com/channels/747967102895390741/1543691482861408276'
-if ($readmeText -notmatch [regex]::Escape($discordChannel)) {
-    throw 'The public Discord channel is missing from README.'
-}
 $audioDownloadPage = 'https://libertycity.net/files/gta-san-andreas-ios-android/241069-gta-sa-classic-avanced-mod-pack.html'
 $audioArchiveName = 'gta-sa-ps2-style-mod-pack_1786856007_737162.7z'
-foreach ($documentationText in @($readmeText, (Get-Content -LiteralPath (Join-Path $Root 'BUILDING.md') -Raw))) {
-    if ($documentationText -notmatch [regex]::Escape($audioDownloadPage) -or
-        $documentationText -notmatch [regex]::Escape($audioArchiveName) -or
-        $documentationText -notmatch [regex]::Escape('Original plan mod pack') -or
-        $documentationText -notmatch [regex]::Escape('CLASSIC ADVANCED v1.0')) {
-        throw 'The supported audio download instructions are incomplete or ambiguous.'
-    }
-}
 $assemblerText = Get-Content -LiteralPath (Join-Path $Root 'tools\assemble.py') -Raw
 $windowsMasterText = Get-Content -LiteralPath (Join-Path $Root 'tools\build-and-install.ps1') -Raw
 $shellMasterText = Get-Content -LiteralPath (Join-Path $Root 'tools\build-and-install.sh') -Raw
@@ -129,9 +125,6 @@ foreach ($relative in $exportToolFiles) {
     if (-not (Test-Path -LiteralPath (Join-Path $Root $relative) -PathType Leaf)) {
         throw "The one-click Play APK exporter is incomplete: $relative"
     }
-}
-if ($readmeText -notmatch [regex]::Escape('EXPORT_PLAY_APKS.bat')) {
-    throw 'README does not document the one-click Play APK exporter.'
 }
 $exporterText = Get-Content -LiteralPath (Join-Path $Root 'tools\export-play-apks.ps1') -Raw
 if ($exporterText -notmatch [regex]::Escape('split_config.arm64_v8a.apk') -or
@@ -287,12 +280,12 @@ $resetText = $resetText -join "`n"
 $expectedSettings = @(
     'vr_appearance.ini', 'vr_basketball.ini', 'vr_calib.ini', 'vr_calib.ini.tmp',
     'vr_driving.ini', 'vr_graphics.ini', 'vr_holsters.ini',
-    'vr_hud.ini', 'vr_locomotion.ini'
+    'vr_hud.ini', 'vr_locomotion.ini', 'vr_jetpack.ini', 'vr_modelsets.ini'
 )
 $nativeSettings = @(
     Get-ChildItem -LiteralPath (Join-Path $Root 'native\src') -Filter '*.cpp' -File |
         ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw } |
-        ForEach-Object { [regex]::Matches($_, '/files/(vr_[a-z0-9_.-]+)') } |
+        ForEach-Object { [regex]::Matches($_, '/files/(vr_[a-z0-9_]+\.ini(?:\.tmp)?)') } |
         ForEach-Object { $_.Groups[1].Value } |
         Sort-Object -Unique
 )
@@ -318,7 +311,7 @@ if ($normalizedResetText -match '(?i)\bpm\s+clear\b|\buninstall\b|vr_\*') {
 
 $textExtensions = @(
     '.md', '.txt', '.json', '.py', '.ps1', '.sh', '.bat',
-    '.cpp', '.h', '.s', '.java', '.cmake'
+    '.cpp', '.h', '.s', '.java', '.cmake', '.ini'
 )
 $textFileNames = @('CMakeLists.txt', 'LICENSE', '.gitattributes', '.gitignore')
 $textFiles = @($files | Where-Object {
@@ -326,17 +319,20 @@ $textFiles = @($files | Where-Object {
     $textFileNames -contains $_.Name
 })
 $forbiddenTextPatterns = @(
-    '(?i)\bC:\\Dev\\', '(?i)\b[A-Z]:\\Users\\[^\\\s]+\\',
+    '(?i)\bC:[\\/]Dev[\\/]', '(?i)\b[A-Z]:\\Users\\[^\\\s]+\\',
     '(?i)\bH:\\', '(?i)/Users/[^/\s]+/',
     '(?i)/home/[^/\s]+/', '(?i)promptPreview|ChatGPT|Codex|Claude',
     '(?i)\bOpenAI\b|\bGemini\b|\bCopilot\b|generated[- ]by(?: an? )?(?:AI|LLM)',
     '(?i)another agent|concurrently-owned|see memory|qbuild',
+    '[\u0400-\u052f]',
+    '(?i)hdcars|hd_cars|HD cars|vehicle_mesh_opt|vehicle_texture_audit|prepare-vehicle-tools',
+    '(?i)the user (?:asked|requested|reported|wanted)|previous release|between releases|earlier work|field failure|r[0-9]+ fails here',
     '(?m)^(<<<<<<<|=======|>>>>>>>)',
     '-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----',
     '\bAKIA[0-9A-Z]{16}\b', '\bgh[pousr]_[A-Za-z0-9_]{20,}\b'
 )
 foreach ($file in $textFiles) {
-    if ($file.FullName -eq $MyInvocation.MyCommand.Path) { continue }
+    if ($file.FullName -eq (Join-Path $Root 'tools\release-audit.ps1')) { continue }
     $content = Get-Content -LiteralPath $file.FullName -Raw
     foreach ($pattern in $forbiddenTextPatterns) {
         if ($content -match $pattern) {

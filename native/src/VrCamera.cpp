@@ -1,4 +1,11 @@
+#include "PlayerLife.h"
+#include "MissionHud.h"
+#include "Tbone.h"
+#include "BeachDance.h"
+#include "MissionScenes.h"
+#include "JustBusiness.h"
 #include "VrCamera.h"
+#include "VrFire.h"
 
 #include "AircraftHlod.h"
 #include "Calib.h"
@@ -15,7 +22,14 @@
 #include "RenderDiagnostics.h"
 #include "PerfTelemetry.h"
 #include "PhysicalWeapon.h"
+#include "Melee.h"
+#include "TrackingRecovery.h"
+#include "VehicleCabin.h"
 #include "ScopeAim.h"
+#include "MissionControls.h"
+#include "Catalyst.h"
+#include "Swimming.h"
+#include "BoatEntry.h"
 #include "StereoSurfacePolicy.h"
 #include "Symbols.h"
 #include "TrafficCensus.h"
@@ -85,11 +99,8 @@ constexpr char kHiddenAreaMaskProperty[] = "debug.savr.hidden_area_mask";
 constexpr bool kDefaultPhoneDistanceProfile = true;
 constexpr char kPhoneDistanceProfileProperty[] =
     "debug.savr.phone_distance";
-// The balanced population profile previously lived only in volatile Android
-// debug properties.  Make it part of the same reversible phone profile so a
-// headset reboot cannot silently restore the dense 93 m retail churn.  The
-// global car cap intentionally remains stock: the ambient gate counts only
-// civilian random traffic and explicitly passes wanted/police generation.
+// Persist the balanced population profile with phone settings. The ambient
+// gate counts civilian traffic while preserving wanted/police generation.
 constexpr int kPhoneAmbientCarTarget = 10;
 constexpr float kPhonePedDensityScale = 0.70f;
 constexpr int kPhoneAmbientPedCap = 10;
@@ -108,9 +119,7 @@ constexpr float kDefaultStreetPropFloorM = 0.0f;
 // in VR, but extending every bin/fence/light at once is expensive while the
 // game thread is still the limiting resource.
 constexpr float kDefaultSmallPostFloorM = 0.0f;
-// CPU-bounded tiers for the silhouettes the user can actually watch pop.  Keep
-// them independent from the broad bins/dumpsters experiment: the latter touches
-// hundreds of candidates per frame in dense streets.
+// Keep silhouette distance tiers independent from the higher-volume small-prop scan.
 constexpr float kDefaultSilhouettePropFloorM = 0.0f;
 constexpr float kDefaultTrafficSignalFloorM = 0.0f;
 constexpr float kDefaultShortVegetationFloorM = 0.0f;
@@ -150,10 +159,7 @@ constexpr char kTargetedRadialVisibilityProperty[] =
 constexpr bool kDefaultTargetedBigLodBypass = false;
 constexpr char kTargetedBigLodBypassProperty[] =
     "debug.savr.targeted_big_lod_bypass";
-// Population has a separate 80 m real-object/dummy shell for breakable props.
-// Retail transfers the same RwObject across that handoff, so it is not the
-// renderer seam diagnosed below. Keep the old experiment available only as an
-// explicit lifecycle diagnostic; zero is the production default.
+// Population transfers the RwObject across its 80 m real-object/dummy boundary. This diagnostic defaults off.
 constexpr float kPhoneTargetedPropPromotionM = 0.0f;
 constexpr float kTargetedPropPromotionHysteresisM = 20.0f;
 constexpr char kTargetedPropPromotionProperty[] =
@@ -181,19 +187,7 @@ constexpr char kVisibilityWitnessProperty[] =
 // this circle are visited through retail ScanSectorList.  Zero is exact stock.
 constexpr float kDefaultNearbySectorScanM = 0.0f;
 constexpr char kNearbySectorScanProperty[] = "debug.savr.nearby_scan_m";
-// ConstructRenderList copies the time-cycle camera far plane into
-// CRenderer::ms_fFarClipPlane before ScanWorld.  Retail mobile can drive that
-// value down to 60 m; SetupMapEntityVisibility then caps every ordinary
-// (non-BIG) map model at `far + collision radius`, regardless of its IDE draw
-// distance or the phone-distance floors above.  The reproducible vgs_palm04
-// witness measured exactly 60 + 7.7 = 67.7 m while the model was resident.
-// Scope a reversible floor to the headset render-list scan only.  The retail
-// value is restored before ConstructRenderList continues, so weather fog,
-// camera projection and all non-VR/cutscene passes keep their original value.
-// Global ScanWorld widening is an emergency compatibility option only.  It
-// makes every model use the larger radius and was measured to add substantial
-// CPU/GPU work without fixing the targeted prop seam.  The normal profile uses
-// a per-entity scoped far value below instead.
+// Scope the far-clip floor to headset entity admission and restore retail state before rendering.
 constexpr float kPhoneStaticVisibilityFarFloorM = 0.0f;
 constexpr char kStaticVisibilityFarFloorProperty[] =
     "debug.savr.visibility_far_m";
@@ -219,9 +213,7 @@ constexpr float kAircraftLodFarMarginM = 100.0f;
 constexpr float kAircraftLodMaxFarClipM = 5000.0f;
 constexpr float kAircraftLodEngageAltitudeM = 45.0f;
 constexpr float kAircraftLodDisengageAltitudeM = 30.0f;
-// Retail already reaches roughly 2.2 at the top of the user's measured
-// take-off, so an altitude/150 target below that was a no-op.  Start at the
-// retail high-altitude baseline and add deterministic AGL compensation.
+// Add deterministic above-ground altitude compensation to the retail high-altitude LOD baseline.
 constexpr float kAircraftLodBaseLowLodScale = 2.2f;
 constexpr float kAircraftLodShortestRootDrawDistanceM = 400.0f;
 constexpr float kAircraftLodMaxLowLodScale = 4.0f;
@@ -342,15 +334,7 @@ constexpr int kAircraftOrdinaryRadialReplaySectorLimit = 512;
 constexpr int kAircraftOrdinaryRadialSectorSnapshotLimit = 4096;
 constexpr int kAircraftOrdinaryInnerAngularBins = 12;
 constexpr int kAircraftOrdinaryInnerRadialBins = 4;
-// A second, independent 16x3 roster is chosen only after the complete 300 m
-// static disk is known.  It carries substantial rootless inner candidates into
-// the next stock scan, where their per-call radial threshold can be widened
-// before retail would discard them.  The former 12x2 grid left only two radial
-// representatives in each broad direction; the flight capture still showed a
-// boundary house toggling while the complete candidate set stayed healthy.
-// Forty-eight world-space cells remain a small, resident-only fixed budget but
-// retain enough angular/radial samples that pitch and yaw no longer choose a
-// different sparse city slice.
+// Select a resident-only 16x3 roster after the complete 300 m static disk is known.
 constexpr int kAircraftOrdinaryStockMaxAngularBins = 16;
 constexpr int kAircraftOrdinaryStockMaxRadialBins = 3;
 constexpr int kAircraftOrdinaryStockMaxLimit =
@@ -393,20 +377,10 @@ constexpr int kAircraftOrdinaryPrefetchCaptureLimit =
 constexpr int kAircraftOrdinaryPrefetchRequestBudget = 2;
 constexpr int kAircraftOrdinaryOmniPrefetchRequestBudget = 1;
 constexpr int kAircraftOrdinaryPrefetchQueueLimit = 8;
-// A one-child authored parent forced by the aircraft root shell can otherwise
-// coexist with its fully opaque detail child in the ordinary render list.  On
-// mobile the two meshes have too little depth separation to be a stable
-// fallback and were observed to fight while head pitch changed.  Keep full
-// detail through a fixed 300 m aircraft disk, then choose the already-confirmed
-// cheap parent exclusively.  All list mutation below is fail-closed and
-// requires exact one-to-one membership in both retail arrays.
+// Retain full detail inside 300 m, then select an exclusive parent using exact retail-array membership.
 constexpr float kAircraftOpaqueChildMinimumExclusiveDistanceM = 300.0f;
 constexpr int kAircraftOpaqueChildCaptureLimit = 256;
-// The completed-list pass is narrower than the rejected proxy experiments: it
-// removes only an exact opaque linked child when its authored parent is already
-// retained in the retail LOD array.  This extends the same child/parent
-// exclusivity proof to multi-child parents beyond the fixed detail disk.  The
-// unrelated untextured megamesh stays disabled.
+// Remove an opaque linked child only when its authored parent is retained in the retail LOD array.
 constexpr bool kAircraftFinalListChildPruneEnabled = true;
 constexpr bool kAircraftMegaMeshEnabled = false;
 // The per-entity shell proved both expensive and incomplete in dense cities.
@@ -500,9 +474,7 @@ static_assert(kAircraftOrdinaryOmniPrefetchRequestBudget <=
 // calculation and selects a larger base coefficient for the fixed VR FOV.
 // Zero preserves exact retail.
 constexpr float kDefaultTrafficGenerationTarget = 0.0f;
-// Only genuinely off-screen, non-protected ambient cars reach GTA's special
-// removal branch.  Zero keeps the previous 170*G shell; 80/95 select a smaller
-// inner retention radius while visible/new cars retain the normal 170*G path.
+// Off-screen unprotected ambient traffic uses the configured inner radius; visible/new cars retain 170*G.
 constexpr float kDefaultTrafficOffscreenRetentionM = 0.0f;
 constexpr char kTrafficOffscreenRetentionProperty[] =
     "debug.savr.traffic_offscreen_m";
@@ -1602,13 +1574,7 @@ struct CullFrameCounters {
 CullFrameCounters g_profCull{};
 std::atomic<bool> g_targetedOcclusionHookActive{false};
 
-// GTA's stock entity occlusion is driven by the mono/mobile camera and is not
-// safe inside the physical headset view.  The old Quest workaround disabled it
-// for every large vegetation/roadside target, including hundreds of metres
-// behind the player.  Keep stock occlusion outside a wide HMD cone, but retain a
-// short one-way grace after an entity leaves that cone so a head turn cannot
-// expose a one-frame pop.  This cache is fixed-size and GameThread-owned: no
-// allocation, atomics or emulated TLS occur in the per-entity path.
+// Bypass mono-camera occlusion in the HMD cone with a short exit grace. The cache is fixed-size and GameThread-owned.
 constexpr std::uint32_t kTargetedOcclusionGraceMs = 1500u;
 constexpr std::uint32_t kTargetedOcclusionCacheStaleMs = 10000u;
 constexpr std::size_t kTargetedOcclusionCacheCapacity = 2048u;
@@ -2477,6 +2443,14 @@ V3 TrackingToGame(const CamBasis& base, V3 v) {
 
 struct Origin { bool valid{}; V3 pos; Q ori; };
 Origin g_origin{};
+std::uint64_t g_cameraResetSerial{};
+void TraceTracking(const char* event,V3 point) {
+    if(FILE* f=std::fopen("/sdcard/Android/data/com.rockstargames.gtasa/files/vr_tracking.log","a")) {
+        std::fprintf(f,"%.0f %s reset=%llu pos=(%.3f %.3f %.3f)\n",NowMs(),event,
+            (unsigned long long)g_cameraResetSerial,point.x,point.y,point.z);
+        std::fclose(f);
+    }
+}
 
 void EnsureOrigin(V3 headPos, const Q& headOri) {
     if (g_origin.valid) return;
@@ -2484,6 +2458,7 @@ void EnsureOrigin(V3 headPos, const Q& headOri) {
     const float yaw = std::atan2(-fwd.x, -fwd.z);
     g_origin.valid = true;
     g_origin.pos   = headPos;
+    TraceTracking("ORIGIN",headPos);
     g_origin.ori   = {0.0f, std::sin(yaw * 0.5f), 0.0f, std::cos(yaw * 0.5f)};
     LOGI("[vr] tracking origin recentred (yaw %.1f deg)",
          static_cast<double>(yaw * 57.2958f));
@@ -3182,6 +3157,7 @@ bool MobileMenuOpen() {
 }
 
 bool ShouldRunStereo() {
+    if (missionscenes::Theater()) return false;
     // Retail deliberately skips ConstructRenderList/RenderScene at a fully
     // opaque camera fade, but continues updating the flat GameSurface with
     // DoFade/UI. Follow that path in theater instead of letting XR reject a
@@ -3203,6 +3179,8 @@ bool ShouldRunStereo() {
     // onto the flat surface. Present the theater screen instead — that is
     // where the menu lives, and it re-enables the laser pointer.
     if (MobileMenuOpen()) return false;
+    // DANCE locks locomotion throughout play; its verified beach phase has a VR HUD.
+    if (beachdance::Active()) return true;
     // Scripted shop interfaces (barber chair, clothes stores, tattoo, food
     // menus...) disable player controls and run a scripted 2D camera with
     // touch widgets. In stereo we stomp that camera with the live head pose
@@ -3316,7 +3294,7 @@ bool FormalCutsceneRunning() {
 }
 
 bool ScriptedCutsceneRunning() {
-    if (FormalCutsceneRunning() || !g.TheCamera) {
+    if (FormalCutsceneRunning() || !g.TheCamera || beachdance::Active()) {
         g_scriptedCutsceneLastWideMs = -1.0;
         return false;
     }
@@ -3337,6 +3315,7 @@ bool ScriptedCutsceneRunning() {
 }
 
 bool CutsceneCameraControlsActiveInternal() {
+    if (missionscenes::Theater()) return false;
     if (FormalCutsceneRunning()) return locomotion::CutsceneMode() != 0;
     if (ScriptedCutsceneRunning()) return locomotion::GameCutsceneMode() != 0;
     return false;
@@ -3469,6 +3448,67 @@ void RefreshCutsceneCameraState() {
     g_cutsceneCameraActor = selected;
 }
 
+using PhotoCommandsFn = int (*)(void*,int);
+PhotoCommandsFn g_origPhotoCommands{};
+
+bool PhotoViewActive() {
+    const auto state=scopeaim::Snapshot();
+    return g_stereoActive.load(std::memory_order_relaxed) &&
+           state.active && state.weaponType==43;
+}
+
+bool BuildPhotoView(CamBasis& view, bool publishPose) {
+    if (!g_stereoActive.load(std::memory_order_relaxed) || !g_vrBaseValid || !g_origin.valid)
+        return false;
+    float p[3]{},q[4]{};
+    if (!xr::GetHeadPose(p,q)) return false;
+    V3 relPos;Q relOri;
+    RelativePose({p[0],p[1],p[2]},{q[0],q[1],q[2],q[3]},relPos,relOri);
+    const CamBasis candidate=BuildVrCamera(g_vrBase,relPos,relOri);
+    if (!Finite(candidate.pos)||!Finite(candidate.forward)||!Finite(candidate.right)||!Finite(candidate.up)) return false;
+    view=candidate;
+    // The same head pose must accompany these zoomed pixels into OpenXR.
+    if (publishPose) xr::SetRenderHeadPose(p,q);
+    return true;
+}
+
+int OnPhotoCommands(void* script,int opcode) {
+    if (opcode!=0x0801 || !PhotoViewActive() || !g.TheCamera)
+        return g_origPhotoCommands(script,opcode);
+    auto* bytes=static_cast<unsigned char*>(g.TheCamera);
+    const unsigned active=bytes[0x5f];
+    if(active>=3) return g_origPhotoCommands(script,opcode);
+    // Android GET_CAMERA_FOV reads CCam directly (@43e7f0), not CDraw's
+    // render FOV. Supply the real optic angle only while that opcode runs.
+    auto* fov=reinterpret_cast<float*>(bytes+active*0x228+0x204);
+    const float saved=*fov, zoomed=scopeaim::RenderFovX(kVrFovX);
+    *fov=zoomed;
+    const int result=g_origPhotoCommands(script,opcode);
+    *fov=saved;
+    return result;
+}
+
+bool ReadEntityWorldPosition(const void* entity,V3* out);
+bool StabilizeRemoteCamera(CamBasis& base) {
+    void* remote=driving::GetRemoteControlledVehicle();
+    if(!remote||*reinterpret_cast<const std::uint16_t*>(static_cast<const char*>(remote)+0x32)!=501)
+        return false;
+    V3 target{};if(!ReadEntityWorldPosition(remote,&target))return false;
+    target.z+=0.35f;
+    V3 delta=base.pos-target;
+    const float length=std::sqrt(Dot(delta,delta));
+    if(!Finite(delta)||!std::isfinite(length)||length<0.05f)return false;
+    // Fixed 6m radius, independent of speed or the retail zoom spring.
+    base.pos=target+delta*(6.0f/length);
+    base.forward=delta*(-1.0f/length);
+    V3 right{-base.forward.y,base.forward.x,0};
+    const float side=std::sqrt(Dot(right,right));
+    if(side<0.01f)return false;
+    base.right=right*(1.0f/side);
+    base.up=Cross(base.forward,base.right);
+    return true;
+}
+
 void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
     static thread_local bool inHook = false;
 
@@ -3482,7 +3522,14 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
     if (stereo && !inHook && self == g.TheCamera) {
         inHook = true;
         float hp[3], hq[4];
-        if (xr::GetHeadPose(hp, hq)) {
+        std::uint64_t epoch{};
+        if (xr::GetHeadPose(hp, hq, &epoch)) {
+            static std::uint64_t trackingEpoch=~std::uint64_t{0};
+            if(trackingEpoch!=epoch) {
+                trackingEpoch=epoch;
+                RequestRecenter();
+                LOGI("[tracking] camera/holsters rebased epoch=%llu",(unsigned long long)epoch);
+            }
             // Pair this frame with the pose it is rendered at, for reprojection.
             xr::SetRenderHeadPose(hp, hq);
 
@@ -3516,19 +3563,28 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                 locomotion::GameCutsceneMode() != 0 &&
                 EffectiveCutsceneCameraIndex() == 0;
 
-            // Stable first-person anchor. Vehicle state is deliberately resolved
-            // before the ped matrix: during enter-car the seated skin and vehicle
-            // are already valid while CPed::m_matrix can still be null/stale. A
-            // ped-first gate here used to leave `base` at the stock chase camera.
+            if (!cutsceneRunning && !ScriptedCutsceneRunning() && StabilizeRemoteCamera(base)) {
+                g_vrBase=base;g_vrBaseValid=true;
+            }
+            // Resolve vehicle state before the ped matrix because seated vehicles may be valid during matrix initialization.
             if (void* ped = (!cutsceneRunning && !gameplayCinematic &&
+                             !driving::GetRemoteControlledVehicle() &&
+                             !driving::IsCraneControlActive() &&
                              g.FindPlayerPed)
-                    ? g.FindPlayerPed(-1) : nullptr) {
+                    ? g.FindPlayerPed(-1) : nullptr; ped && !playerlife::Dead(ped)) {
                 void* vehicle = g.FindPlayerVehicle ?
                     g.FindPlayerVehicle(-1, false) : nullptr;
                 const bool enteringVehicle = g.PlayerIsEnteringCar &&
                     g.PlayerIsEnteringCar();
                 const bool thirdPersonView = vehicle != nullptr &&
                     !enteringVehicle && driving::ThirdPersonViewActive();
+                // The combine's tall, forward cab magnifies horizon-lock and
+                // world-height smoothing into metres of apparent cockpit drift.
+                // Keep the entire seated view in its rigid vehicle frame.
+                const bool rigidCombineCabin = vehicle != nullptr &&
+                    !enteringVehicle && !thirdPersonView &&
+                    *reinterpret_cast<const std::uint16_t*>(
+                        static_cast<const char*>(vehicle) + 0x32) == 532;
                 constexpr float kEyeHeightStanding = 0.72f;
                 constexpr float kEyeForward = 0.12f;
                 constexpr float kVehicleFallbackEyeHeight = 0.85f;
@@ -3618,15 +3674,19 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                 // without depending on Android's animation evaluation order.
                 static void* cachedSeatVehicle = nullptr;
                 static V3 cachedSeatLocal{};
-                static bool cachedSeatLocalValid = false;
-                if (vehicle != cachedSeatVehicle) {
+                static tracking::SeatLatch seatLatch;
+                bool& cachedSeatLocalValid=seatLatch.valid;
+                const bool resetSeat=seatLatch.Begin(enteringVehicle?nullptr:vehicle,
+                    g_cameraResetSerial,NowMs());
+                if (vehicle != cachedSeatVehicle || resetSeat) {
                     cachedSeatVehicle = vehicle;
                     cachedSeatLocal = {};
                     cachedSeatLocalValid = false;
                 }
 
+                const bool rearPassenger=justbusiness::Active();
                 const bool seatedDriver = vehicle &&
-                    (!g.CVehicle_IsDriver || g.CVehicle_IsDriver(vehicle, ped));
+                    (rearPassenger || !g.CVehicle_IsDriver || g.CVehicle_IsDriver(vehicle, ped));
                 if (thirdPersonView && vehiclePositionValid) {
                     // Chase view: anchor directly on the game's own camera.
                     // No seated-head capture, no suspension smoothing — the
@@ -3674,27 +3734,29 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                     anchorSource = "chase-cam";
                 } else if (vehicle && !enteringVehicle && vehiclePositionValid &&
                     seatedDriver) {
-                    // PC SA VR anchors a seated view on CJ's animated BONE_HEAD,
-                    // then applies the vehicle calibration.  The earlier Quest
-                    // fallback used the vehicle origin + a fixed height, which
-                    // is the model centre rather than the driver's seat and put
-                    // the headset around the bonnet on long cars.  Query the
-                    // Force the mobile skin hierarchy to the current seated pose.
-                    // This matches the PC mod's live BONE_HEAD camera and avoids
-                    // caching the door/enter animation as a permanent seat point.
-                    // Aircraft cockpits sit far from the model origin (the
-                    // Hydra pilot is metres ahead of centre): the compact car
-                    // envelope rejected the live head bone there and the view
-                    // fell back to mid-fuselage — "the camera is not in the
-                    // cockpit". Widen both gates for heli/boat/plane hulls.
+                    // Update the mobile skin hierarchy and use BONE_HEAD for seated views. Aircraft require a larger cabin envelope.
                     const int seatedAppearance =
                         g.CVehicle_GetVehicleAppearance
                             ? g.CVehicle_GetVehicleAppearance(vehicle) : 0;
                     const bool bigAirframe = seatedAppearance == 3 ||
                         seatedAppearance == 4 || seatedAppearance == 5;
+                    const auto seatedModel=*reinterpret_cast<const std::uint16_t*>(
+                        static_cast<const char*>(vehicle)+0x32);
+                    const bool stableSanchez=!rearPassenger && seatedModel==468;
+                    const bool combineCabin=!rearPassenger && seatedModel==532;
+                    const bool largeCabin=bigAirframe || combineCabin;
+                    if(combineCabin && !cachedSeatLocalValid) {
+                        GameSymbols::Vec3 eye{};
+                        if(vehiclecabin::ReadCombineEye(g,&eye)) {
+                            cachedSeatLocal={eye.x,eye.y,eye.z};
+                            cachedSeatLocalValid=true;
+                            TraceTracking("COMBINE CABIN",cachedSeatLocal);
+                        }
+                    }
+                    const bool stableSeat=stableSanchez || (combineCabin && cachedSeatLocalValid);
                     V3 seatedHead{};
                     bool seatedHeadValid = false;
-                    if (g.CPed_GetBonePosition) {
+                    if (!stableSeat && g.CPed_GetBonePosition) {
                         GameSymbols::Vec3 gameHead{};
                         g.CPed_GetBonePosition(ped, &gameHead, 5, true);
                         seatedHead = V3{gameHead.x, gameHead.y, gameHead.z};
@@ -3702,21 +3764,27 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                         seatedHeadValid = Finite(seatedHead) &&
                             Dot(seatedHead, seatedHead) > 0.01f &&
                             Dot(fromVehicle, fromVehicle) <
-                                (bigAirframe ? 225.0f : 16.0f);
+                                (largeCabin ? 225.0f : 16.0f);
                     }
-                    if (seatedHeadValid && vehicleBasisValid) {
+                    if (stableSanchez) {
+                        // Stable neutral Sanchez rider pose. Never capture a braking,
+                        // wheelie or render-only lean animation as a permanent seat.
+                        cachedSeatLocal={0.0f,-0.14f,0.95f};
+                        cachedSeatLocalValid=true;
+                    }
+                    if (!stableSeat && seatedHeadValid && vehicleBasisValid) {
                         const V3 delta = seatedHead - vehiclePosition;
                         const V3 candidate{
                             Dot(delta, vehicleRight),
                             Dot(delta, vehicleForward),
                             Dot(delta, vehicleUp)};
-                        // IsDriver is already true, so accept the live cabin bone
-                        // without the old clamp that pinned CJ to the door side.
-                        if (std::abs(candidate.x) < (bigAirframe?3.0f:1.2f) &&
-                            std::abs(candidate.y) < (bigAirframe?12.0f:2.5f) &&
-                            candidate.z > (bigAirframe?-3.0f:-0.5f) &&
-                            candidate.z < (bigAirframe?5.0f:2.5f)) {
-                            if (!cachedSeatLocalValid) {
+                        // Accept the live cabin bone once IsDriver is true.
+                        if (std::abs(candidate.x) < (largeCabin?3.0f:1.2f) &&
+                            std::abs(candidate.y) < (largeCabin?12.0f:2.5f) &&
+                            candidate.z > (largeCabin?-3.0f:-0.5f) &&
+                            candidate.z < (largeCabin?5.0f:2.5f)) {
+                            if (seatLatch.Capture(NowMs())) {
+                                const bool firstCapture=!cachedSeatLocalValid;
                                 cachedSeatLocal = candidate;
                                 // A rider sits on the bike's centreline. The
                                 // capture can land mid lean/mount animation
@@ -3729,7 +3797,8 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                                     cachedSeatLocal.x = 0.0f;
                                 }
                                 cachedSeatLocalValid = true;
-                                LOGI("[camera] seated live head=(%.2f %.2f %.2f)",
+                                if(firstCapture)TraceTracking("SEAT",cachedSeatLocal);
+                                if(firstCapture) LOGI("[camera] seated live head=(%.2f %.2f %.2f)",
                                      cachedSeatLocal.x, cachedSeatLocal.y,
                                      cachedSeatLocal.z);
                             }
@@ -3742,14 +3811,7 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                             vehicleUp * cachedSeatLocal.z;
                         usedSeatedHead = true;
                         anchorSource = "head-local";
-                        // Air bail-out: the game keeps the vehicle+driver
-                        // relation through the jump-out animation, so this
-                        // branch used to pin the camera to the empty seat
-                        // while CJ fell away. When the LIVE head bone leaves
-                        // the cached seat, follow it out. AIRCRAFT ONLY and a
-                        // generous 1m gate: on bikes the animated head swings
-                        // past 0.6m over mere kerbs, which lurched the camera
-                        // sideways/down on the Sanchez.
+                        // For aircraft bail-out, follow the live head after it leaves the cached seat by more than one metre.
                         const V3 seatToHead = seatedHead - anchorPosition;
                         if (seatedHeadValid && bigAirframe &&
                             Dot(seatToHead, seatToHead) > 1.0f) {
@@ -3770,7 +3832,7 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                     // limiter tracks the sustained vertical rate (hills ride
                     // through 1:1 after ~0.1s) and only clips what EXCEEDS
                     // that trend: the high-frequency suspension jolts.
-                    {
+                    if (!rigidCombineCabin) {
                         static void* smoothedVehicle = nullptr;
                         static float smoothedZ = 0.0f;
                         static float lastTargetZ = 0.0f;
@@ -3872,6 +3934,7 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                         static bool  g_bodyYawSet = false;
                         static bool  g_snapLatched = false;
                         static bool  g_wasDriving = false;
+                        static bool  g_wasBeachDance = false;
                         const float authoredYaw = std::atan2(-anchorFx, anchorFy);
                         // Keep the animated CJ head as the positional anchor
                         // during entry, and follow the BODY yaw through the
@@ -3908,7 +3971,8 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                             // air bail-out — defer the reseed until it is
                             // valid instead of snapping the yaw to north.
                             static bool g_yawReseedPending = false;
-                            if (!g_bodyYawSet || g_wasDriving)
+                            if (!g_bodyYawSet || g_wasDriving ||
+                                (beachdance::Active() && !g_wasBeachDance))
                                 g_yawReseedPending = true;
                             if (g_yawReseedPending && pedMatrixValid) {
                                 g_bodyYaw = std::atan2(-pedFx, pedFy);
@@ -3942,8 +4006,9 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                             // sticks"), and the D-pad has nothing to drive while
                             // flying anyway.
                             const bool thumbrestOwnsTurn =
-                                (in.thumbrest[0] || in.thumbrest[1]) &&
-                                !jetpack::IsActive();
+                                beachdance::Active() ||
+                                ((in.thumbrest[0] || in.thumbrest[1]) &&
+                                 !jetpack::IsActive());
                             const float rx =
                                 thumbrestOwnsTurn ? 0.0f : mappedTurnX;
                             const double now=NowMs();
@@ -3980,6 +4045,7 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                             }
                         }
                         g_wasDriving = useVehicleFrame;
+                        g_wasBeachDance = beachdance::Active();
                         const float yaw = g_bodyYaw;
                         const float sy = std::sin(yaw), cy = std::cos(yaw);
                         const V3 fwd { -sy, cy, 0.0f };
@@ -4004,7 +4070,7 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                             }();
                         const bool carTilt = vehicle != nullptr &&
                             !thirdPersonView && vehicleBasisValid &&
-                            driving::CarCameraTiltEnabled() &&
+                            (rigidCombineCabin || driving::CarCameraTiltEnabled()) &&
                             g.CVehicle_GetVehicleAppearance &&
                             g.CVehicle_GetVehicleAppearance(vehicle) == 1;
                         const bool boatTilt = vehicle != nullptr &&
@@ -4048,9 +4114,7 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                                     base.up=V3{0.0f,0.0f,1.0f};
                                 }
                             } else {
-                                // Follow the actual SA render-only lean matrix.
-                                // The ordinary entity matrix above never rolls,
-                                // which previously made ON and OFF identical.
+                                // Follow the render-only lean matrix; the entity matrix does not roll.
                                 base.right=(visualBasisValid?
                                     visualRight:vehicleRight)*-1.0f;
                                 base.forward=visualBasisValid?
@@ -4095,7 +4159,8 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                         // camera stays on the plain ped/entry-head anchor. The
                         // chase view sits exactly on the stock camera and takes
                         // no seat or eye-forward offsets at all.
-                        if (vehicle != nullptr && !thirdPersonView) {
+                        if (rearPassenger)justbusiness::detail::FaceRear(base);
+                        if (vehicle != nullptr && !thirdPersonView && !rearPassenger) {
                             seatSide=static_cast<float>(
                                 driving::GetActiveSeatSideCm())/100.0f;
                             // The selected category/mode global seat and the
@@ -4110,10 +4175,15 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                             (vehicle != nullptr && !thirdPersonView) ? vehicleUp :
                             V3{0.0f, 0.0f, 1.0f};
                         const float eyeForward =
-                            thirdPersonView ? 0.0f : kEyeForward;
+                            thirdPersonView ? 0.0f : (rearPassenger?-kEyeForward:kEyeForward);
+                        // Seat calibration must rotate around the same cab as
+                        // the model dummy and wheel, including pitch and roll.
+                        const bool rigidSeatAxes = rigidCombineCabin && vehicleBasisValid;
+                        const V3 seatForwardAxis = rigidSeatAxes ? vehicleForward : fwd;
+                        const V3 seatRightAxis = rigidSeatAxes ? vehicleRight : right;
                         base.pos = anchorPosition + heightAxis * seatHeight +
-                                   fwd * (eyeForward + seatDistance) +
-                                   right * seatSide;
+                                   seatForwardAxis * (eyeForward + seatDistance) +
+                                   seatRightAxis * seatSide;
                         static void* loggedVehicle = nullptr;
                         static bool loggedHead = false;
                         if (vehicle != loggedVehicle || usedSeatedHead != loggedHead) {
@@ -4542,6 +4612,10 @@ int OnWidgetJustPressed(int widgetId, void* outTouchPos, int touchIndex) {
     const int original = g_origWidgetJustPressed
         ? g_origWidgetJustPressed(widgetId, outTouchPos, touchIndex) : 0;
     LogWidgetPoll("justpressed", widgetId);
+    if (!original && missioncontrols::TouchJustPressed(widgetId)) {
+        FillTouchPos(outTouchPos);
+        return 1;
+    }
     if (!original && PromptAnswerableWidget(widgetId) &&
         NowMs() < g_promptPressUntilMs.load(std::memory_order_relaxed)) {
         g_promptPressUntilMs.store(0.0, std::memory_order_relaxed);
@@ -4584,14 +4658,40 @@ int OnWidgetDoubleTapped(int widgetId, int quick, int touchIndex) {
     const int original = g_origWidgetDoubleTapped
         ? g_origWidgetDoubleTapped(widgetId, quick, touchIndex) : 0;
     LogWidgetPoll("doubletap", widgetId);
+    if (!original && missioncontrols::TouchDoubleTapped(widgetId)) return 1;
     return original;
 }
 
 bool PromptAnswerableWidget(int widgetId);
 
+using GetTextFn=const char16_t*(*)(void*,const char*);
+GetTextFn g_origGetText=nullptr;
+const char16_t* OnGetText(void* self,const char* key) {
+    if(ShouldRunStereo()&&key) {
+        if(std::strcmp(key,"DRV3_3")==0)return u"Press A to snatch the package.";
+        if(std::strcmp(key,"DRV3_H")==0)return u"Get close to a package, then press A to snatch it.";
+    }
+    return g_origGetText?g_origGetText(self,key):nullptr;
+}
+
 bool OnWidgetReleased(int widgetId, void* outTouchPos, int touchIndex) {
     const bool original = g_origWidgetReleased &&
         g_origWidgetReleased(widgetId, outTouchPos, touchIndex);
+    if (widgetId==66) {
+        const bool result=tbone::WidgetReleased(original);
+        if(result)FillTouchPos(outTouchPos);
+        return result;
+    }
+    // ZERO4 uses widget 67 for both cargo pickup and bomb release. Keep it
+    // out of the generic R2/L2 dialogue-pair matcher while piloting RC Goblin.
+    if (widgetId == 67 && driving::IsRemoteCargoControlActive()) {
+        if (original) return true;
+        if (driving::RemoteCargoActionPressed()) {
+            FillTouchPos(outTouchPos);
+            return true;
+        }
+        return false;
+    }
     // HUD tutorial buttons (stats view and friends) accept a direct R2 tap
     // through their own window: the continuously-polled 168/31 yes/no pair
     // consumes the shared accept window before these are ever asked.
@@ -4797,12 +4897,55 @@ void OnUpdatePads() {
     const bool openChord = bothGrips && (in.menu || in.y);   // B is weapon fire now
     const bool inputBlocked = g_inputBlocked.load(std::memory_order_relaxed);
     const bool stereo = ShouldRunStereo();
+    // Publish from gameplay input, independently of the optional flat HUD pass.
+    const int torenoSignal=stereo?missionhud::TorenoSignal(
+        g.CUserDisplay_OnscnTimer,g.CTheScripts_ScriptSpace):-1;
+    xr::PublishTorenoSignal(torenoSignal);
+    static int lastSignal=-2;
+    static double nextSignalLog=0;
+    if (lastSignal!=torenoSignal && (torenoSignal<0||lastSignal<0||NowMs()>=nextSignalLog)) {
+        lastSignal=torenoSignal;nextSignalLog=NowMs()+1000;
+        if (FILE* f=std::fopen("/sdcard/Android/data/com.rockstargames.gtasa/files/vr_toreno_signal.log","a")) {
+            std::fprintf(f,"source percent=%d timer=%p script=%p stereo=%d\n",
+                torenoSignal,g.CUserDisplay_OnscnTimer,g.CTheScripts_ScriptSpace,stereo?1:0);
+            std::fclose(f);
+        }
+    }
+    beachdance::SetInput(stereo && !inputBlocked && !bothGrips,
+                        in.rightStick[0],in.rightStick[1]);
+    const bool remoteControl = driving::GetRemoteControlledVehicle() != nullptr;
+    const bool craneControl = driving::IsCraneControlActive();
+    missioncontrols::UpdateInput(in, stereo && !inputBlocked && !bothGrips && !beachdance::Active() &&
+                                    !remoteControl && !craneControl);
+    swimming::UpdateInput(stereo && !inputBlocked && !bothGrips && !beachdance::Active() &&
+                          !remoteControl && !craneControl &&
+                          !vrfire::IsScriptedWeaponCamera() && !(in.l3 && in.r3));
+    void* actionPad=g.CPad_GetPad?g.CPad_GetPad(0):nullptr;
+    const bool actionControls=actionPad&&
+        *reinterpret_cast<const std::uint16_t*>(static_cast<const char*>(actionPad)+0x110)==0;
+    // Both grips are normal handlebar input: stealing must work while holding
+    // the bike. Block the actual menu chord, not the grips by themselves.
+    tbone::UpdateInput(stereo&&!inputBlocked&&!openChord&&actionControls, in.a);
     driving::UpdateInput(in, stereo, inputBlocked);
 
     const bool vehicleButtonAllowed =
-        stereo && !inputBlocked && !bothGrips && !openChord;
-    g_vrEnterExitJustDown.store(vehicleButtonAllowed && yJustDown,
+        stereo && !inputBlocked && !bothGrips && !openChord && !beachdance::Active() &&
+        !remoteControl && !craneControl && !vrfire::IsScriptedWeaponCamera();
+    const bool boatPress=vehicleButtonAllowed && yJustDown && enterOnFoot &&
+                         boatentry::TryEnter();
+    g_vrEnterExitJustDown.store(vehicleButtonAllowed && yJustDown && !boatPress,
                                 std::memory_order_release);
+
+    if (boatPress) {
+        // Native boarding may replace the swim task and seat CJ immediately.
+        // Discard this frame's on-foot gestures/pad state before car control.
+        swimming::UpdateInput(false);
+        if (void* boatPad=g.CPad_GetPad?g.CPad_GetPad(0):nullptr) {
+            auto* state=static_cast<std::int16_t*>(boatPad);
+            for (const int index:{0,1,2,3,14,16,17}) state[index]=0;
+        }
+        return;
+    }
 
     if (!stereo || g.CPad_GetPad == nullptr || inputBlocked) {
         // Clear the published hydraulics/beat state on the way out. A latched
@@ -4819,6 +4962,45 @@ void OnUpdatePads() {
     // NewState is the first member of CPad; LeftStickX at +0x00, LeftStickY at
     // +0x02, both int16 in [-128,127]. Forward (stick pushed up) must be negative.
     auto* ns = reinterpret_cast<int16_t*>(pad);
+    if (beachdance::Active()) {
+        // The existing car-gun hooks feed opcode 0494; leave general pad input neutral.
+        for (const int index : {0,1,2,3,8,9,10,11,14,16,17}) ns[index]=0;
+        g_vrEnterExitJustDown.store(false,std::memory_order_release);
+        hydraulics::SetStick(false,0,0);
+        int beatMs=0;
+        const int beat=hydraulics::PollBeat(&beatMs);
+        xr::SetBeatArrow(beat,beatMs);
+        return;
+    }
+    if (vrfire::IsScriptedWeaponCamera() || catalyst::Active()) {
+        // Attached mission control owns movement and its own trigger path.
+        for (const int index : {0, 1, 2, 3, 14, 16, 17}) ns[index] = 0;
+        g_vrEnterExitJustDown.store(false, std::memory_order_release);
+        return;
+    }
+    // RC models and cranes use the native remote camera and machinery axes.
+    // CJ remains on foot, so applying his head-relative movement or crouch
+    // here would steal the mission controls.
+    if (remoteControl || craneControl) {
+        const auto axis = [](float value) -> int16_t {
+            return std::isfinite(value)
+                ? static_cast<int16_t>(std::clamp(value, -1.0f, 1.0f) * 127.0f)
+                : 0;
+        };
+        ns[0] = bothGrips ? 0 : axis(mappedMoveX);
+        void* remoteVehicle=driving::GetRemoteControlledVehicle();
+        const bool invertPitch=remoteVehicle&&g.CVehicle_GetVehicleAppearance&&
+            g.CVehicle_GetVehicleAppearance(remoteVehicle)==5&&
+            driving::IsPlanePitchInverted();
+        ns[1] = bothGrips ? 0 : axis(invertPitch?mappedMoveY:-mappedMoveY);
+        ns[2] = bothGrips ? 0 : axis(mappedTurnX);
+        ns[3] = bothGrips ? 0 : axis(-mappedTurnY);
+        ns[14] = craneControl && !bothGrips && in.triggers[0] >= 0.5f ? 255 : 0;
+        ns[16] = craneControl && !bothGrips && in.triggers[1] >= 0.5f ? 255 : 0;
+        ns[17] = !bothGrips && in.b ? 255 : 0;
+        g_duckLatched = false;
+        return;
+    }
 
     // Immersive jetpack: while the rocket-belt task owns the player the two
     // controllers ARE the belt's handles. This fully replaces the on-foot
@@ -4864,7 +5046,8 @@ void OnUpdatePads() {
     // interactions - and turning is suppressed in the turn handler. On foot
     // only: vehicles keep their whole stick vocabulary (Hydra nozzles!).
     const bool dpadModeNow =
-        (in.thumbrest[0] || in.thumbrest[1]) && vehicle == nullptr;
+        (in.thumbrest[0] || in.thumbrest[1]) && vehicle == nullptr &&
+        !(scopeaim::Snapshot().active && scopeaim::Snapshot().weaponType == 43);
     static bool dpadModeWas = false;
     if (dpadModeNow != dpadModeWas) {
         dpadModeWas = dpadModeNow;
@@ -4903,7 +5086,7 @@ void OnUpdatePads() {
         };
         lx = expo(lx);
         ly = expo(ly);
-        if (flightAppearance == 5) ly = -ly;   // planes: forward = nose down
+        if (flightAppearance == 5) ly *= driving::IsPlanePitchInverted()?1.0f:-1.0f;
         ns[0] = static_cast<int16_t>(std::clamp(lx, -1.0f, 1.0f) *  127.0f);
         ns[1] = static_cast<int16_t>(std::clamp(ly, -1.0f, 1.0f) * -127.0f);
         ns[2] = static_cast<int16_t>(
@@ -5034,23 +5217,16 @@ void OnUpdatePads() {
         }
     }
 
-    // Gesture locomotion: arm-swing running on land, physical swim strokes
-    // in water (toggleable in LOCOMOTION settings). Applied after the stick
-    // writes so a real stick push always wins over the gesture.
+    if(vehicle==nullptr && GroundWalkControlsActive())
+        ns[16]=locomotion::RunEnabled() && !g_duckLatched ? 255 : 0;
+
+    // Arm-swing running is land-only. Swimming owns native water velocity.
+    // Apply after stick writes so a real stick push wins over arm running.
     {
         void* gesturePed = g.FindPlayerPed ? g.FindPlayerPed(-1) : nullptr;
-        bool swimming = false;
-        if (gesturePed) {
-            // CPhysical flags dword at +0x64 (disasm: ApplyForce @0x4a12a8);
-            // bit 8 = bSubmergedInWater, maintained by CPed::ProcessBuoyancy.
-            std::uint32_t physicalFlags = 0;
-            std::memcpy(&physicalFlags,
-                        static_cast<const std::uint8_t*>(gesturePed) + 0x64,
-                        sizeof(physicalFlags));
-            swimming = (physicalFlags & 0x100u) != 0;
-        }
+        const bool swimming = missioncontrols::IsSwimming();
         const bool gestureBlocked = gesturePed == nullptr ||
-            vehicle != nullptr || ParachuteStateActive();
+            vehicle != nullptr || ParachuteStateActive() || g_duckLatched;
         gesturemove::Result gm{};
         gesturemove::Update(gesturePed, swimming, gestureBlocked, gm);
         if (gm.forward > 0.0f) {
@@ -5081,7 +5257,7 @@ void OnUpdatePads() {
                                in.a,in.b,in.x,in.y,in.l3,in.r3,true))
         ns[17] = 255;
 
-    // Crouch on L3, driven straight through the duck secondary task. Every
+    // Crouch on R3, driven straight through the duck secondary task. Every
     // mobile PAD path is dead: GetDuck (@0x49ef8c) and DuckJustDown
     // (@0x49f018) poll touch widgets and additionally early-out before the
     // poll in VR — the widget bridge never even saw widget 32 asked for.
@@ -5104,7 +5280,12 @@ void OnUpdatePads() {
         bool& duckLatched = g_duckLatched;
         static bool duckL3Prev = false;
         static double duckClickAtMs = 0.0;
-        const bool duckL3 = vehicle == nullptr &&
+        const bool swimming = missioncontrols::IsSwimming();
+        // Releasing R3 slightly before L3 after recenter is not a new crouch.
+        static bool recenterReleaseGuard=false;
+        if(in.l3 && in.r3)recenterReleaseGuard=true;
+        if(!in.l3 && !in.r3)recenterReleaseGuard=false;
+        const bool duckL3 = !recenterReleaseGuard && vehicle == nullptr && !swimming &&
             locomotion::ActionHeld(locomotion::BIND_ACT_CROUCH,
                                    in.a,in.b,in.x,in.y,in.l3,in.r3,true) &&
             !(in.l3 && in.r3);
@@ -5112,13 +5293,13 @@ void OnUpdatePads() {
         if (duckL3 && !duckL3Prev && duckNowMs - duckClickAtMs > 400.0) {
             duckClickAtMs = duckNowMs;
             duckLatched = !duckLatched;
-            LOGI("[vr.touch] crouch toggle (L3) -> %s",
+            LOGI("[vr.touch] crouch toggle -> %s",
                  duckLatched ? "duck" : "stand");
         }
         duckL3Prev = duckL3;
         // A ducked ped cannot reliably start the enter-vehicle task, so the
         // enter/exit press always restores standing first.
-        if (vehicle != nullptr || in.y) duckLatched = false;
+        if (vehicle != nullptr || in.y || swimming) duckLatched = false;
         if (g.FindPlayerPed && g.CPedIntelligence_SetTaskDuckSecondary &&
             g.CPedIntelligence_ClearTaskDuckSecondary &&
             g.CPedIntelligence_GetTaskDuck) {
@@ -5316,10 +5497,7 @@ void OnUpdatePads() {
         g_promptHudUntilMs.store(0.0, std::memory_order_relaxed);
     }
 
-    // Diagnostics for the reported body-turn movement bug: while walking,
-    // dump the movement frame every two seconds so a log capture shows where
-    // the rotation chain breaks (raw stick -> transformed NewState ->
-    // physical head yaw -> resulting ped heading).
+    // Log the movement-frame transform chain every two seconds while walking.
     if (vehicle == nullptr &&
         (std::abs(in.leftStick[0]) > 0.3f ||
          std::abs(in.leftStick[1]) > 0.3f)) {
@@ -6080,11 +6258,7 @@ struct LodHandoffCounters {
 
 bool ReadEntityWorldPosition(const void* entity, V3* out);
 
-// Diagnostic-only visibility witness. Previous distance experiments proved
-// that the intended hooks were active, yet the palm/lamp pop observed in-headset
-// did not move. Track the retail SetupMap decisions by entity identity so a
-// user drive records the actual model ID and distance where an object first
-// enters this path or changes admission state. No render value is modified.
+// Track retail SetupMap admission by entity identity without changing render values.
 struct VisibilityTraceSlot {
     const void* entity{};
     int modelId{-1};
@@ -6458,9 +6632,7 @@ void TraceMapVisibilityDecision(void* entity, void* linkedLod, int entityType,
     static thread_local double lastPriorityOwnerMs = 0.0;
     const bool regularDetail =
         (first || changed) && g_visibilityTraceWindow.detailLines < 4;
-    // model 718 is the user's reproducible vgs_palm04 witness. Reserve one
-    // line every 500 ms across every result, not just STREAMME, so the exact
-    // transition into (or failure to enter) the render list is visible.
+    // Sample model 718 (vgs_palm04) admission transitions at most once per 500 ms.
     const bool priorityOwner = modelId == 718 &&
         nowMs - lastPriorityOwnerMs >= 500.0;
     if (regularDetail || priorityOwner) {
@@ -7974,6 +8146,7 @@ RenderOneNonRoadFn g_origRenderOneNonRoad = nullptr;
 RenderAlphaEntityFn g_origRenderAlphaEntity = nullptr;
 RenderVehicleHiDetailFn g_origRenderVehicleHiDetail = nullptr;
 RenderVehicleHiDetailAlphaFn g_origRenderVehicleHiDetailAlpha = nullptr;
+RenderVehicleHiDetailAlphaFn g_origRenderBoatHiDetailAlpha = nullptr;
 AtomicDefaultRenderFn g_origAtomicDefaultRender = nullptr;
 GetIsOnScreenFn g_origGetIsOnScreen = nullptr;
 thread_local void* g_visibilityCurrentRenderEntity = nullptr;
@@ -10698,10 +10871,7 @@ bool AppendAircraftMegaMeshEntity(void* entity,
             ++stats.geometryRejected;
             return false;
         }
-        // Very thin collision bounds are predominantly road, plaza and terrain
-        // slabs.  The old box fallback rejected them entirely, leaving the blue
-        // holes reported from the aircraft.  Preserve just their top rectangle:
-        // two triangles, no walls/bottom and therefore negligible extra cost.
+        // Represent thin road, plaza and terrain bounds with their top rectangle only.
         const bool flatSurface = half.z < 1.5f;
         const int vertexCount = flatSurface ? 4 : 8;
         const int indexCount = flatSurface ? 6 : 30;
@@ -11413,14 +11583,7 @@ AircraftOpaqueChildExclusiveStats ApplyAircraftOpaqueChildExclusivity(
                 ++stats.invalid;
                 continue;
             }
-            // The cutover is a world-space ground disk, not 3D camera range or
-            // the model's often city-block-sized authored bound.  The previous
-            // conservative overlap test classified every measured child as
-            // near (eligible/pruned stayed 0/0), so head pitch still traded
-            // roughly 60..70 detailed children against their already-retained
-            // parents.  Bounds above remain a fail-open structural check; once
-            // both exact pivots are outside the fixed disk, keep the parent
-            // exclusively. Altitude and head orientation cannot change this.
+            // Use horizontal world-space distance for the ground-disk cutover.
             if (childDistanceM <= g_aircraftOpaqueChildCutoverM ||
                 parentDistanceM <= g_aircraftOpaqueChildCutoverM) {
                 ++stats.nearSkips;
@@ -12040,6 +12203,77 @@ void QueueAircraftSupplementalLodRequest(void* entity, void* modelInfo,
             g_aircraftSupplementalLodScanActive,
         };
     }
+}
+
+// Boat alpha insertions are inlined in the retail callback (0x605250), so the
+// general entity-list dedupe cannot catch them. Keep one submission per atomic
+// in the shared frame list, including when the right eye records it again.
+AlphaListNode* FindBoatAlphaNode(void* atomic) {
+    auto* head=static_cast<AlphaListNode*>(g.CVisibilityPlugins_m_alphaBoatAtomicList);
+    if (!head||!atomic) return nullptr;
+    auto* tail=head+1;
+    auto* previous=head;
+    auto* node=head->next;
+    for (int count=0;count<20&&node!=tail;++count) {
+        if (!node||(reinterpret_cast<std::uintptr_t>(node)&7u)||
+            node->previous!=previous||!node->next) return nullptr;
+        if (node->object==atomic) return node;
+        previous=node; node=node->next;
+    }
+    return nullptr;
+}
+
+void RenderBoatAlphaNoDepthWrite(void* atomic,float distance) {
+    if (!g.CVisibilityPlugins_RenderAtomic) return;
+    // Transparent hull windows must not mask later foliage/effect passes.
+    // Preserve depth testing and restore the exact producer-side RW state.
+    std::uintptr_t savedWrite=0;
+    const bool scoped=g_renderingStereoEyeIndex>=0&&g.RwRenderStateSet&&
+        g.RwRenderStateGet&&g.skipBlendRender&&g.skipNonblendRender&&
+        g.rpSkipBlendRender&&g.rpSkipNonblendRender&&g.RwRenderStateGet(8,&savedWrite);
+    if (!scoped) { g.CVisibilityPlugins_RenderAtomic(atomic,distance); return; }
+    // Boat atomics can contain both solid hull and glass materials. Keep the
+    // solid depth, then use the retail material filter for the blended meshes.
+    const bool savedBlend=*g.skipBlendRender,savedNonblend=*g.skipNonblendRender;
+    g.rpSkipBlendRender(true);
+    g.rpSkipNonblendRender(false);
+    g.CVisibilityPlugins_RenderAtomic(atomic,distance);
+    g.rpSkipBlendRender(false);
+    g.rpSkipNonblendRender(true);
+    g.RwRenderStateSet(8,nullptr);
+    g.CVisibilityPlugins_RenderAtomic(atomic,distance);
+    g.RwRenderStateSet(8,reinterpret_cast<void*>(savedWrite));
+    g.rpSkipBlendRender(savedBlend);
+    g.rpSkipNonblendRender(savedNonblend);
+}
+
+void* OnRenderBoatHiDetailAlpha(void* atomic) {
+    if (!g_origRenderBoatHiDetailAlpha) return atomic;
+    if (g_renderingStereoEyeIndex<0) return g_origRenderBoatHiDetailAlpha(atomic);
+    const auto stock=reinterpret_cast<void*>(g.CVisibilityPlugins_RenderAtomic);
+    const auto wrapped=reinterpret_cast<void*>(&RenderBoatAlphaNoDepthWrite);
+    if (auto* node=FindBoatAlphaNode(atomic)) {
+        if (node->callback==stock||node->callback==wrapped) {
+            node->callback=wrapped;
+            return atomic;
+        }
+    }
+    // The alpha callback is selected by material opacity, but retail only
+    // queues components also tagged ATOMIC_ALPHA by their model hierarchy.
+    // Queue these mixed/glass atomics as well, instead of writing glass depth
+    // before the world's fading entities and foliage have been drawn.
+    const int offset=g.CVisibilityPlugins_ms_atomicPluginOffset?
+        *g.CVisibilityPlugins_ms_atomicPluginOffset:0;
+    if (!atomic||offset<0x70||offset>0x400)
+        return g_origRenderBoatHiDetailAlpha(atomic);
+    auto* flags=reinterpret_cast<std::uint16_t*>(static_cast<char*>(atomic)+offset+2);
+    const bool wasAlpha=(*flags&0x40u)!=0;
+    *flags|=0x40u;
+    void* result=g_origRenderBoatHiDetailAlpha(atomic);
+    if (!wasAlpha) *flags&=static_cast<std::uint16_t>(~0x40u);
+    if (auto* node=FindBoatAlphaNode(atomic);node&&node->callback==stock)
+        node->callback=wrapped;
+    return result;
 }
 
 void* OnRenderVehicleHiDetailAlpha(void* atomic) {
@@ -14829,13 +15063,7 @@ bool OnGenerateCarCreationCoors2(
             const float planarY = forward.y / planarLength;
             const float rightX = planarY;
             const float rightY = -planarX;
-            // The previous recovery anchor sat directly in the HMD cone, while
-            // the verified retail epilogue bridge intentionally accepts only an
-            // unseen vehicle.  That contradiction produced two births in 38
-            // rescue calls and eventually drained civilians to zero at six
-            // stars.  Rotate the bounded search through +/-95 and +/-125 degree
-            // sectors: a 35 m road search around the 140 m anchor remains beyond
-            // the 70 degree HMD cone, yet inside the real-vehicle retention shell.
+            // Search +/-95 and +/-125 degree sectors at 140 m to stay outside the HMD cone and inside traffic retention.
             constexpr std::array<std::array<float, 2>, 4> kSectorBasis{{
                 {{-0.08715574f,  0.99619470f}},
                 {{-0.08715574f, -0.99619470f}},
@@ -15709,12 +15937,7 @@ __attribute__((noinline)) void OnGenerateOneRandomCar() {
             }
         }
         if (wantedLevel == 1u && directorReady) {
-            // One star has no vehicle-pursuit demand, but the old generic
-            // wanted branch still suppressed every ordinary civilian call. The
-            // resulting 500/750 ms side-sector rescue could not keep pace with
-            // Rhino churn. Refill only the missing effective civilian class
-            // through one bounded stock-placement transaction; when the class
-            // is full, retain the existing rare forward-field maintenance.
+            // At one star, refill only missing civilian demand through one bounded stock-placement transaction.
             if (classCivilianDeficit) {
                 if (tryWantedOneCivilianFallback()) return;
             } else if (forwardCivilianDeficit &&
@@ -15734,12 +15957,7 @@ __attribute__((noinline)) void OnGenerateOneRandomCar() {
             !runtime.preferLawWhenBothDue && tryLocalCivilianAttempt()) {
             return;
         }
-        // GenerateRandomCars can call GenerateOneRandomCar one hundred times in
-        // a single frame.  The previous reserve therefore ran the complete road
-        // search about 150 times per second while wanted, starving both the game
-        // thread and civilian flow.  A pursuit vehicle cannot be usefully added
-        // at that rate; sample the expensive chooser at a bounded cadence while
-        // leaving stock's own post-success cooldown intact.
+        // Throttle expensive pursuit road searches while preserving the retail post-success cooldown.
         const bool directorFrameReady =
             runtime.directorTransactionFrameToken != currentFrameToken;
         bool pursuitCadenceReady = directorFrameReady;
@@ -18073,12 +18291,7 @@ AircraftLodDiskStats ScanAircraftCoarseLodDisk(
         stats.stop = AircraftLodDiskStop::InvalidCamera;
         return stats;
     }
-    // The authored BIG grid is finite, but the player camera is allowed to
-    // cross its +/-3000 m edge.  Rejecting that perfectly valid pose disabled
-    // the complete coarse shell at the airport/world boundary.  The fixed
-    // 30x30 loop below already computes circle/sector intersection against the
-    // finite grid, so an outside camera safely visits only reachable edge
-    // cells (or none when its disk no longer intersects the map).
+    // Intersect the aircraft footprint with the finite 30x30 BIG grid, including cameras outside its boundary.
     const double wallStart = NowMs();
     const double cpuStart = perf::ThreadCpuMs();
 
@@ -18092,9 +18305,7 @@ AircraftLodDiskStats ScanAircraftCoarseLodDisk(
     int candidateCount = 0;
     const float fullRadiusM = std::min(
         profile.groundRadiusM, kAircraftLodSupplementalMaxRadiusM);
-    // Use the entire requested footprint from the first aircraft frame. The
-    // old 500 m take-off disk exposed a large ring that neither the retail
-    // HMD wedge nor the root-only disk owned consistently.
+    // Use the requested footprint from the first aircraft frame.
     stats.radiusM = fullRadiusM;
     const float radiusSq = stats.radiusM * stats.radiusM;
     for (int sectorY = 0; sectorY < kAircraftBigSectorCount; ++sectorY) {
@@ -18394,12 +18605,7 @@ bool BetterAircraftOrdinaryCandidateGeometry(
 bool BetterAircraftOrdinaryRadialCandidate(
         const AircraftOrdinaryRadialCandidate& candidate,
         const AircraftOrdinaryRadialCandidate& current) {
-    // retained/replaySafe are the two outcomes of the CURRENT camera-frustum
-    // test. Ranking either one first made the chosen object inside a fixed
-    // world-space cell change when the pilot only pitched their head. Preserve
-    // a previously proven cell owner first (also pitch-independent), then rank
-    // only by stable live geometry. This keeps the fade witness aligned while
-    // the aircraft moves and the replay path warms a replacement.
+    // Prefer a proven cell owner, then rank by stable geometry independently of head pitch.
     if (candidate.wasPersistentProven != current.wasPersistentProven)
         return candidate.wasPersistentProven;
     return BetterAircraftOrdinaryCandidateGeometry(candidate, current);
@@ -19242,11 +19448,7 @@ bool SelectAircraftOrdinaryRadialCandidates() {
         if (!selectIndex(bestIndex)) break;
         ++selectedFar;
     }
-    // Preserve the near/far reservation when both rings have enough content,
-    // but never strand the fixed outer allowance over water or a sparse ring.
-    // Borrow only after each original share has exhausted its own candidates;
-    // prefer 300..400 m when both have leftovers because this is the reported
-    // middle-hole band.
+    // Preserve ring reservations and borrow unused quota only after each ring exhausts its candidates.
     while (selectedNear + selectedFar <
            g_aircraftOrdinaryOuterPriorityLimit) {
         bool unselectedNearExists = false;
@@ -20214,11 +20416,7 @@ void RenderGameplayHudPass() {
     // calls stay purely as the publish source for the VR text layers.
     if (g.CMessages_Display) g.CMessages_Display(1);
     if (g.CMessages_Display) g.CMessages_Display(0);
-    // CHud::DrawAfterFade is deliberately NOT recorded into this capture: it
-    // paints script text, subtitles, zone/vehicle names and mission titles —
-    // the strings that used to mix into the health crop. The stock 2D pass
-    // still runs it on the flat Android surface every frame, so its fade
-    // state machines keep advancing normally.
+    // Exclude CHud::DrawAfterFade from the health capture while retaining its flat-surface state updates.
 
     // CMessages::Display has now expanded numbers, inserted strings and copied
     // the final GXT text into CHud. Publish those characters directly instead
@@ -20250,13 +20448,13 @@ void RenderGameplayHudPass() {
     xr::PublishHudText(g.CHud_m_Message,400,g.CHud_m_BigMessage,8,128,
                        helpText,400);
 
-    // Mission clock/counters. The stock flat pass keeps running
-    // CHud::DrawMissionTimers -> COnscreenTimer::ProcessForDisplay, so the
-    // formatted ASCII strings in CUserDisplay::OnscnTimer stay fresh; read
-    // them here and publish for the APK-font TIMERS layer. Layout matches
+    // Legacy formatted mission clock/counter text. Android DrawMissionTimers
+    // does NOT refresh these display buffers. The Toreno signal instead reads
+    // the registered script variable in OnUpdatePads, independent of this pass.
+    // Publish available formatted text for the APK-font TIMERS layer. Layout matches
     // the PC headers and the Android DrawMissionTimers disasm (m_bDisplay at
     // +0x150): clock entry 0x40 bytes (text +0x0e, enabled +0x38), then four
-    // 0x44-byte counters (text +0x18, enabled +0x42).
+    // 0x44-byte counters (Android text +0x14, enabled +0x3e).
     char timersText[224];
     int timersLength=0;
     if (g.CUserDisplay_OnscnTimer) {
@@ -20281,8 +20479,11 @@ void RenderGameplayHudPass() {
                         timer[0x38]!=0);
             for (int counter=0;counter<4;++counter) {
                 const std::uint8_t* entry=timer+0x40+counter*0x44;
-                appendEntry(reinterpret_cast<const char*>(entry+0x18),
-                            entry[0x42]!=0);
+                // The signal has its own labelled gauge; do not duplicate
+                // its bare number in the general timer text.
+                if (!missionhud::IsTorenoSignal(entry))
+                    appendEntry(reinterpret_cast<const char*>(entry+0x14),
+                                entry[0x3e]!=0);
             }
         }
     }
@@ -20302,6 +20503,14 @@ void RenderGameplayHudPass() {
                 if (written>0)
                     timersLength+=written<room-1?written:room-1;
             }
+        }
+    }
+    if (beachdance::Active()) {
+        const int room=static_cast<int>(sizeof(timersText))-timersLength;
+        if (room>1) {
+            const int written=std::snprintf(timersText+timersLength,room,
+                "%sDANCE %d",timersLength?"\n":"",beachdance::Score());
+            if (written>0)timersLength+=std::min(written,room-1);
         }
     }
     while (timersLength>0&&timersText[timersLength-1]=='\n') --timersLength;
@@ -20588,9 +20797,7 @@ void OnRenderScene(bool underwater) {
     const int w = *reinterpret_cast<int*>(reinterpret_cast<char*>(origColor) + 0x18);
     const int h = *reinterpret_cast<int*>(reinterpret_cast<char*>(origColor) + 0x1c);
 
-    // Reflection/water passes must retain their original targets. Match the
-    // registered retail surface, not an eye-size heuristic: Quest 2's landscape
-    // frontend is 1440x1008 and the old >=1024 height gate rejected its world.
+    // Preserve reflection and water targets; match the registered retail surface for stereo admission.
     const std::uint64_t gameSurfaceSize =
         g_gameSurfaceSize.load(std::memory_order_acquire);
     const int gameSurfaceWidth = static_cast<int>(gameSurfaceSize >> 32);
@@ -20719,9 +20926,7 @@ void OnRenderScene(bool underwater) {
         RenderQueueFinishEyeOverlapRequested();
     const bool eyeSetBackingRequested = overlapFinishWithLeftEye &&
         RenderQueueEyeSetBackingRequested();
-    // Never stack the old after-both lifetime experiment on the generation
-    // A/B.  If a ticket cannot be captured, the new path must fall back to the
-    // accepted after-left drain even when a stale device property is still 1.
+    // Use the after-left drain when a generation ticket is unavailable.
     const bool overlapFinishWithEyeSet = overlapFinishWithLeftEye &&
         !eyeSetBackingRequested && RenderQueueFinishEyeSetOverlapRequested();
     bool eyeSetBackingCaptured = false;
@@ -20824,7 +21029,11 @@ void OnRenderScene(bool underwater) {
     ScopedPedRenderDistanceOverride pedRenderDistanceOverride;
     inHook = true;
     const std::uintptr_t camU = reinterpret_cast<std::uintptr_t>(g.TheCamera);
-    const CamBasis base = ReadCam(camU);
+    CamBasis base = ReadCam(camU);
+    // A late native camera copy may contain the ped's heading. Rebuild the
+    // photographic eye basis from the actual head pose before narrowing it.
+    // Zoom affects only the frustum; it never moves or rotates this anchor.
+    if (PhotoViewActive()) BuildPhotoView(base,true);
     unsigned char black[4] = {0, 0, 0, 255};
 
     // Build one eye-independent draw list from the physical ownership state. A
@@ -20905,7 +21114,8 @@ void OnRenderScene(bool underwater) {
     if (cutsceneFirstPersonHead) {
         headHideClump = *reinterpret_cast<void**>(
             static_cast<std::uint8_t*>(g_cutsceneCameraActor) + 0x20);
-    } else if (playerPed && playerInVehicle &&
+    } else if (playerPed && !playerlife::Dead(playerPed) && !FormalCutsceneRunning() &&
+               !ScriptedCutsceneRunning() && playerInVehicle &&
                driving::GetMode() != driving::MODE_IMMERSIVE &&
                !driving::ThirdPersonViewActive()) {
         headHideClump = *reinterpret_cast<void**>(
@@ -20944,8 +21154,9 @@ void OnRenderScene(bool underwater) {
 
     // Immersive driving, or ordinary driving with immersive drive-by, keeps
     // the physical weapon system live in the seat.
+    const bool scriptedWeaponCamera = vrfire::IsScriptedWeaponCamera();
     const bool vehicleImmersiveWeapons = playerInVehicle &&
-        driving::VehicleWeaponsImmersive();
+        (driving::VehicleWeaponsImmersive() || scriptedWeaponCamera);
     if (playerPed && g_vrBaseValid &&
         (!playerInVehicle || vehicleImmersiveWeapons)) {
         // Held models. The exact final matrix is fed back in OpenXR LOCAL space;
@@ -20957,10 +21168,7 @@ void OnRenderScene(bool underwater) {
             RwMat heldMatrix{};
             if (!HandWeaponMatrix(hand, weaponType, heldMatrix)) continue;
 
-            // The newer Quest two-hand path rotates the already calibrated,
-            // model-bound one-hand pose around the primary controller. Publish
-            // BASE separately from FINAL so the support socket never feeds its
-            // own previous-frame rotation back and accumulates drift.
+            // Publish one-hand BASE separately from two-hand FINAL to prevent support-pose feedback.
             physicalweapon::TrackingPose basePose{};
             physicalweapon::TrackingPose finalPose{};
             float twoHandPivot[3]{}, twoHandAxis[3]{};
@@ -21076,7 +21284,7 @@ void OnRenderScene(bool underwater) {
                 (occupied & (1u << slot)) != 0) continue;
             // Seated: show only the holsters a driver can actually draw from
             // (the grab filter enforces the same sidearm rule).
-            if (vehicleImmersiveWeapons &&
+            if (vehicleImmersiveWeapons && !scriptedWeaponCamera &&
                 !physicalweapon::IsVehicleSidearmWeaponType(weaponType))
                 continue;
             RwMat holsterMatrix{};
@@ -21167,14 +21375,7 @@ void OnRenderScene(bool underwater) {
     float eyeFarClip = g.RwCameraSetFarClipPlane
         ? std::max({savedFarClip, requestedFarClip, aircraftEyeFarClip})
         : savedFarClip;
-    // A camera-depth fog plane necessarily rotates with HMD yaw and pitch.
-    // During every stereo world pass, neutralise that plane at the far edge and
-    // replace it with one world-Z radial volume.  The previous implementation
-    // enabled that volume only after the aircraft profile became active, so the
-    // ground test (and the first seated/take-off frames) still used rotating
-    // camera-depth fog despite reporting the neutral 398..400 m parameters.
-    // The feature is fail-open: without the exact mobile bridge or Im3D path,
-    // all retail fog state remains untouched.
+    // Replace camera-depth fog with a shared world-Z radial volume when the required retail bridge is available.
     const MobileDistanceFogSnapshot mobileFog = CaptureMobileDistanceFog();
     const bool aircraftFogFlight=aircraftLod.altitudeVisibilityStable;
     if (!aircraftFogFlight) {
@@ -21289,7 +21490,7 @@ void OnRenderScene(bool underwater) {
         eye.pos = base.pos + base.right * (sign * kVrHalfIpd);
         const float renderFovX = g.CDraw_ms_fFOV &&
                 std::isfinite(*g.CDraw_ms_fFOV) &&
-                *g.CDraw_ms_fFOV > 20.0f && *g.CDraw_ms_fFOV < 160.0f
+                *g.CDraw_ms_fFOV >= 5.0f && *g.CDraw_ms_fFOV < 160.0f
             ? *g.CDraw_ms_fFOV : kVrFovX;
         g_hiddenAreaMaskEye = eye;
         g_hiddenAreaMaskTanX = std::tan(
@@ -21389,8 +21590,9 @@ void OnRenderScene(bool underwater) {
             // DEFAULT vehicle mode keeps the stock seated CJ body and suppresses
             // late VR hands. IMMERSIVE uses the same eye anchor but hides CJ and
             // renders the tracked hands plus the virtual wheel instead.
-            const bool hideBody = !playerInVehicle ||
-                driving::GetMode() == driving::MODE_IMMERSIVE;
+            const bool hideBody = playerlife::HideBody(playerlife::Dead(playerPed),
+                FormalCutsceneRunning()||ScriptedCutsceneRunning(),playerInVehicle,
+                driving::GetMode()==driving::MODE_IMMERSIVE);
             ScopedPlayerBodyHide hidePlayerBody(hideBody ? playerPed : nullptr);
             airhlod::Render(eye.pos.x, eye.pos.y,
                             aircraftLod.hlodFillActive,
@@ -21488,14 +21690,7 @@ void OnRenderScene(bool underwater) {
         }
         }
 
-        // In the explicit A/B both eyes target the exclusively claimed current
-        // ring row while the pending Finish belongs to the previous row. Close
-        // it here at the latest: HUD/centre-camera work below can touch stock
-        // surfaces and must never inherit the widened lifetime.
-        // The head collapse is a render-only mask. Leaving the HAnim matrix
-        // zeroed made the next camera update alternate between the posed look
-        // direction and its root fallback. Restore before any later centre/HUD
-        // work and, crucially, before the next frame reads the actor head.
+        // Close pending Finish before HUD or centre-camera work and restore the render-only head mask.
         if (hiddenHeadMatrix) {
             *hiddenHeadMatrix = savedHiddenHead;
             hiddenHeadMatrix = nullptr;
@@ -22506,9 +22701,8 @@ bool OnGetIsOnScreen(void* entity) {
         return true;
     }
 
-    // Classify by the retail entity type, not by m_matrix: rotated IPL
-    // buildings/dummies can own a matrix and were previously misattributed as
-    // dynamic. The context exists only around the one retail visibility call.
+    // Classify by retail entity type because static IPL entities can own a matrix.
+    // Scope the context to one retail visibility call.
     const bool aircraftBigLodContext =
         g_aircraftBigLodVisibilityDepth > 0;
     const bool aircraftOrdinaryHorizonContext =
@@ -22587,11 +22781,7 @@ bool OnGetIsOnScreen(void* entity) {
         const float groundDistSq = dx * dx + dy * dy;
         const float fdot = dx * forward.x + dy * forward.y + dz * forward.z;
 
-        // Runtime entity-render evidence found the same car repeatedly
-        // disappearing and resuming at 79.8..80.0 m. It was not a spawn or LOD
-        // boundary: the entity pointer survived, while this old mono-camera
-        // short-circuit was the only exact 80 m gate. Use the current headset
-        // direction and the already-configured lifecycle ranges instead.
+        // Use headset direction and configured lifecycle ranges for vehicle visibility.
         float safetyRadiusM = 80.0f;
         if (entityType == 2) {
             const float generation = ConfiguredTrafficGenerationTarget();
@@ -23349,10 +23539,7 @@ bool OnIsSphereVisible(void* cam, const void* origin, float radius) {
             g_aircraftOrdinaryHorizonMaxSlantM > 0.0f &&
             distSq <= g_aircraftOrdinaryHorizonMaxSlantM *
                 g_aircraftOrdinaryHorizonMaxSlantM;
-        // Ground detail under an elevated aircraft must use the configured
-        // horizontal footprint.  The old 3D sphere silently shrank toward zero
-        // as altitude increased and then the HMD cone made the surviving slice
-        // change with head pitch/yaw.
+        // Use horizontal distance for ground detail beneath an elevated aircraft.
         const bool baseSafetyCall = auditedStaticCall &&
             staticSafetyM > 45.01f &&
             (aircraftRadialSafety
@@ -23434,13 +23621,7 @@ void OnScanWorld() {
         g_stereoActive.load(std::memory_order_relaxed) &&
         !(g.CCutsceneMgr_ms_running && *g.CCutsceneMgr_ms_running);
 
-    // Retail 2.11 calls ScanWorld for two different cameras every frame:
-    //   ConstructReflectionList + 0x160 -> LR base+0x4b410c
-    //   ConstructRenderList     + 0x264 -> LR base+0x4b49b8
-    // The old hook expanded both to the full headset radius. Besides doubling
-    // the sector walk, it filled the small vehicle-reflection map with distant
-    // palms that can never improve the headset view. Fail closed for every
-    // caller except the disassembly-verified main gameplay list.
+    // Widen only the main ScanWorld call at LR base+0x4b49b8; preserve the reflection call at base+0x4b410c.
     const std::uintptr_t returnAddress = reinterpret_cast<std::uintptr_t>(
         __builtin_extract_return_addr(__builtin_return_address(0)));
     const bool mainGameplayScan = headsetGameplay && g.LoadBase &&
@@ -24362,8 +24543,7 @@ void OnScanWorld() {
         ? g_staticCullCone.forward.y / horizontalLength : 0.0f;
     const int visibleBefore = g.CRenderer_ms_nNoOfVisibleEntities
         ? std::max(0, *g.CRenderer_ms_nNoOfVisibleEntities) : 0;
-    // Include the original HMD-directed scan in this request witness; counting
-    // only the supplemental delta hid the requests that matter for this fix.
+    // Include the original HMD scan in request accounting.
     const int requestsBefore = requestsAtScanEntry;
     const double wallStart = NowMs();
     const double cpuStart = perf::ThreadCpuMs();
@@ -24433,7 +24613,8 @@ void OnScanWorld() {
     g_profCull.nearbyScanCpuMs += cpuMs;
 }
 
-void* InstallTrampoline(void* target, void* replacement) {
+void* InstallTrampoline(void* target, void* replacement,
+                        std::uintptr_t boatAlphaGotPage=0) {
     const std::uintptr_t pageSize = static_cast<std::uintptr_t>(sysconf(_SC_PAGESIZE));
 
     void* tramp = mmap(nullptr, pageSize, PROT_READ | PROT_WRITE | PROT_EXEC,
@@ -24449,8 +24630,16 @@ void* InstallTrampoline(void* target, void* replacement) {
     t[5] = 0xD61F0220;                                // BR  X17
     *reinterpret_cast<void**>(t + 6) =
         reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(target) + 16);
+    // The fingerprinted boat alpha prologue starts with two ADRPs to the same
+    // GOT page. Relocate those to literal loads; copying PC-relative ADRPs into
+    // an arbitrary mmap page would dereference unrelated memory.
+    if (boatAlphaGotPage) {
+        t[0]=0x58000108u; // LDR X8, literal at trampoline+32
+        t[1]=0x580000e9u; // LDR X9, same literal (PC is trampoline+4)
+        *reinterpret_cast<std::uintptr_t*>(t+8)=boatAlphaGotPage;
+    }
     __builtin___clear_cache(reinterpret_cast<char*>(t),
-                            reinterpret_cast<char*>(t) + 32);
+                            reinterpret_cast<char*>(t) + (boatAlphaGotPage?40:32));
 
     auto* code = reinterpret_cast<uint32_t*>(target);
     const std::uintptr_t start = reinterpret_cast<std::uintptr_t>(code) & ~(pageSize - 1);
@@ -29544,6 +29733,79 @@ bool TrackingPointToWorld(const float trackingPoint[3], float worldPoint[3]) {
     return true;
 }
 
+bool FirePhotograph(void* weapon,void* ped,const float flashOrigin[3]) {
+    if (!weapon||!ped||!flashOrigin||!g.TheCamera||!g.CWeapon_Fire||
+        !g.CCamera_CalculateDerivedValues) return false;
+    CamBasis view;
+    if(!BuildPhotoView(view,false)) return false;
+    const auto cam=reinterpret_cast<std::uintptr_t>(g.TheCamera);
+    auto* bytes=static_cast<unsigned char*>(g.TheCamera);
+    const unsigned active=bytes[0x5f];if(active>=3)return false;
+    auto* mode=reinterpret_cast<std::uint16_t*>(bytes+active*0x228+0x186);
+    auto* fov=reinterpret_cast<float*>(bytes+active*0x228+0x204);
+    const auto savedMode=*mode;const float savedFov=*fov;
+    const float savedDrawFov=g.CDraw_ms_fFOV?*g.CDraw_ms_fFOV:kVrFovX;
+    const CamBasis saved=ReadCam(cam);
+    // TakePhotograph uses the CPlaceable matrix for distance/LOS as well as
+    // CCamera's derived view matrix for CalcScreenCoors. Keep both coherent.
+    void* placeable=nullptr;std::memcpy(&placeable,bytes+0x18,sizeof(placeable));
+    V3 savedAxes[4]{};const V3 axes[]{view.right,view.forward,view.up,view.pos};
+    if(placeable)for(unsigned i=0;i<4;++i){
+        auto* lane=static_cast<unsigned char*>(placeable)+i*0x10;
+        std::memcpy(&savedAxes[i],lane,sizeof(V3));std::memcpy(lane,&axes[i],sizeof(V3));
+    }
+    const float zoomed=scopeaim::RenderFovX(kVrFovX);
+    *mode=46;*fov=zoomed;WriteCam(cam,view);
+    if(g.CDraw_SetFOV)g.CDraw_SetFOV(zoomed,false);
+    if(g.CDraw_ms_fFOV)*g.CDraw_ms_fFOV=zoomed;
+    g.CCamera_CalculateDerivedValues(g.TheCamera,false,true);
+    GameSymbols::Vec3 origin{flashOrigin[0],flashOrigin[1],flashOrigin[2]};
+    const bool fired=g.CWeapon_Fire(weapon,ped,&origin,&origin,nullptr,nullptr,nullptr);
+    *mode=savedMode;*fov=savedFov;WriteCam(cam,saved);
+    if(placeable)for(unsigned i=0;i<4;++i)
+        std::memcpy(static_cast<unsigned char*>(placeable)+i*0x10,&savedAxes[i],sizeof(V3));
+    if(g.CDraw_SetFOV)g.CDraw_SetFOV(savedDrawFov,false);
+    if(g.CDraw_ms_fFOV)*g.CDraw_ms_fFOV=savedDrawFov;
+    g.CCamera_CalculateDerivedValues(g.TheCamera,false,true);
+    if(FILE* log=std::fopen("/sdcard/Android/data/com.rockstargames.gtasa/files/vr_photo.log","a")){
+        std::fprintf(log,"shot=%d fov=%.3f head=(%.2f,%.2f,%.2f) dir=(%.3f,%.3f,%.3f)\n",
+            fired,zoomed,view.pos.x,view.pos.y,view.pos.z,view.forward.x,view.forward.y,view.forward.z);
+        std::fclose(log);
+    }
+    return fired;
+}
+
+bool GetControllerThrowRay(int hand, float originOut[3], float directionOut[3]) {
+    if (hand < 0 || hand > 1 || !originOut || !directionOut ||
+        !g_stereoActive.load(std::memory_order_relaxed) || !g_vrBaseValid || !g_origin.valid)
+        return false;
+    xr::HandPose hands[2];
+    if (!physicalweapon::GetHandPosesSnapshot(hands)) xr::GetHandPoses(hands);
+    const auto& h = hands[hand];
+    if (!h.valid || !h.aimValid) return false;
+    const Q q{h.aimOri[0],h.aimOri[1],h.aimOri[2],h.aimOri[3]};
+    const V3 origin = TrackingPointToGame({h.gripPos[0],h.gripPos[1],h.gripPos[2]});
+    const V3 direction = Normalized(TrackingVectorToGame(Rotate(q,{0.0f,0.0f,-1.0f})));
+    if (!Finite(origin) || !Finite(direction) || Dot(direction,direction) < 0.5f) return false;
+    originOut[0]=origin.x;originOut[1]=origin.y;originOut[2]=origin.z;
+    directionOut[0]=direction.x;directionOut[1]=direction.y;directionOut[2]=direction.z;
+    return true;
+}
+
+bool GetHeadWorldRay(float originOut[3], float directionOut[3]) {
+    if (!originOut || !directionOut || !g_vrBaseValid || !g_origin.valid)
+        return false;
+    float position[3]{},orientation[4]{};
+    if (!xr::GetHeadPose(position,orientation)) return false;
+    const V3 eye=TrackingPointToGame({position[0],position[1],position[2]});
+    const Q q{orientation[0],orientation[1],orientation[2],orientation[3]};
+    const V3 direction=Normalized(TrackingVectorToGame(Rotate(q,{0.0f,0.0f,-1.0f})));
+    if (!Finite(eye)||!Finite(direction)) return false;
+    originOut[0]=eye.x; originOut[1]=eye.y; originOut[2]=eye.z;
+    directionOut[0]=direction.x; directionOut[1]=direction.y; directionOut[2]=direction.z;
+    return true;
+}
+
 bool WorldPointToTracking(const float worldPoint[3], float trackingPoint[3]) {
     if (!worldPoint || !trackingPoint || !g_vrBaseValid || !g_origin.valid)
         return false;
@@ -29572,7 +29834,26 @@ bool GetHolsterAnchorTracking(int point, float positionOut[3]) {
     return true;
 }
 
+bool IsCrouched(){return g_duckLatched;}
+bool GroundWalkControlsActive() {
+    if(!ShouldRunStereo() || CutsceneCameraControlsActiveInternal() ||
+       beachdance::Active() || catalyst::Active() || vrfire::IsScriptedWeaponCamera() ||
+       jetpack::IsActive() || ParachuteStateActive() || missioncontrols::IsSwimming() ||
+       driving::GetRemoteControlledVehicle() || driving::IsCraneControlActive())return false;
+    void* ped=g.FindPlayerPed?g.FindPlayerPed(-1):nullptr;
+    if(!ped || (g.CPed_IsAlive && !g.CPed_IsAlive(ped)) ||
+       (g.FindPlayerVehicle && g.FindPlayerVehicle(-1,false)))return false;
+    void* pad=g.CPad_GetPad?g.CPad_GetPad(0):nullptr;
+    return pad && *reinterpret_cast<const std::uint16_t*>(static_cast<const char*>(pad)+0x110)==0;
+}
+
 void RequestRecenter() {
+    ++g_cameraResetSerial; // also invalidates the vehicle-local seat cache
+    TraceTracking("RECENTER",g_origin.pos);
+    g_duckLatched=false;g_crouchBlend=0.0f;
+    physicalweapon::ResetTracking();
+    driving::ResetTracking();
+    melee::Reset();
     g_origin.valid=false;
     g_vrBaseValid=false;
     g_staticCullCone = {};
@@ -29617,6 +29898,11 @@ bool Install() {
     // Resolve-thread I/O: keep the first RenderScene hook free of settings-file
     // access even when the Graphics page has never been opened.
     EnsureGraphicsSettingsLoaded();
+    constexpr std::uint32_t textPrologue[]{0xd10183ffu,0xa9037bfdu,0xf90023f5u,0xa9054ff4u};
+    if(g.CText_Get&&std::memcmp(g.CText_Get,textPrologue,sizeof(textPrologue))==0) {
+        g_origGetText=reinterpret_cast<GetTextFn>(InstallTrampoline(g.CText_Get,reinterpret_cast<void*>(&OnGetText)));
+        LOGI("[tbone] native A-help text installed=%d",g_origGetText!=nullptr);
+    }
     if (g.CCamera_CopyCameraMatrixToRWCam == nullptr) {
         LOGE("[vr] CopyCameraMatrixToRWCam unresolved - no camera hook");
         return false;
@@ -29628,6 +29914,13 @@ bool Install() {
         return false;
     }
     LOGI("[vr] head-tracked camera hook installed on CopyCameraMatrixToRWCam");
+    constexpr std::uint32_t photoPrologue[]{0xd10603ffu,0x6d0e3befu,0x6d0f33edu,0x6d102bebu};
+    if(g.ProcessCommands2000To2099 &&
+       std::memcmp(g.ProcessCommands2000To2099,photoPrologue,sizeof(photoPrologue))==0) {
+        g_origPhotoCommands=reinterpret_cast<PhotoCommandsFn>(InstallTrampoline(
+            g.ProcessCommands2000To2099,reinterpret_cast<void*>(&OnPhotoCommands)));
+        LOGI("[photo] native GET_CAMERA_FOV bridge installed=%d",g_origPhotoCommands!=nullptr);
+    } else LOGE("[photo] GET_CAMERA_FOV bridge fingerprint mismatch or symbol missing");
 
     // Bind the user-facing shadow toggle to MobileSettings entry 5 and install
     // the fingerprinted eight-vehicle budget before the first gameplay frame.
@@ -29852,6 +30145,28 @@ bool Install() {
     LOGI("[driving] interior glass hook active=%d fingerprint=%d",
          g_origRenderVehicleHiDetailAlpha?1:0,
          interiorGlassFingerprint?1:0);
+
+    // This boat-specific callback has an inlined sorted-list insertion. Do not
+    // patch it on an unknown retail layout or without state save/restore.
+    const auto boatAlpha=g.CVisibilityPlugins_RenderVehicleHiDetailAlphaCB_Boat;
+    static constexpr std::uint32_t kBoatAlphaPrologue[4]={
+        0xf00011a8u,0xf00011a9u,0xf944a508u,0xf944ad29u};
+    if (boatAlpha&&g.RwRenderStateGet&&g.RwRenderStateSet&&
+        g.CVisibilityPlugins_ms_atomicPluginOffset&&
+        g.skipBlendRender&&g.skipNonblendRender&&
+        g.rpSkipBlendRender&&g.rpSkipNonblendRender&&
+        g.CVisibilityPlugins_RenderAtomic&&g.LoadBase&&
+        reinterpret_cast<std::uintptr_t>(boatAlpha)==g.LoadBase+0x605250u&&
+        reinterpret_cast<std::uintptr_t>(g.CVisibilityPlugins_m_alphaBoatAtomicList)==
+            g.LoadBase+0xcce438u&&
+        std::memcmp(reinterpret_cast<const void*>(boatAlpha),kBoatAlphaPrologue,
+                    sizeof(kBoatAlphaPrologue))==0) {
+        g_origRenderBoatHiDetailAlpha=reinterpret_cast<RenderVehicleHiDetailAlphaFn>(
+            InstallTrampoline(reinterpret_cast<void*>(boatAlpha),
+                              reinterpret_cast<void*>(&OnRenderBoatHiDetailAlpha),
+                              g.LoadBase+0x83c000u));
+    }
+    LOGI("[boat.alpha] stereo dedupe/depth hook active=%d",g_origRenderBoatHiDetailAlpha?1:0);
 
     // Mobile touch-widget bridge: player_parachute.scm polls
     // IsReleased(widget 187) for the canopy — see OnWidgetReleased above.

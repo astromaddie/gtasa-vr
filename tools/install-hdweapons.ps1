@@ -2,7 +2,7 @@
 # connected Quest. Reuses the Python, adb and (if present) 7-Zip that
 # BUILD_AND_INSTALL already downloaded. Nothing here modifies the game APK --
 # the payload lives in the app's external files dir and the mod loads it when
-# GRAPHICS -> WEAPON MODELS is set to HD.
+# MODEL SET -> HD WEAPONS is set to ON.
 #
 # The pack can be an archive OR an already-extracted folder. If the pack is a
 # .7z/.rar and no 7-Zip is on the machine, the script asks you to extract it
@@ -212,12 +212,12 @@ try {
     Write-Host ''
     Write-Host 'HD weapons installed.' -ForegroundColor Green
     Write-Host 'In the headset:' -ForegroundColor Green
-    Write-Host '  1. Open the VR menu -> GRAPHICS.'
-    Write-Host '  2. Set WEAPON MODELS to HD  (it will show a [RESTART] tag).'
+    Write-Host '  1. Open the VR menu -> MODEL SET.'
+    Write-Host '  2. Set HD WEAPONS to ON  (it will show a RESTART tag).'
     Write-Host '  3. Fully close and reopen the game.'
-    Write-Host '  4. Re-open GRAPHICS: the [RESTART] tag is gone once HD is active.'
+    Write-Host '  4. Re-open MODEL SET: the RESTART tag is gone once HD is active.'
     Write-Host 'If the row shows < NO FILES >, the payload is not where the mod looks;'
-    Write-Host 'rerun this installer. Set it back to ORIGINAL any time to undo.'
+    Write-Host 'rerun this installer. Set it back to OFF and restart to undo.'
 } finally {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $Stage
 }

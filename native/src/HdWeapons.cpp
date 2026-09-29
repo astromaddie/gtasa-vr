@@ -12,6 +12,8 @@
 // names across all registered databases. Nothing in the stock APK changes;
 // removing the files restores the original look.
 #include "HdWeapons.h"
+#include "PngRasterUpload.h"
+#include <dlfcn.h>
 
 #include <atomic>
 #include <cerrno>
@@ -198,7 +200,6 @@ void Apply() {
         g_attemptFailed = true;
         return;
     }
-    g_loadingOurDb.store(true, std::memory_order_relaxed);
     // The optional database has only 89 entries and is registered during the
     // startup/loading window.  Loading it lazily caused the first appearance
     // of each weapon to decode PNGs synchronously on the GameThread (11-42 ms
@@ -206,8 +207,7 @@ void Apply() {
     // small database once here; the large retail gta3/txd databases retain
     // their original streaming policy and the 128 MiTex cache keeps the HD
     // set resident afterwards.
-    void* db = g.TextureDatabaseRuntime_Load("hdweapons", true, 0);
-    g_loadingOurDb.store(false, std::memory_order_relaxed);
+    void* db = LoadLooseDatabase("hdweapons", true);
     if (db == nullptr) {
         LOGE("[hdweapons] texture database load failed");
         WriteStatus("failed: texture database load\n");
@@ -252,6 +252,7 @@ void Apply() {
     }
 
     int repointed = 0, missing = 0, flushed = 0, outOfRange = 0, oversized = 0;
+    int compatibilityFallbacks = 0;
     char missingNames[512]{};
     int missingLen = 0;
     bool channelsFlushed = false;
@@ -297,6 +298,16 @@ void Apply() {
             }
             continue;
         }
+        // On-device CRASH1 trace: HD fire_ex (366, 43 sectors) remains in
+        // READING with an empty request queue; the script waits at IP 39537.
+        // Re-request/LoadAllRequestedModels does not recover it. Preserve the
+        // main archive's fire extinguisher before any flush/remove/repoint.
+        // Other weapons keep their HD entries; no archive/settings edits.
+        if (modelId == 366) {
+            ++compatibilityFallbacks;
+            LOGI("[hdweapons] fire_ex=366 compatibility: main archive retained");
+            continue;
+        }
         // SA streams a model across BOTH halves of the double buffer, so the
         // largest single model it can load is 2 * ms_streamingBufferSize. A DFF
         // bigger than that cannot be read and corrupts adjacent engine memory
@@ -338,17 +349,17 @@ void Apply() {
 
     g_applied.store(true, std::memory_order_release);
     LOGI("[hdweapons] active img=%d models=%d flushed=%d unknown=%d skip=%d "
-         "oversized=%d bufsec=%d", imgIdx, repointed, flushed, missing,
-         outOfRange, oversized,
+         "oversized=%d compat=%d bufsec=%d", imgIdx, repointed, flushed, missing,
+         outOfRange, oversized, compatibilityFallbacks,
          g.CStreaming_ms_streamingBufferSize
              ? *g.CStreaming_ms_streamingBufferSize : -1);
     char status[768];
     const bool anySkip = missing || outOfRange || oversized;
     std::snprintf(status, sizeof(status),
                   "applied img=%d handle=%d entries=%u models=%d flushed=%d "
-                  "unknown=%d skipped=%d oversized=%d bufsec=%d%s%s\n",
+                  "unknown=%d skipped=%d oversized=%d compat=%d bufsec=%d%s%s\n",
                   imgIdx, handle, count, repointed, flushed, missing,
-                  outOfRange, oversized,
+                  outOfRange, oversized, compatibilityFallbacks,
                   g.CStreaming_ms_streamingBufferSize
                       ? *g.CStreaming_ms_streamingBufferSize : -1,
                   anySkip ? " names:" : "",
@@ -357,6 +368,58 @@ void Apply() {
 }
 
 }  // namespace
+
+namespace {
+using RasterCopy = void* (*)(void*, void*);
+using ImageResample = void* (*)(const void*, int, int);
+using ImageDestroy = int (*)(void*);
+RasterCopy pngRasterCopy{};
+ImageResample pngResample{};
+ImageDestroy pngDestroy{};
+
+void* OnPngRasterCopy(void* raster, void* image) {
+    // Only TextureDatabaseEntry::LoadPNG omits the resize after FindRasterFormat.
+    // Its destination is rounded DOWN to powers of two, unlike the source PNG.
+    const auto caller = reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
+    if (caller != g.LoadBase + 0x7954a0) return pngRasterCopy(raster, image);
+    return pngupload::Copy(raster, image, pngRasterCopy, pngResample, pngDestroy);
+}
+
+bool InstallPngRasterCopy() {
+    if (pngRasterCopy) return true;
+    if (!g.LoadBase || reinterpret_cast<std::uintptr_t>(g.implOnDrawFrame) != g.LoadBase + 0x7d28d4)
+        return false;
+    auto** slot = reinterpret_cast<void**>(g.LoadBase + 0x849398);
+    auto copy = reinterpret_cast<RasterCopy>(g.LoadBase + 0x76b144);
+    // Guard the retail call site and GOT target; no instruction relocation.
+    if (*slot != reinterpret_cast<void*>(copy) ||
+        *reinterpret_cast<const std::uint32_t*>(g.LoadBase + 0x79549c) != 0x9401cf85)
+        return false;
+    const auto page = static_cast<std::uintptr_t>(sysconf(_SC_PAGESIZE));
+    if (mprotect(reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(slot) & ~(page-1)),
+                 page, PROT_READ | PROT_WRITE)) return false;
+    pngResample = reinterpret_cast<ImageResample>(g.LoadBase + 0x76c048);
+    pngDestroy = reinterpret_cast<ImageDestroy>(g.LoadBase + 0x7694a8);
+    pngRasterCopy = copy;
+    __atomic_store_n(slot, reinterpret_cast<void*>(&OnPngRasterCopy), __ATOMIC_RELEASE);
+    LOGI("[hdweapons] safe PNG raster upload installed (resample to destination size)");
+    return true;
+}
+} // namespace
+
+void* LoadLooseDatabase(const char* name, bool preload) {
+    if (!name || !g.TextureDatabaseRuntime_Load || !g.TextureDatabaseRuntime_GetDatabase ||
+        !g.TextureDatabaseRuntime_SortEntries ||
+        !g.TextureDatabaseRuntime_GetDatabase("gta3") ||
+        chdir(kFilesDir) != 0 || !InstallSortEntriesHook() || !InstallPngRasterCopy()) return nullptr;
+    if (void* existing = g.TextureDatabaseRuntime_GetDatabase(name)) return existing;
+    // Both callers run on GameThread during loading. Scope this flag to our
+    // database; stock database sorting still processes its thumbnail records.
+    g_loadingOurDb.store(true, std::memory_order_relaxed);
+    void* db = g.TextureDatabaseRuntime_Load(name, preload, 0);
+    g_loadingOurDb.store(false, std::memory_order_relaxed);
+    return db;
+}
 
 bool Available() {
     // Re-check until the payload appears, then latch it for the process. This

@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
-"""Build a personal GTA San Andreas VR package from user-owned inputs.
+"""Build a GTA San Andreas VR package from supplied retail APKs and audio.
 
-This tool never downloads or redistributes GTA. It accepts an official
-2.11.311 Play split export (or a compatible single APK), validates the retail
-engine, injects the source-built VR layer, stages the user's game assets and
-the separately supplied audio mod, and signs the result with a personal key.
-
-Device installation is intentionally handled by build-and-install.ps1/.sh so
-all local validation can finish before a Quest is modified.
-"""
+Validate inputs, compile the loader, stage assets and sign the output."""
 
 from __future__ import annotations
 
@@ -445,7 +438,7 @@ def copy_limited(source, destination, limit: int, label: str) -> int:
 
 
 def prepare_aircraft_hlod(data_apk: Path, build: Path) -> None:
-    """Generate flight HLOD from the user's verified retail data split.
+    """Generate flight HLOD from the verified retail data split.
 
     Generated geometry stays below the ignored build directory. Only the
     generator and renderer are source-controlled by the public source kit.

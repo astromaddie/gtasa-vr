@@ -41,8 +41,7 @@ struct PhysicsSetting {
     int         maximum;
     int         step;
 };
-// Deliberately near-unbounded: the user calibrates by feel; only hard
-// physical absurdities (negative values) are excluded.
+// Calibration accepts non-negative values.
 constexpr PhysicsSetting kPhysicsSettings[PHYS_FIELD_COUNT] = {
     {"BOUNCE",        96, 0, 500,  2},   // percent kept per bounce
     {"GROUND GRIP",   96, 0, 500,  1},   // horizontal keep per bounce
@@ -211,9 +210,7 @@ void* g_ball = nullptr;
 int   g_ballSlot = -1;
 std::uint8_t g_ballRef = 0;
 int   g_heldHand = -1;
-// The held ball is a rigid child of the primary controller.  The old visual
-// scale helper rebuilt an identity matrix before every Teleport, so the ball
-// followed the hand position but its texture never rotated with the wrist.
+// The held ball inherits the primary controller position, orientation and scale.
 struct BallVisualBasis {
     V3 right{1.0f, 0.0f, 0.0f};
     V3 forward{0.0f, 1.0f, 0.0f};
@@ -880,11 +877,7 @@ void ApplyHandCalibration(int hand, V3& wrist, V3& meshUp,
     meshUp = RotateAroundAxis(meshUp, meshForward, roll);
 }
 
-// One pose snapshot drives BOTH the physical ball centre and the rendered
-// wrists.  The old code sampled the centre live but latched the palm basis in
-// tracking/world space at grab time; rotating a controller therefore sent the
-// ball and hand around different arcs.  This is a true rigid controller-local
-// carry transform, copied into the same stereo ring slot as the pixels.
+// Publish the physical ball and wrists from one controller-local pose snapshot in the stereo ring.
 bool BuildHeldBallPose(V3& ballCentre, xr::BallHandLock& lock) {
     xr::HandPose poses[2]{};
     if (!physicalweapon::GetHandPosesSnapshot(poses)) return false;
@@ -924,9 +917,7 @@ bool BuildHeldBallPose(V3& ballCentre, xr::BallHandLock& lock) {
                             primaryForward, primaryUp)) return false;
     for (int hand = 0; hand < 2; ++hand) {
         if (!usable[hand]) continue;
-        // Move the visual wrist two centimetres INTO the previous contact
-        // point. The former +4 cm pullback left only fingertips touching the
-        // sphere; this seats the broad open palm without moving the ball.
+        // Offset the wrist two centimetres into the contact point without moving the ball.
         V3 wrist = centreTracking - palm[hand] * visualHold;
         V3 meshUp = palm[hand] * -1.0f;
         V3 meshForward = forward[hand];
@@ -1691,12 +1682,7 @@ void Update() {
             // radius on top made the default 44 cm and the ball repelled
             // well before any visible touch.
             const float hitRange = Phys(PHYS_HIT_RANGE, 0.01f);
-            // A strike counts when the hand APPROACHES the ball fast enough
-            // (relative velocity along hand->ball). A follow-through hand
-            // trailing a thrown ball never approaches it, and a dribble slap
-            // onto a bouncing ball always does - unlike the old rule that
-            // compared raw speeds and made hits impossible once the ball
-            // kept real momentum.
+            // Count a strike from relative hand velocity toward the ball.
             float bestApproach = 0.9f;
             for (int hand = 0; hand < 2; ++hand) {
                 if (!g_handValid[hand]) continue;

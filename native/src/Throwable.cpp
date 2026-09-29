@@ -212,7 +212,12 @@ bool BuildLaunch(void* player, int type, Vec3& source, Vec3& velocity,
         return false;
 
     float origin[3]{}, direction[3]{};
-    if (!vrcam::GetWeaponFireRay(hand, type, origin, direction)) return false;
+    // A satchel has no barrel: its authored hand rotation points the model
+    // axis back at CJ. Both preview and release must use controller AIM.
+    const bool haveRay = type == 39
+        ? vrcam::GetControllerThrowRay(hand, origin, direction)
+        : vrcam::GetWeaponFireRay(hand, type, origin, direction);
+    if (!haveRay) return false;
     source = {origin[0], origin[1], origin[2]};
     Vec3 forward = Normalized({direction[0], direction[1], direction[2]});
     if (!Finite(source) || !Finite(forward) || LengthSquared(forward) < 0.9f)
@@ -556,6 +561,18 @@ void* InstallVerifiedTrampoline(void* target, void* replacement) {
 }
 
 } // namespace
+
+bool HasLiveSatchels() {
+    if (!g.gaProjectileInfo) return true;
+    // RemoveDetonatorProjectiles @6f7da8 checks type +0, active +1c and
+    // advances 0x38 per entry. The object pointer can survive detonation.
+    for (int i=0;i<kProjectileCount;++i) {
+        const auto* info=g.gaProjectileInfo+i*0x38;
+        int type=0;std::memcpy(&type,info,sizeof(type));
+        if (type==39 && info[0x1c]==1) return true;
+    }
+    return false;
+}
 
 bool Install() {
     if (g_installed.load(std::memory_order_acquire)) return true;

@@ -46,9 +46,7 @@ std::atomic<int> gPointSlots[POINT_COUNT] = {4, 2, 3, 1, 8, 7, 5};
 // marker/model, NOT grabbable). Defaults to SHOWN.
 std::atomic<int> gPointState[POINT_COUNT] = {0, 0, 0, 0, 0, 0, 0};
 std::atomic<bool> gGripMarkersEnabled{true};
-// Reach for pulling a weapon off a body socket. The old fixed 27cm sphere
-// kept catching a holster during ordinary hand movement, so it is smaller by
-// default and player-adjustable from the loadout menu.
+// Player-adjustable reach for pulling a weapon from a body socket.
 constexpr int kDefaultGrabRadiusCm = 18;
 constexpr int kMinGrabRadiusCm = 8;
 constexpr int kMaxGrabRadiusCm = 35;
@@ -70,7 +68,8 @@ bool ValidPoint(int point) { return point >= 0 && point < POINT_COUNT; }
 bool SelectableSlot(int slot) {
     // 9 = the gadget slot (spray can, fire extinguisher, camera): mission
     // items land there and must be reachable from a body point.
-    return slot == kEmptySlot || (slot >= 1 && slot <= 7) || slot == 9;
+    return slot == kEmptySlot || (slot >= 1 && slot <= 7) ||
+           slot == 9 || slot == 12;
 }
 int WeaponTypeInSlot(void* ped, int slot);
 
@@ -191,8 +190,7 @@ void LoadSettings() {
             int visiblePoint = -1, visibleValue = 1;
             if (std::sscanf(line, "visible %d %d", &visiblePoint,
                             &visibleValue) == 2) {
-                // Legacy v2 files: visible=1 -> SHOWN, visible=0 -> HIDDEN
-                // (the old "hidden" was still grabbable).
+                // Legacy v2: visible=1 maps to SHOWN; visible=0 maps to HIDDEN.
                 if (ValidPoint(visiblePoint))
                     state[visiblePoint] = visibleValue != 0 ? 0 : 1;
                 continue;
@@ -344,6 +342,7 @@ const char* SlotName(int slot) {
         case 7:  return "HEAVY";
         case 8:  return "THROWABLE";
         case 9:  return "GADGET";
+        case 12: return "DETONATOR";
         default: return "UNKNOWN";
     }
 }
@@ -411,12 +410,14 @@ int CyclePointSlot(int point, int direction) {
     // Start after the current value and stop after one full pass. EMPTY is part
     // of the ring so clearing a point is an explicit, reversible cycle choice;
     // categories assigned to another point are never silently stolen/swapped.
-    static constexpr int kCycle[9] = {1, 2, 3, 4, 5, 6, 7, 9, kEmptySlot};
-    int startIndex = step > 0 ? -1 : 9;
-    for (int i = 0; i < 9; ++i)
+    static constexpr int kCycle[] = {1, 2, 3, 4, 5, 6, 7, 9, 12, kEmptySlot};
+    constexpr int kCycleCount = sizeof(kCycle) / sizeof(kCycle[0]);
+    int startIndex = step > 0 ? -1 : kCycleCount;
+    for (int i = 0; i < kCycleCount; ++i)
         if (kCycle[i] == current) { startIndex = i; break; }
-    for (int attempt = 1; attempt <= 9; ++attempt) {
-        const int selected = kCycle[(startIndex + step * attempt + 18) % 9];
+    for (int attempt = 1; attempt <= kCycleCount; ++attempt) {
+        const int selected = kCycle[(startIndex + step * attempt +
+                                     2 * kCycleCount) % kCycleCount];
         if (selected != kEmptySlot) {
             if (WeaponTypeInSlot(ped, selected) == 0) continue;
             if (FindPointForSlot(selected) >= 0) continue;

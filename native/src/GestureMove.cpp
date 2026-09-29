@@ -2,7 +2,6 @@
 
 #include "Locomotion.h"
 #include "Log.h"
-#include "Symbols.h"
 #include "Xr.h"
 
 #include <algorithm>
@@ -13,12 +12,6 @@
 
 namespace savr::gesturemove {
 namespace {
-
-// Disasm-verified arm64 offsets, shared with Melee.cpp: entity matrix pointer
-// at +0x18 (forward row at matrix+0x10), CPhysical mass at +0xB0.
-constexpr int kEntityMatrixOffset = 0x18;
-constexpr int kMatrixForwardOffset = 0x10;
-constexpr int kPhysicalMassOffset = 0xB0;
 
 struct V3 {
     float x{}, y{}, z{};
@@ -50,18 +43,12 @@ struct HandTrack {
 
 HandTrack gTracks[2]{};
 float gRunEnergy = 0.0f;
-float gPaddleEnergy = 0.0f;
-double gSurgeUntil = 0.0;
-double gSurgeCooldownUntil = 0.0;
 bool gRunActive = false;   // hysteresis latch for the run state
 
 void ResetAll() {
     gTracks[0] = HandTrack{};
     gTracks[1] = HandTrack{};
     gRunEnergy = 0.0f;
-    gPaddleEnergy = 0.0f;
-    gSurgeUntil = 0.0;
-    gSurgeCooldownUntil = 0.0;
     gRunActive = false;
 }
 
@@ -95,45 +82,16 @@ bool Track(int hand, const xr::HandPose& pose, double now, float dt) {
     return fresh;
 }
 
-// One physical stroke's forward shove through the native physics. The swim
-// task's own sprint handles sustained speed; this is the "thrown forward"
-// impulse at the moment of a big two-hand pull.
-void ApplySwimLunge(void* ped, float strokeSpeed) {
-    if (!ped || !g.CPhysical_ApplyMoveForce) return;
-    const auto* bytes = static_cast<const std::uint8_t*>(ped);
-    void* matrix = nullptr;
-    std::memcpy(&matrix, bytes + kEntityMatrixOffset, sizeof(matrix));
-    if (!matrix) return;
-    V3 forward{};
-    std::memcpy(&forward,
-                static_cast<const std::uint8_t*>(matrix) +
-                    kMatrixForwardOffset,
-                sizeof(forward));
-    const float length = Length(forward);
-    if (!std::isfinite(length) || length < 0.5f) return;
-    forward = forward * (1.0f / length);
-    float mass = 70.0f;
-    std::memcpy(&mass, bytes + kPhysicalMassOffset, sizeof(mass));
-    if (!std::isfinite(mass) || mass < 1.0f || mass > 1000.0f) mass = 70.0f;
-    // moveSpeed gain of 0.030-0.055 game units/frame per stroke: a clear
-    // lunge on top of SA's ~0.05-0.1 swim speeds without launching CJ.
-    const float gain = std::clamp(0.018f * strokeSpeed, 0.030f, 0.055f);
-    const V3 force = forward * (mass * gain);
-    g.CPhysical_ApplyMoveForce(ped, force.x, force.y, force.z);
-    LOGI("[vr.gesture] swim lunge speed=%.2f gain=%.3f", strokeSpeed, gain);
-}
-
 } // namespace
 
-void Update(void* ped, bool swimming, bool blocked, Result& out) {
+void Update(void* /*ped*/, bool swimming, bool blocked, Result& out) {
     out = Result{};
-    if (blocked) {
+    if (blocked || swimming) {
         ResetAll();
         return;
     }
     const bool runEnabled = locomotion::GestureRunEnabled();
-    const bool swimEnabled = locomotion::GestureSwimEnabled();
-    if (!runEnabled && !swimEnabled) {
+    if (!runEnabled) {
         ResetAll();
         return;
     }
@@ -152,46 +110,6 @@ void Update(void* ped, bool swimming, bool blocked, Result& out) {
     const bool fresh0 = Track(0, poses[0], now, dt);
     const bool fresh1 = Track(1, poses[1], now, dt);
     const bool bothFresh = fresh0 && fresh1 && dt > 0.0f;
-
-    if (swimming) {
-        gRunEnergy = 0.0f;
-        gRunActive = false;
-        if (!swimEnabled) return;
-
-        const float speed0 = Length(gTracks[0].velocity);
-        const float speed1 = Length(gTracks[1].velocity);
-        if (bothFresh) {
-            // Dog paddle: any sustained two-hand motion keeps a slow crawl.
-            const float average = 0.5f * (speed0 + speed1);
-            if (average > 0.35f) {
-                gPaddleEnergy += (average - 0.35f) * dt * 2.5f;
-            }
-            gPaddleEnergy = std::clamp(gPaddleEnergy - dt * 1.5f, 0.0f, 1.2f);
-
-            // Big stroke: both hands fast at once -> surge + physical lunge.
-            const float strokeSpeed = std::min(speed0, speed1);
-            if (strokeSpeed >= 1.30f && now >= gSurgeCooldownUntil) {
-                gSurgeUntil = now + 0.80;
-                gSurgeCooldownUntil = now + 1.20;
-                ApplySwimLunge(ped, strokeSpeed);
-            }
-        } else {
-            gPaddleEnergy = std::max(0.0f, gPaddleEnergy - dt * 1.5f);
-        }
-
-        if (now < gSurgeUntil) {
-            out.forward = 1.0f;
-            out.sprint = true;   // Cross = the swim task's fast stroke
-        } else if (gPaddleEnergy > 0.25f) {
-            out.forward = 0.65f; // plain forward = the slow breaststroke
-        }
-        return;
-    }
-
-    // --- on land: arm-swing running -------------------------------------
-    gPaddleEnergy = 0.0f;
-    gSurgeUntil = 0.0;
-    if (!runEnabled) return;
 
     // A hand with its trigger squeezed is punching or firing, never pumping.
     const bool combat0 = poses[0].trigger >= 0.40f;

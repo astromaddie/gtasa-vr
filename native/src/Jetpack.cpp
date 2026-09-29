@@ -1,3 +1,4 @@
+#include "PlayerLife.h"
 #include "Jetpack.h"
 
 #include <algorithm>
@@ -34,9 +35,7 @@ std::atomic<Mode> g_mode{Mode::Reliable};   // rock-solid default (SIMPLE)
 std::atomic<bool> g_lockInAir{true};        // block B-drop while airborne (default ON)
 std::atomic<int>  g_turbinePower{100};      // vectored-thrust scale, percent
 std::mutex        g_saveMutex;
-// True once the ini has been read successfully (or confirmed absent). Save()
-// is REFUSED before that so start-up defaults can never overwrite the file —
-// which is exactly how the user's saved 110% got clobbered back to 100.
+// Save() requires successfully loaded settings or a confirmed absent file.
 std::atomic<bool> g_loaded{false};
 int               g_loadAttempts = 0;
 long long         g_lastLoadAttemptMs = 0;
@@ -182,10 +181,7 @@ void Load() {
         else if (std::sscanf(line, "TurbinePower=%d", &v) == 1) power = v;
     }
     std::fclose(f);
-    // Store the VALUES first and publish g_loaded only after. g_loaded is what
-    // unblocks Save(); publishing it first let the other thread save stale
-    // defaults over the file we had just read - exactly the clobber that reset
-    // the user's saved settings on every launch.
+    // Publish g_loaded after all settings values so Save() cannot observe partial initialization.
     g_mode.store(mode == static_cast<int>(Mode::Realistic) ? Mode::Realistic
                                                             : Mode::Reliable);
     g_lockInAir.store(lock != 0);
@@ -197,6 +193,42 @@ void Load() {
          ModeName(), g_lockInAir.load() ? 1 : 0, g_turbinePower.load());
 }
 
+using AbortFn=bool(*)(void*,void*,int,const void*);
+using ProcessPedFn=bool(*)(void*,void*);
+AbortFn g_origAbort=nullptr;
+ProcessPedFn g_origProcessPed=nullptr;
+bool DeadLocalPlayer(void* ped) {
+    return ped&&g.FindPlayerPed&&g.FindPlayerPed(-1)==ped&&playerlife::Dead(ped);
+}
+bool OnMakeAbortable(void* task,void* ped,int priority,const void* event) {
+    // Null event uses retail's unconditional cleanup path: restore weapon,
+    // finish task and stop effects/audio. Only lethal local-player damage is
+    // allowed past the stock airborne-damage rejection.
+    return g_origAbort?g_origAbort(task,ped,priority,DeadLocalPlayer(ped)?nullptr:event):false;
+}
+bool OnProcessPed(void* task,void* ped) {
+    if(DeadLocalPlayer(ped)&&g_origAbort)g_origAbort(task,ped,2,nullptr);
+    return g_origProcessPed?g_origProcessPed(task,ped):false;
+}
+void InstallLifeHook(void* target,void* replacement,const std::uint32_t (&expected)[4],void** original) {
+    if(!target||!replacement||*original||std::memcmp(target,expected,16)!=0)return;
+    const long page=sysconf(_SC_PAGESIZE);if(page<=0)return;
+    void* mem=mmap(nullptr,page,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    if(mem==MAP_FAILED)return;
+    auto* t=static_cast<std::uint32_t*>(mem);std::memcpy(t,target,16);
+    t[4]=0x58000051u;t[5]=0xd61f0220u;
+    *reinterpret_cast<void**>(t+6)=static_cast<char*>(target)+16;
+    __builtin___clear_cache(static_cast<char*>(mem),static_cast<char*>(mem)+32);
+    const auto begin=reinterpret_cast<std::uintptr_t>(target)&~(static_cast<std::uintptr_t>(page)-1);
+    const auto end=(reinterpret_cast<std::uintptr_t>(target)+16+page-1)&~(static_cast<std::uintptr_t>(page)-1);
+    if(mprotect(reinterpret_cast<void*>(begin),end-begin,PROT_READ|PROT_WRITE|PROT_EXEC)!=0){munmap(mem,page);return;}
+    *original=mem;
+    auto* code=static_cast<std::uint32_t*>(target);
+    *reinterpret_cast<void**>(code+2)=replacement;code[1]=0xd61f0220u;
+    __atomic_store_n(code,0x58000051u,__ATOMIC_RELEASE);
+    __builtin___clear_cache(static_cast<char*>(target),static_cast<char*>(target)+16);
+}
+
 // ---- DropJetPack chokepoint hook ------------------------------------------
 // EVERY belt drop (the task's own Triangle/exit-vehicle path, our B, anything)
 // funnels through CTaskSimpleJetPack::DropJetPack. Guarding it here is what
@@ -204,7 +236,7 @@ void Load() {
 // path fired it.
 void OnDropJetPack(void* task, void* ped) {
     const bool intentional = g_intentionalDrop.load(std::memory_order_acquire);
-    if (!intentional && MenuDropGuard()) {
+    if (!DeadLocalPlayer(ped) && !intentional && MenuDropGuard()) {
         LOGI("[jetpack] DropJetPack BLOCKED (menu open/just closed)");
         return;
     }
@@ -264,6 +296,13 @@ bool InstallDropHook(void* target) {
 
 void Init(void* handle) {
     if (handle == nullptr) return;
+    constexpr std::uint32_t abortPrologue[]{0xa9bd7bfdu,0xf9000bf5u,0xa9024ff4u,0x910003fdu};
+    constexpr std::uint32_t processPrologue[]{0xfc1c0fe8u,0xa9017bfdu,0xa90257f6u,0xa9034ff4u};
+    InstallLifeHook(dlsym(handle,"_ZN18CTaskSimpleJetPack13MakeAbortableEP4CPediPK6CEvent"),
+        reinterpret_cast<void*>(&OnMakeAbortable),abortPrologue,reinterpret_cast<void**>(&g_origAbort));
+    if(g_origAbort)InstallLifeHook(dlsym(handle,"_ZN18CTaskSimpleJetPack10ProcessPedEP4CPed"),
+        reinterpret_cast<void*>(&OnProcessPed),processPrologue,reinterpret_cast<void**>(&g_origProcessPed));
+    LOGI("[jetpack] lethal damage cleanup abort=%d process=%d",g_origAbort!=nullptr,g_origProcessPed!=nullptr);
     g_getTaskJetPack = reinterpret_cast<GetTaskJetPackFn>(
         dlsym(handle, "_ZNK16CPedIntelligence14GetTaskJetPackEv"));
     g_dropJetPack = reinterpret_cast<DropJetPackFn>(
@@ -296,9 +335,9 @@ void NoteMenuInput(bool anyMenuOpen, bool bDown) {
     if (!bDown) g_bLatched = false;
 }
 
-bool IsActive() { return ActiveTaskAndPed(nullptr) != nullptr; }
+bool IsActive() { void* ped=nullptr;void* task=ActiveTaskAndPed(&ped);return task&&!playerlife::Dead(ped); }
 
-void* ActiveTask() { return ActiveTaskAndPed(nullptr); }
+void* ActiveTask() { void* ped=nullptr;void* task=ActiveTaskAndPed(&ped);return playerlife::Dead(ped)?nullptr:task; }
 
 Mode GetMode() { Load(); return g_mode.load(std::memory_order_acquire); }
 
@@ -338,7 +377,7 @@ void WritePad(std::int16_t* ns, const xr::InputState& in, float headYaw) {
     (void)headYaw;
     void* ped = nullptr;
     void* task = ActiveTaskAndPed(&ped);
-    if (task == nullptr) return;
+    if (task == nullptr || playerlife::Dead(ped)) return;
 
     const bool bothGrips = in.grip[0] >= 0.75f && in.grip[1] >= 0.75f;
 

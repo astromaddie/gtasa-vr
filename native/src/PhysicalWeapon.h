@@ -53,6 +53,8 @@ void Update(bool interactionsBlocked,
 // Return every transient held/dropped slot to its configured body socket.
 // Loadout and runtime settings are preserved.
 void ResetTransient();
+// Tracking-space discontinuity: retain held inventory, invalidate motion/visual history.
+void ResetTracking();
 
 // Exact controller snapshot consumed by this GameThread update. Weapon model,
 // two-hand pivot/axis, stereo late hands and laser must all use this epoch rather
@@ -76,13 +78,14 @@ void EnforceBikeWeaponLimit();
 // ~0.7s of continuous airtime, the parachute auto-selects so the right
 // trigger can open it — no manual equipping. Call from the input pump.
 void AutoEquipParachute();
-// Give mission gadgets (slot 9: spray/camera/extinguisher) a body point when
+// Give mission gadgets (slot 9) and the detonator (slot 12) a body point when
 // none is configured, so scripted hand-outs are physically reachable.
 void AutoAssignGadgetPoint();
 
 // Put an inventory slot directly into a tracked hand (cheat/give flows). The
 // weapon must exist in the ped inventory; no holster point is required. With
 // the grip lock off, an open grip releases it on the next tick as usual.
+// A newly supplied detonator waits for the first squeeze before releasing.
 bool ForceHold(int hand, int slot);
 
 // Lock-free bitmask of hands currently holding a weapon (bit0 = LEFT,

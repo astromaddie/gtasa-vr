@@ -69,9 +69,7 @@ enum OffsetField {
     F_BOAT_SEAT_HEIGHT,
     F_IMMERSIVE_BOAT_SEAT_DISTANCE,
     F_IMMERSIVE_BOAT_SEAT_HEIGHT,
-    // Appended for config-array compatibility with existing installs.  Each
-    // vehicle category/mode now owns a lateral seat offset just like forward
-    // and height; the old F_SIDE remains DEFAULT CAR side.
+    // Preserve config-array indices. F_SIDE controls the default car; other categories use separate offsets.
     F_BIKE_SEAT_SIDE,
     F_IMMERSIVE_CAR_SEAT_SIDE,
     F_IMMERSIVE_BIKE_SEAT_SIDE,
@@ -152,7 +150,9 @@ enum MenuItem {
     MENU_CAR_CAMERA_TILT,
     MENU_BOAT_CAMERA_TILT,
     MENU_RESET,
-    MENU_BACK
+    MENU_BACK,
+    MENU_PLANE_INVERT_PITCH,
+    MENU_BIKE_BLOCK_WHEELIE
 };
 
 enum ControlCalibrationField {
@@ -168,7 +168,9 @@ enum ControlCalibrationField {
 // Per-model calibration of the VIRTUAL WHEEL/HELM/YOKE itself (the Vice City
 // wheel-calibration set): position in the vehicle frame, ring radius and the
 // plane's pitch/yaw/roll. Applies to cars, boats and planes alike; values are
-// deltas on top of the shared global wheel preset. cm and half-degrees.
+// deltas on top of the shared global wheel preset. Installed HD models with a
+// measured steering pose use a separate saved set of fine adjustments around
+// that geometry; stock offsets remain intact. Units: cm and half-degrees.
 enum WheelCalibrationField {
     WHEEL_CAL_SIDE = 0,
     WHEEL_CAL_FORWARD,
@@ -206,6 +208,9 @@ const char* GetCameraViewName(int vehicleType);
 void CycleCameraView(int vehicleType, int direction);
 // Shared helicopter+plane camera view (several planes have no cockpit model).
 // VEHICLE_PLANE's CAMERA VIEW row maps here; VEHICLE_BOAT has its own.
+bool IsPlanePitchInverted();
+void TogglePlanePitchInversion();
+
 int GetAirView();
 const char* GetAirViewName();
 void CycleAirView(int direction);
@@ -263,6 +268,8 @@ bool AreHandleHighlightsEnabled();
 void ToggleHandleHighlights();
 bool DoBikeHandsFollowTilt();
 void ToggleBikeHandsFollowTilt();
+bool IsBikeWheelieBlocked();
+void ToggleBikeWheelieBlock();
 bool IsBikeHorizonLocked();
 void ToggleBikeHorizonLock();
 int GetBikeVisualLeanPercent();
@@ -296,7 +303,15 @@ bool ShouldUseTrackedHands();
 void SetMenuPreview(bool active, int calibrationHand = -1);
 
 void UpdateInput(const xr::InputState& input, bool gameplay, bool blocked);
+// Remote vehicles have no seated player. Keep their input context separate
+// from the cockpit/body anchoring used by ordinary driving.
+void* GetRemoteControlledVehicle();
+bool IsCraneControlActive();
+// New Model Army magnet widget: B press feeds one stable frame edge.
+bool IsRemoteCargoControlActive();
+bool RemoteCargoActionPressed();
 void ResetInteraction();
+void ResetTracking();
 // Rebuild a bike's visual sockets after the current camera/body frame has been
 // published, eliminating a one-frame mismatch during fast vehicle roll.
 void RefreshVisualTracking();

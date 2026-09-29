@@ -12,5 +12,7 @@ bool Install();
 // Call once per on-foot GameThread frame after PhysicalWeapon::Update.
 void Update(bool interactionsBlocked);
 void Reset();
+// Native active entries; unknown metadata preserves the item rather than losing it.
+bool HasLiveSatchels();
 
 } // namespace savr::throwable

@@ -1,9 +1,8 @@
 cmake_minimum_required(VERSION 3.22)
 project(savr LANGUAGES CXX ASM)
 
-# SAVR_DEV keeps the diagnostic hooks used by the current Quest performance
-# baseline. The player overlay still starts hidden; direct CMake audits may
-# leave this OFF to verify the non-diagnostic configuration.
+# Player builds omit developer diagnostics. Enable explicitly for local captures;
+# the profiler remains hidden until selected in the menu or toggled by grips+A.
 option(SAVR_DEV "Developer build: logging, FPS panel, full version" OFF)
 if(SAVR_DEV)
     add_compile_definitions(SAVR_DEV=1)
@@ -67,13 +66,23 @@ add_library(savr SHARED
     src/Locomotion.cpp
     src/Driving.cpp
     src/GestureMove.cpp
+    src/Swimming.cpp
+    src/BoatEntry.cpp
     src/GraphicsEffects.cpp
     src/Basketball.cpp
     src/MapZoom.cpp
     src/BrainDiag.cpp
     src/HdWeapons.cpp
+    src/ModelSets.cpp
+    src/LoadingTrace.cpp
     src/Holster.cpp
     src/Melee.cpp
+    src/MissionControls.cpp
+    src/Catalyst.cpp
+    src/JustBusiness.cpp
+    src/BeachDance.cpp
+    src/Tbone.cpp
+    src/MissionScenes.cpp
     src/PerfTelemetry.cpp
     src/PhysicalWeapon.cpp
     src/Pickups.cpp
@@ -84,9 +93,7 @@ add_library(savr SHARED
     src/Calib.cpp
 )
 
-# `.incbin` inputs are invisible to Ninja's assembler dependency scan.  Make
-# the generated pack an explicit dependency so changing/simplifying the HLOD
-# cannot silently leave yesterday's bytes embedded in a freshly linked .so.
+# Track the generated .incbin payload explicitly so pack changes rebuild the object.
 set(AIRCRAFT_HLOD_PACK
     "${CMAKE_BINARY_DIR}/../aircraft-hlod-global/aircraft.hlod")
 set_property(SOURCE src/AircraftHlodData.S PROPERTY OBJECT_DEPENDS

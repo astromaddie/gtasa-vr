@@ -1,3 +1,4 @@
+#include "BeachDance.h"
 #include "Hydraulics.h"
 
 #include <algorithm>
@@ -46,13 +47,9 @@ std::atomic<bool>  g_active{false};
 std::atomic<float> g_stickX{0.0f};
 std::atomic<float> g_stickY{0.0f};
 
-// Rhythm minigame beat table. CAEAudioHardware keeps the live tBeatInfo at
-// AEAudioHardware+0xCE8: tBeat BeatWindow[20] {u32 timeMs; u32 key;} then
-// IsBeatInfoPresent at +0xA0. BeatWindow[10] is the current beat, [10+i] is i
-// beats ahead. We READ it directly and never call CAudioEngine::GetBeatInfo -
-// that call mutates BeatNumber/BeatTypeThisFrame and would consume the beat
-// edge the game itself is waiting on (the same class of bug as the per-eye
-// consumption issues elsewhere in this project).
+// Read live tBeatInfo at AEAudioHardware+0xCE8 without consuming beat edges.
+// BeatWindow[20] contains {u32 timeMs; u32 key}; entry 10 is the current beat.
+// IsBeatInfoPresent follows the array at +0xA0.
 const std::uint8_t* g_beatInfo = nullptr;
 constexpr int kBeatWindowMid   = 0x50;   // &BeatWindow[10]
 constexpr int kBeatPresent     = 0xA0;
@@ -154,11 +151,8 @@ bool GetDanceScore(int* playerOut, int* opponentOut) {
 
 int PollBeat(int* msUntilOut) {
     if (msUntilOut) *msUntilOut = 0;
-    if (!DanceActive()) return 0;   // never prompt over ordinary radio music
-    // BeatWindow[10] ONLY: that is the beat LOWGAME is grading right now.
-    // Scanning ahead showed a beat several periods away, so its countdown told
-    // the player to press far too early. (Values are snapshotted on the game
-    // thread; the audio code blanks the table while refilling it.)
+    if (!DanceActive() && !beachdance::Active()) return 0; // never prompt over radio
+    // Snapshot BeatWindow[10], the beat currently graded by LOWGAME.
     const int key = g_curBeatKey.load(std::memory_order_relaxed);
     const int ms  = g_curBeatMs.load(std::memory_order_relaxed);
     if (key <= 0 || ms < 0 || ms >= static_cast<int>(kBeatMaxMs)) return 0;
@@ -227,12 +221,8 @@ int ScoringDirection() {
 
 bool IsActive() { return g_active.load(std::memory_order_acquire); }
 
-// Two consumers, two needs:
-//  - CAutomobile::HydraulicControl wants the LIVE stick so the car bounces while
-//    you hold it (that already worked and must keep working);
-//  - LOWGAME's scoring wants a SNAPPED cardinal delivered only on the beat.
-// The dance minigame takes priority whenever a beat track is playing, because a
-// held raw stick is exactly what the script mis-grades.
+// HydraulicControl uses live stick input; LOWGAME receives a cardinal snap
+// on the beat. The minigame takes priority while a beat track is playing.
 int AxisLeftRight() {
     if (DanceActive()) {
         const int dir = ScoringDirection();

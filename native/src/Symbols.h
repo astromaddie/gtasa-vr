@@ -186,6 +186,8 @@ struct GameSymbols {
     void* (*CPedIntelligence_GetTaskDuck)(const void* intelligence,
                                           bool ignoreSimplestActiveCheck);
 
+    bool (*CPedIntelligence_TestForStealthKill)(void* intelligence,void* target,bool basicOnly);
+
     // CVector is a 3-float HFA: identical registers to three float params.
     // Used for the VR aircraft climb boost (left grip + trigger).
     void  (*CPhysical_ApplyMoveForce)(void* physical, float x, float y, float z);
@@ -231,6 +233,12 @@ struct GameSymbols {
     void* CPad_GetCarGunLeftRight;
     void* CPad_GetCarGunFired;
     void* CPad_CarGunJustDown;
+    void* CPad_CraneReleaseJustDown;
+    void* CPad_UseBomb;
+    void* CPad_UseRocket;
+    std::int32_t* CRopes_PlayerControlsCrane;
+    void* CWorld_Players;
+    std::uint8_t* CWorld_PlayerInFocus;
     void* CAutomobile_TankControl;
     void* CPad_GetTurretLeft;
     void* CPad_GetTurretRight;
@@ -351,6 +359,9 @@ struct GameSymbols {
     // The native projectile allocator is left in charge of object creation,
     // fuse, collision and effects. Throwable.cpp replaces only the freshly
     // created CPhysical move speed with the tracked controller launch vector.
+    unsigned char* gaProjectileInfo; // 32 entries, Android ARM64 stride 0x38
+    void* CText_Get;
+    void* ProcessCommands2000To2099; // verified opcode wrapper for native photo FOV
     void** CProjectileInfo_ms_apProjectile; // CProjectile*[32]
     bool  (*CWorld_ProcessLineOfSight)(const Vec3* origin, const Vec3* target,
                                        void* outColPoint, void** outEntity,
@@ -498,6 +509,14 @@ struct GameSymbols {
     // it never changes the callback's render decision.
     void* (*CVisibilityPlugins_RenderVehicleHiDetailCB)(void* atomic);
     void* (*CVisibilityPlugins_RenderVehicleHiDetailAlphaCB)(void* atomic);
+    void* (*CVisibilityPlugins_RenderVehicleHiDetailAlphaCB_Boat)(void* atomic);
+    void* CVisibilityPlugins_m_alphaBoatAtomicList;
+    void (*CVisibilityPlugins_RenderAtomic)(void* atomic,float distance);
+    int* CVisibilityPlugins_ms_atomicPluginOffset;
+    bool* skipBlendRender;
+    bool* skipNonblendRender;
+    void (*rpSkipBlendRender)(bool skip);
+    void (*rpSkipNonblendRender)(bool skip);
     float* gVehicleDistanceFromCamera;
 
     // Static breakable props (palms, lamp posts, signs) are represented by a
@@ -573,6 +592,7 @@ struct GameSymbols {
     int   (*RwIm3DRenderIndexedPrimitive)(int primType, unsigned short* indices, int numIndices);
     int   (*RwIm3DEnd)();
     int   (*RwRenderStateSet)(int state, void* value);
+    int   (*RwRenderStateGet)(int state, void* value);
 
     // Per-eye stereo: offscreen camera-texture rasters. Redirecting the Scene
     // RwCamera's colour raster (RwCamera+0x80) and depth raster (+0x88) to an eye
@@ -592,6 +612,7 @@ struct GameSymbols {
     // Exported by Android SA 2.11.311. These let the immersive cockpit reject
     // passengers and every non-automobile without relying on fragile class
     // offsets or vtable slots.
+    void* CVehicle_FlyingControl;
     int   (*CVehicle_GetVehicleAppearance)(const void* vehicle);
     bool  (*CVehicle_IsDriver)(const void* vehicle, const void* ped);
     // CEventKnockOffBike owns rider ejection. The event stores its source bike

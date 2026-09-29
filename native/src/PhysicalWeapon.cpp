@@ -7,6 +7,8 @@
 #include "Log.h"
 #include "Symbols.h"
 #include "VrCamera.h"
+#include "VrFire.h"
+#include "Throwable.h"
 #include "Xr.h"
 
 #include <algorithm>
@@ -71,6 +73,9 @@ std::atomic<unsigned int> gHeldMaskRelaxed{0};
 // gSupportHand[primary] is the other controller or -1.
 int gSupportHand[kHandCount] = {-1, -1};
 bool gGripLatched[kHandCount]{};
+bool gAwaitFirstGrip[kHandCount]{};
+int gLastObservedActiveSlot = -1;
+bool gWasScriptedWeaponCamera = false;
 int gPreferredHand = -1;
 // Visual-only support-hand preview selected while the weapon calibration menu
 // blocks interactions. It deliberately does not mutate gSupportHand/ownership.
@@ -208,8 +213,12 @@ bool IsTwoHandedWeaponTypeInternal(int weaponType) {
 int WeaponTypeInSlot(void* ped, int slot) {
     if (ped == nullptr || !ValidSlot(slot)) return 0;
     const auto* bytes = reinterpret_cast<const std::uint8_t*>(ped);
-    return *reinterpret_cast<const std::int32_t*>(
+    const int type = *reinterpret_cast<const std::int32_t*>(
         bytes + kOffWeapons + slot * kWeaponStride);
+    // Native inventory keeps the remote after UseDetonator. Physical ownership
+    // exists only while a placed satchel is still active, not while spare C4
+    // remains in the inventory. This also excludes grabs and script auto-handoff.
+    return type==40 && !throwable::HasLiveSatchels() ? 0 : type;
 }
 
 bool OwnedConfiguredSlot(void* ped, int slot) {
@@ -288,6 +297,7 @@ void ClearHeldLocked(int hand) {
     if (!ValidHand(hand)) return;
     ClearSupportForHandLocked(hand);
     gHeldSlot[hand] = -1;
+    gAwaitFirstGrip[hand] = false;
     ClearVisualPoseLocked(hand);
     if (gPreferredHand == hand) gPreferredHand = AnyHeldHandLocked();
 }
@@ -297,6 +307,7 @@ void ResetRuntimeLocked() {
         gHeldSlot[hand] = -1;
         gSupportHand[hand] = -1;
         gGripLatched[hand] = false;
+        gAwaitFirstGrip[hand] = false;
         gHands[hand] = xr::HandPose{};
         gHandVelocity[hand] = {};
         gHandAngularVelocity[hand] = {};
@@ -310,6 +321,8 @@ void ResetRuntimeLocked() {
     gPreferredHand = -1;
     gSupportCalibrationPrimary = -1;
     gInteractionsBlocked = true;
+    gLastObservedActiveSlot = -1;
+    gWasScriptedWeaponCamera = false;
 }
 
 bool DroppedPoseAtLocked(int sourceHand, double now, TrackingPose* out) {
@@ -423,6 +436,7 @@ void GiveToHandLocked(void* ped, int hand, int slot, const char* reason) {
     if (!ValidHand(hand) || !ValidSlot(slot)) return;
     ClearSupportForHandLocked(hand);
     gHeldSlot[hand] = slot;
+    gAwaitFirstGrip[hand] = false;
     gPreferredHand = hand;
     ClearVisualPoseLocked(hand);
     SelectCurrentSlot(ped, slot);
@@ -503,25 +517,14 @@ void ChooseFiringHandLocked(void* ped) {
         gPreferredHand = selected;
 
     const int firing = AnyHeldHandLocked();
-    // Edge-triggered: only force fists on the frame a weapon LEAVES the hands.
-    // Doing it every frame continuously overrode the engine's own selection on
-    // foot (scripted mission weapons, and the parachute the canopy-deploy path
-    // needs selected during a skydive).
-    static bool sHadHeld = false;
     if (firing >= 0) {
-        sHadHeld = true;
         SelectCurrentSlot(ped, gHeldSlot[firing]);
-    } else if (sHadHeld && g.CPed_SetCurrentWeaponSlot != nullptr &&
-               CurrentWeaponSlot(ped) != 0) {
-        sHadHeld = false;
-        // Nothing is in either hand: fall back to fists. Weapons in this port
-        // are only ever equipped by a physical grab, so a put-away or a thrown
-        // molotov/grenade must return CJ to unarmed instead of leaving the
-        // stale weapon "stuck" in hand (Vice City parity). SelectCurrentSlot
-        // rejects slot 0 (ValidSlot is 1..12), so poke the game directly.
+    } else if (g.CPed_SetCurrentWeaponSlot && CurrentWeaponSlot(ped) != 0 &&
+               WeaponTypeInSlot(ped, CurrentWeaponSlot(ped)) != 46) {
+        // Physical ownership is authoritative even after a save load, pickup,
+        // or a native auto-switch. Mission gadgets/gunners are handed to the
+        // player earlier in Update. The parachute is managed by AutoEquipParachute.
         g.CPed_SetCurrentWeaponSlot(ped, 0);
-    } else if (firing < 0) {
-        sHadHeld = false;
     }
 }
 
@@ -561,7 +564,7 @@ int ClosestAvailableHolsterSlotLocked(
             !OwnedConfiguredSlot(ped, slot) ||
             (occupied & (1u << slot)) != 0)
             continue;
-        if (inVehicle &&
+        if (inVehicle && !vrfire::IsScriptedWeaponCamera() &&
             !VehicleSidearmWeaponType(WeaponTypeInSlot(ped, slot)))
             continue;
         const float distance = Distance(
@@ -609,9 +612,7 @@ bool BuildSupportAnchorLocked(int primaryHand, TrackingPose* out) {
     int offsetX = calibration.supOffX;
     int offsetY = calibration.supOffY;
     int offsetZ = calibration.supOffZ;
-    // RIGHT is the one saved/master profile. Match reference Quest build's derived LEFT
-    // support calibration without asking the user to tune the same weapon
-    // twice: lateral offset and the two handedness-sensitive rotations mirror.
+    // Derive LEFT support calibration from RIGHT by mirroring lateral offset and handedness-sensitive rotations.
     if (primaryHand == 0) offsetX = -offsetX;
     constexpr float kCalibUnitToMetres = 0.005f;
     const V3 origin = PositionOf(model);
@@ -771,6 +772,7 @@ void Update(bool interactionsBlocked, bool showHolsterMarkersWhileBlocked,
     void* ped = g.FindPlayerPed ? g.FindPlayerPed(-1) : nullptr;
     const bool inVehicle = ped != nullptr && g.FindPlayerVehicle &&
                            g.FindPlayerVehicle(-1, false) != nullptr;
+    const bool scriptedGunner = vrfire::IsScriptedWeaponCamera();
     // Vice City parity: IMMERSIVE driving keeps the physical weapon system
     // live in the seat — the body holsters stay reachable for sidearms and a
     // held gun keeps tracking. The DEFAULT-driving DRIVE-BY AIM = IMMERSIVE
@@ -782,7 +784,7 @@ void Update(bool interactionsBlocked, bool showHolsterMarkersWhileBlocked,
     driving::WheelVisualState seatWheel{};
     if (vehicleImmersive) driving::GetWheelVisualState(&seatWheel);
     if (ped == nullptr || g.CPed_SetCurrentWeaponSlot == nullptr ||
-        (inVehicle && !vehicleImmersive)) {
+        (inVehicle && !vehicleImmersive && !scriptedGunner)) {
         const bool hadTransient = OccupiedSlotMaskLocked() != 0;
         ResetRuntimeLocked();
         gHeldMaskRelaxed.store(0, std::memory_order_relaxed);
@@ -792,6 +794,34 @@ void Update(bool interactionsBlocked, bool showHolsterMarkersWhileBlocked,
     }
 
     ValidateInventoryLocked(ped);
+
+    if (!interactionsBlocked) {
+        const int selectedSlot = CurrentWeaponSlot(ped);
+        const int selectedType = WeaponTypeInSlot(ped, selectedSlot);
+        const bool missionGadget = selectedType == 40 || selectedType == 41 ||
+                                   selectedType == 42 || selectedType == 43;
+        const bool newSelection = selectedSlot != gLastObservedActiveSlot;
+        if (ValidSlot(selectedSlot) && HeldHandForSlotLocked(selectedSlot) < 0 &&
+            ((scriptedGunner && !gWasScriptedWeaponCamera) ||
+             (missionGadget && newSelection))) {
+            // Scripts select their supplied camera/extinguisher or mounted gun.
+            // Respect that selection once without overwriting the saved loadout.
+            const int hand = !ValidSlot(gHeldSlot[1]) ? 1 :
+                             !ValidSlot(gHeldSlot[0]) ? 0 : 1;
+            ClearHeldLocked(hand);
+            for (int h = 0; h < kHandCount; ++h)
+                if (gDropped[h].slot == selectedSlot)
+                    gDropped[h] = DroppedWeapon{};
+            GiveToHandLocked(ped, hand, selectedSlot, "mission selection");
+            // An item handed to the player is not a physical grab. Give them
+            // time to squeeze before an open controller grip can release it.
+            gAwaitFirstGrip[hand] = true;
+        }
+        gWasScriptedWeaponCamera = scriptedGunner;
+    }
+    for (int hand = 0; hand < kHandCount; ++hand)
+        if (gHands[hand].valid && gHands[hand].grip >= kGripClose)
+            gAwaitFirstGrip[hand] = false;
 
     // PG_CALIB previews the free hand directly on the calibrated support socket.
     // Keep the preferred/latched held gun authoritative, and never manufacture a
@@ -985,7 +1015,7 @@ void Update(bool interactionsBlocked, bool showHolsterMarkersWhileBlocked,
                 Distance(GripPosition(gHands[hand]),
                          {anchors[point][0], anchors[point][1], anchors[point][2]}) <=
                     kHolsterReturnRadius;
-            if (gGripLock && !returnToHolster) continue;
+            if ((gGripLock || gAwaitFirstGrip[hand]) && !returnToHolster) continue;
 
             if (!returnToHolster) StartDropLocked(hand, slot, now);
             ClearHeldLocked(hand);
@@ -1027,6 +1057,7 @@ void Update(bool interactionsBlocked, bool showHolsterMarkersWhileBlocked,
     // same axes silently switch the preferred held gun/profile mid-calibration.
     if (!interactionsBlocked) {
         ChooseFiringHandLocked(ped);
+        gLastObservedActiveSlot = CurrentWeaponSlot(ped);
     } else {
         const int held = AnyHeldHandLocked();
         if (held >= 0) SelectCurrentSlot(ped, gHeldSlot[held]);
@@ -1118,6 +1149,18 @@ void Update(bool interactionsBlocked, bool showHolsterMarkersWhileBlocked,
     gHeldMaskRelaxed.store(heldMask, std::memory_order_relaxed);
 }
 
+void ResetTracking() {
+    xr::HandPose latest[kHandCount]{};xr::GetHandPoses(latest);
+    std::lock_guard<std::mutex> lock(gMutex);
+    std::memcpy(gHands,latest,sizeof(gHands));
+    for(int h=0;h<kHandCount;++h) {
+        gPreviousPoseValid[h]=false;gHandVelocity[h]={};gHandAngularVelocity[h]={};
+        ClearVisualPoseLocked(h);
+        gDropped[h]=DroppedWeapon{};
+        if(ValidSlot(gHeldSlot[h]))gAwaitFirstGrip[h]=true;
+    }
+}
+
 void ResetTransient() {
     std::lock_guard<std::mutex> lock(gMutex);
     ResetRuntimeLocked();
@@ -1148,6 +1191,9 @@ bool ForceHold(int hand, int slot) {
         if (gDropped[h].slot == slot) gDropped[h] = DroppedWeapon{};
     GiveToHandLocked(ped, hand, slot, "cheat give");
     gGripLatched[hand] = true;
+    // The first thrown satchel creates this in a free hand. An open grip on
+    // that hand must not immediately drop the mission's only detonator.
+    if (WeaponTypeInSlot(ped, slot) == 40) gAwaitFirstGrip[hand] = true;
     return true;
 }
 
@@ -1159,16 +1205,18 @@ bool ForceHold(int hand, int slot) {
 void AutoAssignGadgetPoint() {
     void* ped = g.FindPlayerPed ? g.FindPlayerPed(-1) : nullptr;
     if (ped == nullptr) return;
-    if (WeaponTypeInSlot(ped, 9) == 0) return;
-    if (holster::FindPointForSlot(9) >= 0) return;
-    for (int point = 0; point < holster::PointCount(); ++point) {
-        if (holster::IsPointFixed(point)) continue;
-        if (holster::PointSlot(point) >= 0) continue;
-        if (holster::SetPointSlot(point, 9)) {
-            LOGI("[physwpn] gadget slot auto-assigned to %s",
-                 holster::PointName(point));
+    for (const int slot : {9, 12}) {
+        if (WeaponTypeInSlot(ped, slot) == 0 ||
+            holster::FindPointForSlot(slot) >= 0) continue;
+        for (int point = 0; point < holster::PointCount(); ++point) {
+            if (holster::IsPointFixed(point)) continue;
+            if (holster::PointSlot(point) >= 0) continue;
+            if (holster::SetPointSlot(point, slot)) {
+                LOGI("[physwpn] mission slot=%d auto-assigned to %s",
+                     slot, holster::PointName(point));
+            }
+            break;
         }
-        return;
     }
 }
 
@@ -1214,6 +1262,9 @@ void AutoEquipParachute() {
     }
     if (!g.CPedGeometryAnalyser_IsInAir(ped)) {
         airborneSince = 0.0;
+        if (CurrentWeaponSlot(ped) == 11 &&
+            gHeldMaskRelaxed.load(std::memory_order_relaxed) == 0)
+            g.CPed_SetCurrentWeaponSlot(ped, 0);
         return;
     }
     const double now = NowSeconds();
@@ -1231,7 +1282,8 @@ void EnforceBikeWeaponLimit() {
     // the holster grab filter never sees that path. Kick the game's active
     // slot back to fists whenever a seated bike rider holds anything that is
     // not a one-handed sidearm.
-    if (g.FindPlayerVehicle == nullptr || g.FindPlayerPed == nullptr ||
+    if (vrfire::IsScriptedWeaponCamera() ||
+        g.FindPlayerVehicle == nullptr || g.FindPlayerPed == nullptr ||
         g.CVehicle_GetVehicleAppearance == nullptr)
         return;
     void* vehicle = g.FindPlayerVehicle(-1, false);
@@ -1383,9 +1435,7 @@ void PublishHeldVisualPoseTracking(int hand, int slot, const TrackingPose* pose)
     gHeldVisualPose[hand] = normalized;
     gHeldVisualSlot[hand] = slot;
     gHeldVisualValid[hand] = true;
-    // Compatibility with the old single-publish renderer: while unsupported the
-    // final pose is also the one-hand base. Once support engages, freeze that
-    // base and never feed the rotated final pose back into the next transform.
+    // Freeze the one-hand base when support engages to prevent feedback from the rotated final pose.
     if (!ValidHand(gSupportHand[hand])) {
         gHeldBasePose[hand] = normalized;
         gHeldBaseSlot[hand] = slot;

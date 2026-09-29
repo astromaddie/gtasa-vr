@@ -613,9 +613,7 @@ struct StereoFrameSample {
     int    pedAmbientBlocked{};
 };
 
-// Called once after a complete stereo pair has been recorded. The subsequent
-// SubmitGameFrame call occurs on the same GameThread and joins this record with
-// the enclosing JNI callback, avoiding the old one-frame CSV mismatch.
+// Record a complete stereo pair and join it with SubmitGameFrame on the same GameThread.
 void SubmitStereoFrame(const StereoFrameSample& sample);
 
 struct GameFrameSample {

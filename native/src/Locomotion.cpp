@@ -1,4 +1,5 @@
 #include "Locomotion.h"
+#include "RunToggle.h"
 
 #include "Log.h"
 
@@ -58,12 +59,20 @@ std::atomic<bool> g_welcomeSeen{false};
 std::map<std::string, int> g_cutsceneCameras;
 // Gameplay bindings. L3/R3 are included but raw stick-click chords used by
 // menus, recentering and cutscenes are deliberately handled before this map.
-constexpr int kBindingDefault[BIND_SRC_COUNT]={
+constexpr int kBindingVehicle[BIND_SRC_COUNT]={
     BIND_ACT_SPRINT, BIND_ACT_ATTACK, BIND_ACT_JUMP, BIND_ACT_ENTER,
     BIND_ACT_CROUCH, BIND_ACT_NONE};
-constexpr int kBindingSwapped[BIND_SRC_COUNT]={
+constexpr int kBindingDefault[BIND_SRC_COUNT]={
+    BIND_ACT_NONE, BIND_ACT_ATTACK, BIND_ACT_JUMP, BIND_ACT_ENTER,
+    BIND_ACT_SPRINT, BIND_ACT_CROUCH};
+constexpr int kBindingLegacySwapped[BIND_SRC_COUNT]={
     BIND_ACT_JUMP, BIND_ACT_ENTER, BIND_ACT_SPRINT, BIND_ACT_ATTACK,
     BIND_ACT_CROUCH, BIND_ACT_NONE};
+constexpr int kBindingSwapped[BIND_SRC_COUNT]={
+    BIND_ACT_JUMP, BIND_ACT_ENTER, BIND_ACT_NONE, BIND_ACT_ATTACK,
+    BIND_ACT_SPRINT, BIND_ACT_CROUCH};
+detail::RunToggle g_runToggle;
+std::atomic<bool> g_runEnabled{};
 std::atomic<int> g_binding[BIND_SRC_COUNT]={
     {kBindingDefault[0]},{kBindingDefault[1]},
     {kBindingDefault[2]},{kBindingDefault[3]},
@@ -166,6 +175,11 @@ void Load() {
         }
         std::fclose(file);
     }
+    // Migrate recognized presets while preserving custom mappings.
+    if(std::equal(bind,bind+BIND_SRC_COUNT,kBindingVehicle))
+        std::copy(kBindingDefault,kBindingDefault+BIND_SRC_COUNT,bind);
+    else if(std::equal(bind,bind+BIND_SRC_COUNT,kBindingLegacySwapped))
+        std::copy(kBindingSwapped,kBindingSwapped+BIND_SRC_COUNT,bind);
     g_movement.store(std::clamp(movement,0,MOVEMENT_COUNT-1));
     g_turn.store(std::clamp(turn,0,TURN_COUNT-1));
     g_turnSensitivity.store(std::clamp(sensitivity,25,300));
@@ -200,6 +214,11 @@ int DirectionStep(int direction) { return direction<0?-1:1; }
 } // namespace
 
 void Init() { EnsureInit(); }
+void UpdateRunToggle(bool enabled,bool held,bool crouch,bool l3,bool r3) {
+    g_runEnabled.store(g_runToggle.Update(enabled,held,crouch,l3,r3));
+}
+bool RunEnabled(){return g_runEnabled.load();}
+
 
 int GetButtonBinding(int source) {
     EnsureInit();
@@ -235,7 +254,7 @@ void ApplyControlsLayout(int layout) {
 }
 const char* ButtonActionName(int action) {
     switch (action) {
-        case BIND_ACT_SPRINT: return "SPRINT";
+        case BIND_ACT_SPRINT: return "SPRINT TOGGLE";
         case BIND_ACT_JUMP:   return "JUMP";
         case BIND_ACT_ATTACK: return "ATTACK / FIRE";
         case BIND_ACT_ENTER:  return "ENTER / EXIT";
@@ -302,7 +321,7 @@ bool ActionHeld(int action, bool a, bool b, bool x, bool y,
     EnsureInit();
     const bool held[BIND_SRC_COUNT]={a,b,x,y,l3,r3};
     for (int i=0;i<BIND_SRC_COUNT;++i) {
-        const int bound=onFoot?g_binding[i].load():kBindingDefault[i];
+        const int bound=onFoot?g_binding[i].load():kBindingVehicle[i];
         if (bound==action&&held[i]) return true;
     }
     return false;
@@ -425,13 +444,7 @@ void ToggleFlightCameraTilt() {
 void TransformMoveStick(float localHeadYaw,float* x,float* y) {
     EnsureInit();
     if (!x||!y) return;
-    // The engine now maps on-foot movement against the FULL composed VR
-    // camera (base + physical head) — the graphics-side heading sync made
-    // the old pre-rotation double-count every physical turn, and the [vr.move]
-    // diagnostics showed the ped heading oscillating: bodyYaw + 2*headYaw.
-    // HEAD mode is therefore a pass-through (native camera-relative, exactly
-    // like Vice City); BODY mode instead CANCELS the head component so the
-    // stick stays in the body frame.
+    // HEAD mode uses native camera-relative movement. BODY mode cancels physical head yaw.
     if (g_movement.load()!=MOVEMENT_BODY) return;
     const float oldX=*x,oldY=*y;
     const float c=std::cos(-localHeadYaw),s=std::sin(-localHeadYaw);

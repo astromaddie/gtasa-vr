@@ -21,6 +21,8 @@ SETTINGS_FILES=(
   vr_holsters.ini
   vr_hud.ini
   vr_locomotion.ini
+  vr_jetpack.ini
+  vr_modelsets.ini
 )
 
 usage() {

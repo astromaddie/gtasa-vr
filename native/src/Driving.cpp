@@ -1,4 +1,8 @@
+#include "Tbone.h"
+#include "BeachDance.h"
+#include "JustBusiness.h"
 #include "Driving.h"
+#include "MissionComfort.h"
 
 #include "Locomotion.h"
 
@@ -6,7 +10,9 @@
 #include "Log.h"
 #include "PhysicalWeapon.h"
 #include "Symbols.h"
+#include "VehicleCabin.h"
 #include "VrCamera.h"
+#include "VrFire.h"
 #include "Xr.h"
 
 #include <sys/mman.h>
@@ -97,10 +103,7 @@ constexpr int kDefaults[F_COUNT] = {
     0, 15, 0, 15, 0, 15,
     0, 0, 0, 0, 0, 0
 };
-// Temporary known-good baseline.  The vehicle camera and basic R2/L2/stick
-// controls must be proven independently before the physical wheel is allowed
-// to own hands/steering again.  Keep the hooks installed so DEFAULT driving is
-// usable, but make the immersive solver and wheel renderer completely inert.
+// Enable tracked wheel rendering and immersive vehicle input.
 constexpr bool kImmersiveDrivingEnabled = true;
 constexpr int kDrivingConfigVersion = 3;
 const char* const kPath =
@@ -121,6 +124,7 @@ std::atomic<int> g_boatMode{MODE_DEFAULT};
 // its axis for pitch. Helicopters stay DEFAULT regardless of this mode.
 std::atomic<int> g_planeMode{MODE_DEFAULT};
 std::atomic<float> g_planePitch{0.0f};
+std::atomic<bool> g_planeInvertPitch{false}; // thumbstick only; preserve physical yoke
 std::atomic<int> g_yokeSensitivity{100}; // percent, 25..200
 // HANDLEBAR+TRIGGER by default: it is the only bicycle mode with visible bar
 // sockets to grab and calibrate — MOTION shows nothing on the bars at all,
@@ -153,6 +157,7 @@ std::atomic<int> g_value[F_COUNT] = {
 std::atomic<bool> g_wheelVisible{true};
 std::atomic<bool> g_highlights{true};
 std::atomic<bool> g_bikeHandsFollowTilt{true};
+std::atomic<bool> g_bikeBlockWheelie{false};
 std::atomic<bool> g_bikeHorizonLocked{true};
 std::atomic<int> g_bikeVisualLeanPercent{50};
 std::atomic<bool> g_keepRiderOnFlips{false};
@@ -270,6 +275,44 @@ int ClampWheelCalibration(int field, int value) {
 std::mutex g_modelMutex;
 std::map<int, ModelCalibration> g_modelCalibration;
 
+struct ModelWheelPose {
+    V3 center{}, right{}, up{}, normal{};
+    float radius{};
+};
+
+ModelWheelPose CalibratedWheelPose(V3 seat, V3 right, V3 forward,
+                                   V3 up, const int* preset, const int* delta) {
+    ModelWheelPose pose{};
+    pose.center=seat+
+        right*((static_cast<float>(preset[F_WHEEL_SIDE])+
+                delta[WHEEL_CAL_SIDE])/100.0f)+
+        forward*((static_cast<float>(preset[F_WHEEL_DISTANCE])+
+                  delta[WHEEL_CAL_FORWARD])/100.0f)+
+        up*((static_cast<float>(preset[F_WHEEL_HEIGHT])+
+             delta[WHEEL_CAL_HEIGHT])/100.0f);
+    pose.right=right; pose.up=up; pose.normal=forward;
+    pose.radius=(static_cast<float>(preset[F_WHEEL_RADIUS])+
+                 delta[WHEEL_CAL_RADIUS])/100.0f;
+    constexpr float halfDegToRad=3.14159265358979323846f/360.0f;
+    const float pitch=delta[WHEEL_CAL_PITCH]*halfDegToRad;
+    const float yaw=delta[WHEEL_CAL_YAW]*halfDegToRad;
+    const float roll=delta[WHEEL_CAL_ROLL]*halfDegToRad;
+    if (pitch!=0.0f) {
+        pose.up=RotateAroundAxis(pose.up,pose.right,pitch);
+        pose.normal=RotateAroundAxis(pose.normal,pose.right,pitch);
+    }
+    if (yaw!=0.0f) {
+        pose.right=RotateAroundAxis(pose.right,pose.up,yaw);
+        pose.normal=RotateAroundAxis(pose.normal,pose.up,yaw);
+    }
+    if (roll!=0.0f) {
+        pose.right=RotateAroundAxis(pose.right,pose.normal,roll);
+        pose.up=RotateAroundAxis(pose.up,pose.normal,roll);
+    }
+    pose.radius=std::clamp(pose.radius,0.06f,0.45f);
+    return pose;
+}
+
 int ClampField(int field, int value) {
     switch (field) {
         case F_SIDE:
@@ -371,6 +414,7 @@ void Save() {
     std::fprintf(file, "BikeDrivingType=%d\n", g_bikeMode.load());
     std::fprintf(file, "BoatDrivingType=%d\n", g_boatMode.load());
     std::fprintf(file, "PlaneDrivingType=%d\n", g_planeMode.load());
+    std::fprintf(file, "PlaneInvertPitch=%d\n", g_planeInvertPitch.load()?1:0);
     std::fprintf(file, "YokeSensitivityPercent=%d\n", g_yokeSensitivity.load());
     std::fprintf(file, "BicycleControlMode=%d\n", g_bicycleMode.load());
     std::fprintf(file, "CarCameraView=%d\n", g_carView.load());
@@ -425,6 +469,7 @@ void Save() {
     std::fprintf(file, "HandleHighlights=%d\n", g_highlights.load()?1:0);
     std::fprintf(file, "BikeHandsFollowTilt=%d\n",
                  g_bikeHandsFollowTilt.load()?1:0);
+    std::fprintf(file, "BikeBlockWheelie=%d\n", g_bikeBlockWheelie.load()?1:0);
     std::fprintf(file, "BikeLockHorizon=%d\n", g_bikeHorizonLocked.load()?1:0);
     std::fprintf(file, "BikeVisualLeanPercent=%d\n",
                  g_bikeVisualLeanPercent.load());
@@ -459,13 +504,15 @@ void Save() {
             std::fprintf(file, "BikeAccelerator.%d=%d\n", model,
                          calibration.acceleratorMode);
             for (int hand = 0; hand < 2; ++hand)
-                for (int field = 0; field < CONTROL_FIELD_COUNT; ++field)
+                for (int field = 0; field < CONTROL_FIELD_COUNT; ++field) {
                     std::fprintf(file, "Control.%d.%d.%s=%d\n",
                                  model, hand, controlKeys[field],
                                  calibration.control[hand][field]);
-            for (int field = 0; field < WHEEL_CAL_FIELD_COUNT; ++field)
+                }
+            for (int field = 0; field < WHEEL_CAL_FIELD_COUNT; ++field) {
                 std::fprintf(file, "WheelCalib.%d.%d=%d\n",
                              model, field, calibration.wheel[field]);
+            }
         }
     }
     const bool wrote = std::fflush(file) == 0;
@@ -520,11 +567,7 @@ void Load() {
                      std::sscanf(line, "BikeDrivingMode=%d", &value)==1) {
                 bikeMode=value; bikeModeSeen=true;
             }
-            // Renamed from BicycleImmersiveMode: earlier builds silently saved
-            // MOTION (no bar sockets, nothing to grab or calibrate) as the
-            // default. Ignoring the old key migrates everyone to the visible
-            // HANDLEBAR+TRIGGER default once; the menu choice re-saves under
-            // the new key.
+            // BicycleControlMode supersedes BicycleImmersiveMode and defaults to HANDLEBAR+TRIGGER.
             else if (std::sscanf(line, "BicycleControlMode=%d", &value)==1)
                 bicycleMode=value;
             else if (std::sscanf(line, "CarCameraView=%d", &value)==1)
@@ -541,6 +584,8 @@ void Load() {
             else if (std::sscanf(line, "PlaneDrivingType=%d", &value)==1)
                 g_planeMode.store(value == MODE_IMMERSIVE ? MODE_IMMERSIVE
                                                           : MODE_DEFAULT);
+            else if (std::sscanf(line, "PlaneInvertPitch=%d", &value)==1)
+                g_planeInvertPitch.store(value==1);
             else if (std::sscanf(line, "YokeSensitivityPercent=%d", &value)==1)
                 g_yokeSensitivity.store(std::clamp(value,25,200));
             else if (std::sscanf(line, "PlaneSeatDistanceCm=%d", &value)==1)
@@ -594,6 +639,7 @@ void Load() {
             else if (std::sscanf(line, "HandleHighlights=%d", &value)==1) highlights=value;
             else if (std::sscanf(line, "BikeHandsFollowTilt=%d", &value)==1)
                 bikeHandsFollowTilt=value;
+            else if (std::sscanf(line, "BikeBlockWheelie=%d", &value)==1) g_bikeBlockWheelie.store(value==1);
             else if (std::sscanf(line, "BikeLockHorizon=%d", &value)==1) bikeLockHorizon=value;
             else if (std::sscanf(line, "BikeVisualLeanPercent=%d", &value)==1)
                 bikeVisualLeanPercent=value;
@@ -657,11 +703,7 @@ void Load() {
         }
         std::fclose(file);
     }
-    // 0.8.9 stored TWIST GRIP (0) as the implicit value for every motorcycle,
-    // including models which the player never configured. That makes R2 appear
-    // broken because the solver keeps waiting for a physical wrist rotation.
-    // Migrate old files once to the requested ordinary held-R2 default. The
-    // version marker preserves any later per-model switch back to TWIST GRIP.
+    // Initialize unversioned accelerator settings to held R2; preserve versioned per-model selections.
     if (configVersion < kDrivingConfigVersion) {
         int migrated=0;
         for (auto& entry : g_modelCalibration) {
@@ -673,6 +715,12 @@ void Load() {
         }
         LOGI("[driving] config v%d -> v%d: %d motorcycles default to HOLD R2",
              configVersion,kDrivingConfigVersion,migrated);
+    }
+    if (auto it=g_modelCalibration.find(532);it!=g_modelCalibration.end()) {
+        auto& c=it->second;
+        if(vehiclecabin::MigrateCombineSeat(532,MODE_IMMERSIVE,
+            c.seatSide[MODE_IMMERSIVE],c.seatForward[MODE_IMMERSIVE],c.seatHeight[MODE_IMMERSIVE]))
+            LOGI("[driving] combine cabin: obsolete shipped seat correction removed");
     }
     if (!carModeSeen) carMode=legacyMode;
     if (!immersiveCarSeatSeen) {
@@ -695,9 +743,7 @@ void Load() {
         highlights=1;
         LOGI("[driving] migrating legacy settings: BIKE=IMMERSIVE, highlights=ON");
     }
-    // MOTION steering is not shipped.  Migrate old/invalid values to the
-    // ordinary stick mode instead of silently enabling a hand-driven input
-    // path that is no longer exposed by the menu.
+    // Map unsupported steering values to ordinary stick controls.
     const int loadedCarMode=carMode==MODE_IMMERSIVE?MODE_IMMERSIVE:MODE_DEFAULT;
     const int loadedBikeMode=bikeMode==MODE_IMMERSIVE?MODE_IMMERSIVE:MODE_DEFAULT;
     g_carMode.store(kImmersiveDrivingEnabled?loadedCarMode:MODE_DEFAULT);
@@ -1215,11 +1261,7 @@ bool BuildWheelTracking(WheelVisualState* visual) {
             headCandidateValid = true;
         }
     }
-    // A finite value is not necessarily a usable tracking transform.  During a
-    // cold aircraft load WorldPointToTracking used to briefly pass game-world
-    // coordinates through unchanged (hundreds or thousands of metres).  That
-    // one bad frame then became the permanent seat reference below.  Accept a
-    // plane anchor only when it is actually close to the live OpenXR head.
+    // Accept an aircraft seat anchor only within the live OpenXR head envelope.
     if (planeYoke) {
         V3 seatTracking{};
         float headPosition[3]{},headOrientation[4]{};
@@ -1237,9 +1279,7 @@ bool BuildWheelTracking(WheelVisualState* visual) {
             return false;
         }
     }
-    // Hide the wheel (and its dash-HUD anchor) the moment the exit animation
-    // pulls the ped off the seat: the anchor follows the ped, so the wheel
-    // used to climb out of the aircraft with the player.
+    // Hide the wheel and dashboard anchor when the exit animation pulls the ped off the seat.
     {
         const V3 seatDelta=pp-vp;
         const V3 local{Dot(seatDelta,vr),Dot(seatDelta,vf),
@@ -1308,9 +1348,7 @@ bool BuildWheelTracking(WheelVisualState* visual) {
             // reference: an anchor-source flip (root vs head bone) between
             // frames is invisible here and cannot fake a 2m "exit".
             const V3 drift=gateLocal-g_wheelSeatGateLocal;
-            // 0.30m gate with a much slower reference leak: the previous
-            // 0.05/frame leak CHASED the exit slide and delayed the hide —
-            // the yoke visibly followed the pilot out before vanishing.
+            // Hide the wheel when the seated root moves more than 0.30 m from its reference.
             if (Length(drift)>0.30f) {
                 static unsigned int hiddenLog=0;
                 if ((++hiddenLog%90u)==1u)
@@ -1331,46 +1369,26 @@ bool BuildWheelTracking(WheelVisualState* visual) {
                 vu*g_wheelSeatLocal.z;
         }
     }
-    // Per-model wheel calibration (VC parity): position deltas in the vehicle
-    // frame, radius delta, and pitch/yaw/roll of the wheel plane itself.
     int wheelCal[WHEEL_CAL_FIELD_COUNT]{};
     {
         std::lock_guard<std::mutex> modelLock(g_modelMutex);
         const auto found=g_modelCalibration.find(modelId);
         if (found!=g_modelCalibration.end())
-            std::memcpy(wheelCal,found->second.wheel,sizeof(wheelCal));
+            std::memcpy(wheelCal,found->second.wheel,
+                        sizeof(wheelCal));
     }
-    const V3 worldCenter=pp+
-        vr*((static_cast<float>(g_value[F_WHEEL_SIDE].load())+
-             wheelCal[WHEEL_CAL_SIDE])/100.0f)+
-        vf*((static_cast<float>(g_value[F_WHEEL_DISTANCE].load())+
-             wheelCal[WHEEL_CAL_FORWARD])/100.0f)+
-        vu*((static_cast<float>(g_value[F_WHEEL_HEIGHT].load())+
-             wheelCal[WHEEL_CAL_HEIGHT])/100.0f);
-    V3 wheelAxisRight=vr,wheelAxisUp=vu,wheelAxisNormal=vf;
-    {
-        constexpr float halfDegToRad=3.14159265358979323846f/360.0f;
-        const float pitch=wheelCal[WHEEL_CAL_PITCH]*halfDegToRad;
-        const float yaw=wheelCal[WHEEL_CAL_YAW]*halfDegToRad;
-        const float roll=wheelCal[WHEEL_CAL_ROLL]*halfDegToRad;
-        if (pitch!=0.0f) {
-            wheelAxisUp=RotateAroundAxis(wheelAxisUp,wheelAxisRight,pitch);
-            wheelAxisNormal=RotateAroundAxis(wheelAxisNormal,wheelAxisRight,pitch);
-        }
-        if (yaw!=0.0f) {
-            wheelAxisRight=RotateAroundAxis(wheelAxisRight,wheelAxisUp,yaw);
-            wheelAxisNormal=RotateAroundAxis(wheelAxisNormal,wheelAxisUp,yaw);
-        }
-        if (roll!=0.0f) {
-            wheelAxisRight=RotateAroundAxis(wheelAxisRight,wheelAxisNormal,roll);
-            wheelAxisUp=RotateAroundAxis(wheelAxisUp,wheelAxisNormal,roll);
-        }
-    }
+    int wheelPreset[F_COUNT]{};
+    wheelPreset[F_WHEEL_SIDE]=g_value[F_WHEEL_SIDE].load();
+    wheelPreset[F_WHEEL_DISTANCE]=g_value[F_WHEEL_DISTANCE].load();
+    wheelPreset[F_WHEEL_HEIGHT]=g_value[F_WHEEL_HEIGHT].load();
+    wheelPreset[F_WHEEL_RADIUS]=g_value[F_WHEEL_RADIUS].load();
+    const ModelWheelPose wheel=CalibratedWheelPose(pp,vr,vf,vu,wheelPreset,wheelCal);
+    const V3 worldCenter=wheel.center;
     V3 center,pointRight,pointUp,pointNormal;
     if (!WorldPointToTracking(worldCenter,&center)||
-        !WorldPointToTracking(worldCenter+wheelAxisRight,&pointRight)||
-        !WorldPointToTracking(worldCenter+wheelAxisUp,&pointUp)||
-        !WorldPointToTracking(worldCenter+wheelAxisNormal,&pointNormal)) return false;
+        !WorldPointToTracking(worldCenter+wheel.right,&pointRight)||
+        !WorldPointToTracking(worldCenter+wheel.up,&pointUp)||
+        !WorldPointToTracking(worldCenter+wheel.normal,&pointNormal)) return false;
     V3 normal=Normalized(pointNormal-center);
     V3 right=pointRight-center; right=Normalized(right-normal*Dot(right,normal));
     V3 up=Normalized(Cross(right,normal));
@@ -1383,12 +1401,11 @@ bool BuildWheelTracking(WheelVisualState* visual) {
     visual->right[0]=right.x; visual->right[1]=right.y; visual->right[2]=right.z;
     visual->up[0]=up.x; visual->up[1]=up.y; visual->up[2]=up.z;
     visual->normal[0]=normal.x; visual->normal[1]=normal.y; visual->normal[2]=normal.z;
-    visual->radius=std::clamp(
-        (static_cast<float>(g_value[F_WHEEL_RADIUS].load())+
-         wheelCal[WHEEL_CAL_RADIUS])/100.0f, 0.06f, 0.45f);
+    visual->radius=wheel.radius;
     static int loggedModel=-1;
     if (loggedModel!=modelId) {
-        LOGI("[driving] immersive wheel ready center=(%.2f,%.2f,%.2f) radius=%.2f visible=%d grips=%d",
+        LOGI("[driving] immersive wheel ready model=%d source=%s center=(%.2f,%.2f,%.2f) radius=%.2f visible=%d grips=%d",
+             modelId,"SEAT_PRESET",
              center.x,center.y,center.z,visual->radius,visual->visible,
              g_highlights.load());
         loggedModel=modelId;
@@ -1498,7 +1515,7 @@ bool BuildBikeTracking(WheelVisualState* visual) {
 }
 
 void FillHandleVisuals(WheelVisualState* visual) {
-    const V3 center{visual->center[0],visual->center[1],visual->center[2]};
+    V3 center{visual->center[0],visual->center[1],visual->center[2]};
     const V3 baseRight{visual->right[0],visual->right[1],visual->right[2]};
     const V3 baseUp{visual->up[0],visual->up[1],visual->up[2]};
     const V3 normal{visual->normal[0],visual->normal[1],visual->normal[2]};
@@ -1586,6 +1603,53 @@ void FillHandleVisuals(WheelVisualState* visual) {
 using AxisQueryFn=int(*)(void*);
 using SprintFn=bool(*)(void*,int);
 using ButtonQueryFn=bool(*)(void*);
+using ComponentRotationFn=void(*)(void*,void*,int,float,bool);
+ComponentRotationFn g_origComponentRotation=nullptr;
+
+void TraceCombineCabin(float requested, const void* frame) {
+    // Keep a bounded on-device trace across game exit; logcat is very noisy.
+    static unsigned int samples=0;
+    const unsigned int sample=samples++;
+    if (sample%120u!=0u || sample>=36000u) return;
+    FILE* file=std::fopen(
+        "/sdcard/Android/data/com.rockstargames.gtasa/files/vr_combine_cabin.log",
+        sample==0?"w":"a");
+    if (!file)return;
+    const auto* local=static_cast<const char*>(frame)+0x20;
+    V3 right{},up{};
+    std::memcpy(&right,local,sizeof(right));
+    std::memcpy(&up,local+0x20,sizeof(up));
+    std::fprintf(file,"rigid-chassis-v1 sample=%u requested=%.6f right=(%.5f %.5f %.5f) up=(%.5f %.5f %.5f)\n",
+        sample,requested,right.x,right.y,right.z,up.x,up.y,up.z);
+    std::fclose(file);
+}
+
+void OnComponentRotation(void* vehicle,void* frame,int axis,float angle,bool reset) {
+    if (!g_origComponentRotation)return;
+    bool rigidCab=false;
+    // Retail 2.11 CAutomobile::PreRender @6aee54 rotates CAR_CHASSIS
+    // (node pointer +0x808) about local Y using the suspension/roll filter at
+    // +0xb80. This moves the rendered combine cab independently of CEntity's
+    // matrix. Wheels, cutter and NPC combines must retain their animation.
+    if (vehicle && frame && axis==1 && reset && vrcam::IsStereoActive() &&
+        *reinterpret_cast<const std::uint16_t*>(
+            static_cast<const char*>(vehicle)+0x32)==532 &&
+        g.FindPlayerVehicle && g.FindPlayerVehicle(-1,false)==vehicle &&
+        !ThirdPersonViewActive() &&
+        !(g.PlayerIsEnteringCar && g.PlayerIsEnteringCar()) &&
+        g.FindPlayerPed && g.CVehicle_IsDriver) {
+        void* ped=g.FindPlayerPed(-1);
+        void* chassis=nullptr;
+        std::memcpy(&chassis,static_cast<const char*>(vehicle)+0x808,sizeof(chassis));
+        rigidCab=ped && g.CVehicle_IsDriver(vehicle,ped) && frame==chassis;
+    }
+    // Execute the stock setter with a neutral rotation, rather than skipping
+    // it: a cab already banked when switching views must return to its rest
+    // frame. SetRotateY(0) preserves the frame translation via the stock code.
+    g_origComponentRotation(vehicle,frame,axis,rigidCab?0.0f:angle,reset);
+    if (rigidCab)TraceCombineCabin(angle,frame);
+}
+
 using BikePreRenderFn=void(*)(void*);
 using KnockOffAffectsPedFn=bool(*)(const void*,void*);
 AxisQueryFn g_origAccelerate{},g_origBrake{},g_origSteering{},
@@ -1728,7 +1792,13 @@ void BikePreRenderCommon(void* bike, BikePreRenderFn origPreRender) {
 }
 
 bool VrGameplayInputAllowed() {
-    return vrcam::IsStereoActive()&&!g_inputBlocked.load(std::memory_order_acquire);
+    if (!vrcam::IsStereoActive()||g_inputBlocked.load(std::memory_order_acquire)||
+        vrfire::IsScriptedWeaponCamera()) return false;
+    if (GetRemoteControlledVehicle()||IsCraneControlActive()) {
+        xr::InputState input{}; xr::GetInput(input);
+        if (input.grip[0]>=0.75f&&input.grip[1]>=0.75f) return false;
+    }
+    return true;
 }
 
 // Interior glass, part two: the windscreen is its own named atomic (hidden in
@@ -1802,10 +1872,61 @@ bool HasPlayerVehicle() {
     return g.FindPlayerVehicle&&g.FindPlayerVehicle(-1,false)!=nullptr;
 }
 
+void* GetControlledVehicle() {
+    if (void* remote=GetRemoteControlledVehicle()) return remote;
+    return g.FindPlayerVehicle?g.FindPlayerVehicle(-1,false):nullptr;
+}
+
+int ControlledVehicleAppearance() {
+    void* vehicle=GetControlledVehicle();
+    return vehicle&&g.CVehicle_GetVehicleAppearance?
+        g.CVehicle_GetVehicleAppearance(vehicle):0;
+}
+
+int ControlledVehicleModel() {
+    void* vehicle=GetControlledVehicle();
+    return vehicle?*reinterpret_cast<const std::uint16_t*>(
+        static_cast<const char*>(vehicle)+0x32):-1;
+}
+
+bool IsRemoteBaron() {
+    return GetRemoteControlledVehicle()&&ControlledVehicleModel()==464;
+}
+
+// 2.11 FlyingControl reads the same pointer at +4b0 and float fields at
+// +18 roll, +1c roll stability, +20 pitch. Use a private 0x58-byte handling
+// copy for this synchronous native physics step; never modify shared handling.
+using FlyingControlFn=void(*)(void*,int,float,float,float,float);
+FlyingControlFn g_origFlyingControl=nullptr;
+thread_local bool g_insideRcFlying=false;
+void OnFlyingControl(void* vehicle,int model,float skid,float pitch,float roll,float throttle) {
+    if (!g_origFlyingControl) return;
+    const bool assist=!g_insideRcFlying&&VrGameplayInputAllowed()&&
+        IsRemoteBaron()&&vehicle==GetRemoteControlledVehicle()&&(model==1||model==3);
+    float** handling=assist?reinterpret_cast<float**>(static_cast<char*>(vehicle)+0x4b0):nullptr;
+    float* saved=handling?*handling:nullptr;
+    alignas(16) float local[0x58/sizeof(float)]{};
+    bool tuned=false;
+    if(saved&&std::isfinite(saved[6])&&saved[6]>0&&saved[6]<0.1f&&
+       std::isfinite(saved[7])&&saved[7]<0&&saved[7]>-0.1f&&
+       std::isfinite(saved[8])&&std::abs(saved[8])<0.1f) {
+        std::memcpy(local,saved,sizeof(local));
+        local[6]*=0.50f;  // less abrupt roll
+        local[7]*=3.0f;   // stronger native return toward level wings
+        local[8]*=0.70f;  // finer altitude/aim corrections
+        *handling=local;tuned=true;g_insideRcFlying=true;
+    }
+    g_origFlyingControl(vehicle,model,skid,pitch,roll,throttle);
+    if(tuned) {
+        if(*handling==local) *handling=saved;
+        g_insideRcFlying=false;
+    }
+}
+
 int OnGetAccelerate(void* pad) {
-    if (VrGameplayInputAllowed()&&HasPlayerVehicle()) {
+    if (VrGameplayInputAllowed()&&GetControlledVehicle()) {
         xr::InputState input{}; xr::GetInput(input);
-        const int appearance=GetActiveVehicleAppearance();
+        const int appearance=GetRemoteControlledVehicle()?0:GetActiveVehicleAppearance();
         if (appearance==2&&ModeForAppearance(appearance)==MODE_IMMERSIVE) {
             std::lock_guard<std::mutex> lock(g_stateMutex);
             const int model=g_activeVehicleModel.load(std::memory_order_acquire);
@@ -1833,7 +1954,7 @@ int OnGetAccelerate(void* pad) {
     return g_origAccelerate?g_origAccelerate(pad):0;
 }
 int OnGetBrake(void* pad) {
-    if (VrGameplayInputAllowed()&&HasPlayerVehicle()) {
+    if (VrGameplayInputAllowed()&&GetControlledVehicle()) {
         xr::InputState input{}; xr::GetInput(input);
         // Likewise Square/X cannot compete with the authoritative L2 brake.
         return static_cast<int>(std::clamp(input.triggers[0],0.0f,1.0f)*255.0f);
@@ -1851,8 +1972,8 @@ void ReadMappedGameplaySticks(const xr::InputState& input,
 
 int OnGetSteering(void* pad) {
     EnsureInit();
-    if (VrGameplayInputAllowed()&&HasPlayerVehicle()) {
-        const int steerAppearance=GetActiveVehicleAppearance();
+    if (VrGameplayInputAllowed()&&GetControlledVehicle()) {
+        const int steerAppearance=GetRemoteControlledVehicle()?0:GetActiveVehicleAppearance();
         if ((steerAppearance==1||steerAppearance==2)&&
             ModeForAppearance(steerAppearance)==MODE_MOTION) {
             // MOTION: controller-yaw steering, same stock-minus convention
@@ -1861,7 +1982,7 @@ int OnGetSteering(void* pad) {
                 g_motionSteering.load(std::memory_order_relaxed),
                 -1.0f,1.0f)*128.0f);
         }
-        if (ModeForAppearance(GetActiveVehicleAppearance())==MODE_IMMERSIVE) {
+        if (ModeForAppearance(steerAppearance)==MODE_IMMERSIVE) {
             std::lock_guard<std::mutex> lock(g_stateMutex);
             const int model=g_activeVehicleModel.load(std::memory_order_acquire);
             if (IsBicycleModel(model)&&
@@ -1884,7 +2005,8 @@ int OnGetSteering(void* pad) {
         float moveX=0.0f,moveY=0.0f,turnX=0.0f,turnY=0.0f;
         ReadMappedGameplaySticks(input,moveX,moveY,turnX,turnY);
         const int steer=static_cast<int>(
-            std::clamp(moveX,-1.0f,1.0f)*128.0f);
+            (IsRemoteBaron()?missioncomfort::RcAxis(moveX):
+             std::clamp(moveX,-1.0f,1.0f))*128.0f);
         // Helis feed this value into their roll channel (ProcessControlInputs
         // stores -steer/128 at heli+0xbd4); log it so a capture shows whether
         // the stick reaches the game.
@@ -1900,23 +2022,25 @@ int OnGetSteering(void* pad) {
 }
 int OnGetSteeringUpDown(void* pad) {
     EnsureInit();
-    if (VrGameplayInputAllowed()&&HasPlayerVehicle()) {
-        const int appearance=GetActiveVehicleAppearance();
+    if (VrGameplayInputAllowed()&&GetControlledVehicle()) {
+        const int appearance=ControlledVehicleAppearance();
         if (appearance==2&&ModeForAppearance(2)==MODE_IMMERSIVE) {
             std::lock_guard<std::mutex> lock(g_stateMutex);
             // CBike negates this pad query before applying m_fLeanInput. VC's
             // immersive lean uses -1 for raised hands (wheelie), hence this
             // sign.
-            return static_cast<int>(-std::clamp(g_bikeLean,-1.0f,1.0f)*128.0f);
+            const float lean=std::clamp(g_bikeLean,-1.0f,1.0f);
+            return static_cast<int>(-(g_bikeBlockWheelie.load()?std::max(0.0f,lean):lean)*128.0f);
         }
-        if (appearance==5&&ModeForAppearance(5)==MODE_IMMERSIVE) {
+        if (appearance==5&&!GetRemoteControlledVehicle()&&
+            ModeForAppearance(5)==MODE_IMMERSIVE) {
             // Real-yoke pitch: pull the grabbed wheel toward you = nose up,
             // push away = nose down. +1 pull maps to full stick-back.
             const float pull=std::clamp(
                 g_planePitch.load(std::memory_order_acquire),-1.0f,1.0f);
             return static_cast<int>(pull*128.0f);
         }
-        if (appearance==3) {
+        if (appearance==3||appearance==5) {
             // Heli pitch: CHeli::ProcessControlInputs stores this query /128
             // at heli+0xbd0, but the retail body only reads the TOUCH tilt —
             // the left stick Y never reached the helicopter, which is why the
@@ -1925,8 +2049,12 @@ int OnGetSteeringUpDown(void* pad) {
             xr::InputState input{}; xr::GetInput(input);
             float moveX=0.0f,moveY=0.0f,turnX=0.0f,turnY=0.0f;
             ReadMappedGameplaySticks(input,moveX,moveY,turnX,turnY);
+            // Match OnUpdatePads' existing aircraft axis convention. Planes
+            // also need a direct answer: the mobile fallback polls touch tilt.
+            const float sign=appearance==5?(IsPlanePitchInverted()?-1.0f:1.0f):-1.0f;
             return static_cast<int>(
-                -std::clamp(moveY,-1.0f,1.0f)*128.0f);
+                sign*(IsRemoteBaron()?missioncomfort::RcAxis(moveY):
+                      std::clamp(moveY,-1.0f,1.0f))*128.0f);
         }
     }
     return g_origSteeringUpDown?g_origSteeringUpDown(pad):0;
@@ -1954,7 +2082,7 @@ int OnGetHorn(void* pad,unsigned char arg) {
 int OnGetHandBrake(void* pad) {
     if (VrGameplayInputAllowed()&&HasPlayerVehicle()) {
         xr::InputState input{}; xr::GetInput(input);
-        return input.a?255:0;
+        return input.a&&!tbone::ClaimsA()?255:0;
     }
     return g_origHandBrake?g_origHandBrake(pad):0;
 }
@@ -1962,13 +2090,10 @@ bool OnGetSprint(void* pad,int sprintType) {
     if (vrcam::IsStereoActive()) {
         if (g_inputBlocked.load(std::memory_order_acquire)||HasPlayerVehicle())
             return false;
-        xr::InputState input{}; xr::GetInput(input);
-        // Vice City Cross mapping through the remappable bindings: any face
-        // button assigned to SPRINT feeds Cross, plus R2 as before.
-        return locomotion::ActionHeld(locomotion::BIND_ACT_SPRINT,
-                                      input.a,input.b,input.x,input.y,
-                                      input.l3,input.r3,true)||
-               input.triggers[1]>=0.50f;
+        // Mobile GetSprint bypasses the Java/new-pad Cross state entirely.
+        // Consume the same persistent L3 toggle; never reread the held button
+        // or weapon trigger here. Ordinary movement axes remain unchanged.
+        return !vrcam::IsCrouched() && locomotion::RunEnabled();
     }
     return g_origSprint?g_origSprint(pad,sprintType):false;
 }
@@ -2066,7 +2191,7 @@ void* InstallSprintTrampoline(void* target,void* replacement) {
         reinterpret_cast<std::uintptr_t>(target)+16u);
     __builtin___clear_cache(reinterpret_cast<char*>(t),reinterpret_cast<char*>(t)+48);
     if (!PatchAbsoluteJump(target,replacement)) { munmap(trampoline,pageSize); return nullptr; }
-    LOGI("[driving] CPad::GetSprint VR A-button hook installed");
+    LOGI("[driving] CPad::GetSprint VR sprint-toggle hook installed");
     return trampoline;
 }
 
@@ -2150,32 +2275,34 @@ void* InstallStationTrampoline(void* target, void* replacement) {
 // Right-stick vehicle accessors. In touch mode ([pad+0x118]!=0) their retail
 // bodies branch into CHID analog-axis reads and never touch NewState — so no
 // amount of pad writing reaches the Hydra nozzles. Serve the Quest right
-// stick directly while flying; every other vehicle (tank turret, tow truck,
-// hydraulics) keeps the retail path.
+// stick directly for aircraft, the tank and the forklift's moving collision.
 using CarGunUpDownFn = int (*)(void*, int, void*, float, int);
 using CarGunLeftRightFn = int (*)(void*, int, int);
 CarGunUpDownFn g_origCarGunUpDown = nullptr;
 CarGunLeftRightFn g_origCarGunLeftRight = nullptr;
 
-bool AircraftRightStickActive() {
-    if (!VrGameplayInputAllowed() || !HasPlayerVehicle()) return false;
-    // Aircraft, plus the Rhino: TankControl reads the same CarGun accessors
-    // for turret rotation/elevation.
-    if (g_activeVehicleModel.load(std::memory_order_acquire) == kRhinoModelId)
+bool VehicleRightStickActive() {
+    if (!VrGameplayInputAllowed()) return false;
+    if (IsCraneControlActive()) return true;
+    if (!GetControlledVehicle()) return false;
+    // UpdateMovingCollision reads CarGunUpDown for the forklift (530).
+    const int model=ControlledVehicleModel();
+    if (model==kRhinoModelId||model==530)
         return true;
-    const int appearance = GetActiveVehicleAppearance();
+    const int appearance=ControlledVehicleAppearance();
     return appearance == 3 || appearance == 5;
 }
 
 int OnGetCarGunUpDown(void* pad, int ignoreDucking, void* vehicle,
                       float range, int useSecondary) {
+    if (savr::beachdance::Active()) return savr::beachdance::AxisUpDown();
     // Lowrider hydraulics: both grips held in a hydraulics-equipped car turn the
     // right stick into the suspension control. CAutomobile::HydraulicControl
     // reads exactly this accessor, so answering here bypasses the touch/input
     // -type gate entirely. Ground-only, so it can never fight the aircraft case.
     if (savr::hydraulics::IsActive())
         return savr::hydraulics::AxisUpDown();
-    if (AircraftRightStickActive()) {
+    if (VehicleRightStickActive()) {
         xr::InputState input{}; xr::GetInput(input);
         float moveX=0.0f,moveY=0.0f,turnX=0.0f,turnY=0.0f;
         ReadMappedGameplaySticks(input,moveX,moveY,turnX,turnY);
@@ -2190,9 +2317,10 @@ int OnGetCarGunUpDown(void* pad, int ignoreDucking, void* vehicle,
 }
 
 int OnGetCarGunLeftRight(void* pad, int ignoreDucking, int useSecondary) {
+    if (savr::beachdance::Active()) return savr::beachdance::AxisLeftRight();
     if (savr::hydraulics::IsActive())
         return savr::hydraulics::AxisLeftRight();
-    if (AircraftRightStickActive()) {
+    if (VehicleRightStickActive()) {
         xr::InputState input{}; xr::GetInput(input);
         float moveX=0.0f,moveY=0.0f,turnX=0.0f,turnY=0.0f;
         ReadMappedGameplaySticks(input,moveX,moveY,turnX,turnY);
@@ -2204,20 +2332,22 @@ int OnGetCarGunLeftRight(void* pad, int ignoreDucking, int useSecondary) {
         ? g_origCarGunLeftRight(pad, ignoreDucking, useSecondary) : 0;
 }
 
-// Tank main gun. GetCarGunFired carries the same touch gate ([pad+0x118]) as
-// the analog accessors, so the Rhino could never fire on Quest. B pulls the
-// trigger while seated in the tank; everything else keeps the retail body
-// (reached through a gate-reproducing trampoline — the prologue's PC-relative
-// CBNZ/CBZ pair cannot be relocated).
+// GetCarGunFired returns a button code, not a bool. Aircraft ask for the
+// secondary control and compare the result to 2 (retail 0x6e6ab8), including
+// the RC Baron. The Rhino uses the primary code 1.
 using CarGunFiredFn = int (*)(void*, int, int);
 CarGunFiredFn g_origCarGunFired = nullptr;
 
 int OnGetCarGunFired(void* pad, int ignoreDucking, int useSecondary) {
-    if (VrGameplayInputAllowed() &&
-        g_activeVehicleModel.load(std::memory_order_acquire) ==
-            kRhinoModelId) {
+    const int appearance=ControlledVehicleAppearance();
+    if (VrGameplayInputAllowed() && pad &&
+        *reinterpret_cast<const std::uint16_t*>(
+            static_cast<const char*>(pad)+0x110)==0 &&
+        (ControlledVehicleModel()==kRhinoModelId||
+         appearance==3||appearance==5)) {
         xr::InputState input{}; xr::GetInput(input);
-        return input.b ? 1 : 0;
+        const bool bothGrips=input.grip[0]>=0.75f&&input.grip[1]>=0.75f;
+        return input.b&&!bothGrips ? (useSecondary?2:1) : 0;
     }
     return g_origCarGunFired
         ? g_origCarGunFired(pad, ignoreDucking, useSecondary) : 0;
@@ -2260,7 +2390,7 @@ void* InstallCarGunFiredTrampoline(void* target, void* replacement) {
         munmap(trampoline, pageSize);
         return nullptr;
     }
-    LOGI("[driving] Rhino CarGunFired B-trigger hook installed");
+    LOGI("[driving] vehicle CarGunFired B-trigger hook installed");
     return trampoline;
 }
 
@@ -2276,6 +2406,36 @@ using TouchQueryFn = int (*)(void*);
 CarGunJustDownFn g_origCarGunJustDown = nullptr;
 // X pressed this frame and not the last, sampled once per frame on foot.
 std::atomic<bool> g_jumpEdge{false};
+std::atomic<bool> g_vehicleActionEdge{false};
+TouchQueryFn g_origCraneReleaseJustDown=nullptr;
+TouchQueryFn g_origUseBomb=nullptr;
+TouchQueryFn g_origUseRocket=nullptr;
+
+bool MissionActionAllowed(void* pad) {
+    return VrGameplayInputAllowed()&&pad&&
+        *reinterpret_cast<const std::uint16_t*>(
+            static_cast<const char*>(pad)+0x110)==0;
+}
+
+int OnCraneReleaseJustDown(void* pad) {
+    if (MissionActionAllowed(pad)&&
+        (IsCraneControlActive()||ControlledVehicleAppearance()==3))
+        return g_vehicleActionEdge.load(std::memory_order_acquire)?1:0;
+    return g_origCraneReleaseJustDown?g_origCraneReleaseJustDown(pad):0;
+}
+
+int OnUseBomb(void* pad) {
+    if (MissionActionAllowed(pad)&&HasPlayerVehicle())
+        return g_vehicleActionEdge.load(std::memory_order_acquire)?1:0;
+    return g_origUseBomb?g_origUseBomb(pad):0;
+}
+
+int OnUseRocket(void* pad) {
+    const int appearance=ControlledVehicleAppearance();
+    if (MissionActionAllowed(pad)&&(appearance==3||appearance==5))
+        return g_vehicleActionEdge.load(std::memory_order_acquire)?1:0;
+    return g_origUseRocket?g_origUseRocket(pad):0;
+}
 
 int OnCarGunJustDown(void* pad) {
     if (VrGameplayInputAllowed() &&
@@ -2338,7 +2498,7 @@ TouchQueryFn g_origTurretRight = nullptr;
 
 int OnGetTurretLeft(void* pad) {
     if (VrGameplayInputAllowed() &&
-        g_activeVehicleAppearance.load(std::memory_order_acquire) == 3) {
+        ControlledVehicleAppearance()==3) {
         xr::InputState input{}; xr::GetInput(input);
         float moveX=0.0f,moveY=0.0f,turnX=0.0f,turnY=0.0f;
         ReadMappedGameplaySticks(input,moveX,moveY,turnX,turnY);
@@ -2349,7 +2509,7 @@ int OnGetTurretLeft(void* pad) {
 
 int OnGetTurretRight(void* pad) {
     if (VrGameplayInputAllowed() &&
-        g_activeVehicleAppearance.load(std::memory_order_acquire) == 3) {
+        ControlledVehicleAppearance()==3) {
         xr::InputState input{}; xr::GetInput(input);
         float moveX=0.0f,moveY=0.0f,turnX=0.0f,turnY=0.0f;
         ReadMappedGameplaySticks(input,moveX,moveY,turnX,turnY);
@@ -2413,8 +2573,7 @@ void OnTankControl(void* automobile) {
 // 2.11 disasm of 0x72dea0).
 int OnGetInputType() {
     if (VrGameplayInputAllowed()) {
-        const int appearance =
-            g_activeVehicleAppearance.load(std::memory_order_acquire);
+        const int appearance=ControlledVehicleAppearance();
         if (appearance == 3 || appearance == 5) return 1; // joystick
     }
     if (!g.LoadBase) return 0;
@@ -2449,6 +2608,10 @@ bool InstallInputTypePatch() {
 void InstallPadHooks() {
     constexpr std::uint32_t accel[4]={0xD100C3FFu,0xA9017BFDu,0xA9024FF4u,0x910043FDu};
     constexpr std::uint32_t brake[4]={0xD100C3FFu,0xA9017BFDu,0xA9024FF4u,0x910043FDu};
+    constexpr std::uint32_t flying[4]={0xd10583ffu,0x6d0d3befu,0x6d0e33edu,0x6d0f2bebu};
+    g_origFlyingControl=reinterpret_cast<FlyingControlFn>(InstallVerifiedTrampoline(
+        g.CVehicle_FlyingControl,reinterpret_cast<void*>(&OnFlyingControl),flying,
+        "CVehicle::FlyingControl RC Baron comfort"));
     constexpr std::uint32_t steer[4]={0xD10103FFu,0xA9017BFDu,0xF90013F5u,0xA9034FF4u};
     constexpr std::uint32_t steerUpDown[4]={0xD100C3FFu,0xA9017BFDu,0xA9024FF4u,0x910043FDu};
     g_origAccelerate=reinterpret_cast<AxisQueryFn>(InstallVerifiedTrampoline(
@@ -2471,8 +2634,10 @@ void InstallPadHooks() {
     g_origLastStation=reinterpret_cast<ButtonQueryFn>(InstallStationTrampoline(
         reinterpret_cast<void*>(g.CPad_LastStationJustUp),
         reinterpret_cast<void*>(&OnLastStationJustUp)));
-    LOGI("[driving] aircraft gamepad input-type patch=%d",
-         InstallInputTypePatch()?1:0);
+    // Production logging is compiled out, so installation must not be a log
+    // argument with a side effect.
+    [[maybe_unused]] const bool inputTypePatched=InstallInputTypePatch();
+    LOGI("[driving] aircraft gamepad input-type patch=%d",inputTypePatched?1:0);
     constexpr std::uint32_t carGunUpDown[4]={
         0x6dbc23e9u,0xa9017bfdu,0xa90257f6u,0xa9034ff4u};
     constexpr std::uint32_t carGunLeftRight[4]={
@@ -2494,6 +2659,16 @@ void InstallPadHooks() {
         InstallTouchQueryTrampoline(g.CPad_CarGunJustDown,
             reinterpret_cast<void*>(&OnCarGunJustDown),
             "Rhino CarGunJustDown"));
+    g_origCraneReleaseJustDown=reinterpret_cast<TouchQueryFn>(
+        InstallTouchQueryTrampoline(g.CPad_CraneReleaseJustDown,
+            reinterpret_cast<void*>(&OnCraneReleaseJustDown),
+            "CraneReleaseJustDown"));
+    g_origUseBomb=reinterpret_cast<TouchQueryFn>(
+        InstallTouchQueryTrampoline(g.CPad_UseBomb,
+            reinterpret_cast<void*>(&OnUseBomb),"UseBomb"));
+    g_origUseRocket=reinterpret_cast<TouchQueryFn>(
+        InstallTouchQueryTrampoline(g.CPad_UseRocket,
+            reinterpret_cast<void*>(&OnUseRocket),"UseRocket"));
     g_origTurretLeft=reinterpret_cast<TouchQueryFn>(
         InstallTouchQueryTrampoline(g.CPad_GetTurretLeft,
             reinterpret_cast<void*>(&OnGetTurretLeft),
@@ -2522,6 +2697,18 @@ void InstallPadHooks() {
                 tankControl,"CAutomobile::TankControl"));
         if (g_origTankControl)
             LOGI("[driving] Rhino TankControl camera-mode spoof installed");
+    }
+
+    if (g.LoadBase) {
+        // CVehicle::SetComponentRotation, ARM64 2.11 @0x6e014c. All four
+        // displaced instructions are plain stack/callee-save operations.
+        constexpr std::uint32_t componentRotation[4]={
+            0xd10283ffu,0xfd0033eau,0x6d06a3e9u,0xa907fbfdu};
+        g_origComponentRotation=reinterpret_cast<ComponentRotationFn>(
+            InstallVerifiedTrampoline(
+                reinterpret_cast<void*>(g.LoadBase+0x6e014cu),
+                reinterpret_cast<void*>(&OnComponentRotation),componentRotation,
+                "CVehicle::SetComponentRotation combine cab"));
     }
 
     // Retail 2.11 only translates BIKE_HANDLEBARS in CBike::PreRender. Rotate
@@ -2569,7 +2756,43 @@ void InstallPadHooks() {
 
 } // namespace
 
+// ZERO4 polls IS_WIDGET_RELEASED(67) for its bomb/cargo, not crane release.
+// Only bridge the player's remote RC Goblin; other aircraft keep their input.
+bool IsRemoteCargoControlActive() {
+    return GetRemoteControlledVehicle()&&ControlledVehicleModel()==501;
+}
+
+bool RemoteCargoActionPressed() {
+    return IsRemoteCargoControlActive()&&
+        MissionActionAllowed(g.CPad_GetPad?g.CPad_GetPad(0):nullptr)&&
+        g_vehicleActionEdge.load(std::memory_order_acquire);
+}
+
 void Init() { EnsureInit(); InstallPadHooks(); }
+
+void* GetRemoteControlledVehicle() {
+    // FindPlayerVehicle(includeRemote=true) first checks CJ's in-vehicle bit,
+    // so it misses the missions where CJ remotely pilots from a rooftop.
+    // Retail 2.11 FindPlayerVehicle at 0x4afb0c verifies the player-info stride
+    // and remote pointer; IsPlayerInRemoteMode at 0x4aff04 uses the same +0xe0.
+    if (!g.CWorld_Players||!g.CWorld_PlayerInFocus||!g.LoadBase||
+        reinterpret_cast<std::uintptr_t>(g.FindPlayerVehicle)-g.LoadBase!=
+            0x4afb0cu) return nullptr;
+    const unsigned index=*g.CWorld_PlayerInFocus;
+    if (index>=2u) return nullptr;
+    void* vehicle=nullptr;
+    std::memcpy(&vehicle,static_cast<const char*>(g.CWorld_Players)+
+        index*0x1d8u+0xe0u,sizeof(vehicle));
+    return vehicle;
+}
+
+bool IsCraneControlActive() {
+    // CRopes::Init stores 0; the four USE_PLAYER_*_CRANE script commands
+    // select 1..4. Do not interpret any unexpected value as an input context.
+    if (!g.CRopes_PlayerControlsCrane) return false;
+    const int crane=*g.CRopes_PlayerControlsCrane;
+    return crane>=1&&crane<=4;
+}
 
 void ResetDefaultPreset() {
     EnsureInit();
@@ -2716,6 +2939,11 @@ void CycleCameraView(int vehicleType,int direction) {
     LOGI("[driving] %s camera view -> %s",VehicleTypeName(vehicleType),
          GetCameraViewName(vehicleType));
 }
+bool IsPlanePitchInverted() { EnsureInit(); return g_planeInvertPitch.load(); }
+void TogglePlanePitchInversion() {
+    EnsureInit(); g_planeInvertPitch.store(!g_planeInvertPitch.load()); Save();
+}
+
 int GetAirView() { EnsureInit(); return g_airView.load(); }
 const char* GetAirViewName() {
     return GetAirView()==VIEW_THIRD_PERSON?"THIRD PERSON":"FIRST PERSON";
@@ -2729,6 +2957,7 @@ void CycleAirView(int direction) {
 }
 
 bool ThirdPersonViewActive() {
+    if(justbusiness::Active())return false;
     EnsureInit();
     const int appearance=
         g_activeVehicleAppearance.load(std::memory_order_acquire);
@@ -2813,7 +3042,7 @@ constexpr int kImmersiveBikeItems[] = {
     MENU_GLOBAL_SIDE, MENU_GLOBAL_FORWARD, MENU_GLOBAL_HEIGHT,
     MENU_MODEL_SIDE, MENU_MODEL_FORWARD, MENU_MODEL_HEIGHT,
     MENU_CONTROL_CALIBRATION, MENU_HANDLE_HIGHLIGHTS,
-    MENU_BIKE_HAND_TILT, MENU_LOCAL_HORIZON, MENU_BIKE_VISUAL_LEAN,
+    MENU_BIKE_HAND_TILT, MENU_BIKE_BLOCK_WHEELIE, MENU_LOCAL_HORIZON, MENU_BIKE_VISUAL_LEAN,
     MENU_KEEP_RIDER_ON_FLIPS, MENU_RESET, MENU_BACK
 };
 constexpr int kImmersiveCarItems[] = {
@@ -2826,12 +3055,14 @@ constexpr int kImmersiveCarItems[] = {
 };
 constexpr int kDefaultPlaneItems[] = {
     MENU_VEHICLE_TYPE, MENU_DRIVING_TYPE, MENU_CAMERA_VIEW,
+    MENU_PLANE_INVERT_PITCH,
     MENU_GLOBAL_SIDE, MENU_GLOBAL_FORWARD, MENU_GLOBAL_HEIGHT,
     MENU_MODEL_SIDE, MENU_MODEL_FORWARD, MENU_MODEL_HEIGHT,
     MENU_INTERIOR_GLASS, MENU_RESET, MENU_BACK
 };
 constexpr int kImmersivePlaneItems[] = {
     MENU_VEHICLE_TYPE, MENU_DRIVING_TYPE, MENU_CAMERA_VIEW,
+    MENU_PLANE_INVERT_PITCH,
     MENU_GLOBAL_SIDE, MENU_GLOBAL_FORWARD, MENU_GLOBAL_HEIGHT,
     MENU_MODEL_SIDE, MENU_MODEL_FORWARD, MENU_MODEL_HEIGHT,
     MENU_CONTROL_CALIBRATION, MENU_YOKE_SENSITIVITY,
@@ -3090,14 +3321,17 @@ const char* ControlCalibrationFieldName(int field) {
 }
 
 int GetWheelCalibrationValue(int field) {
+    EnsureInit();
     if (field<0||field>=WHEEL_CAL_FIELD_COUNT) return 0;
     const int model=GetActiveVehicleModelId();
     if (model<0) return 0;
     std::lock_guard<std::mutex> lock(g_modelMutex);
     const auto found=g_modelCalibration.find(model);
-    return found==g_modelCalibration.end()?0:found->second.wheel[field];
+    return found==g_modelCalibration.end()?0:
+        found->second.wheel[field];
 }
 void AdjustWheelCalibrationValue(int field,int direction) {
+    EnsureInit();
     if (!direction||field<0||field>=WHEEL_CAL_FIELD_COUNT) return;
     const int model=GetActiveVehicleModelId();
     if (model<0) return;
@@ -3135,8 +3369,11 @@ void ResetVehiclePreset(int vehicleType) {
     g_value[sideField].store(kDefaults[sideField]);
     g_value[forwardField].store(kDefaults[forwardField]);
     g_value[heightField].store(kDefaults[heightField]);
-    if (vehicleType==VEHICLE_BIKE)
+    if (vehicleType==VEHICLE_PLANE) g_planeInvertPitch.store(false);
+    if (vehicleType==VEHICLE_BIKE) {
         g_bikeVisualLeanPercent.store(50,std::memory_order_release);
+        g_bikeBlockWheelie.store(false);
+    }
     if (HasCurrentModelForType(vehicleType)) {
         const int model=GetActiveVehicleModelId();
         std::lock_guard<std::mutex> lock(g_modelMutex);
@@ -3144,8 +3381,14 @@ void ResetVehiclePreset(int vehicleType) {
         calibration.seatSide[mode]=0;
         calibration.seatForward[mode]=0;
         calibration.seatHeight[mode]=0;
-        if (mode==MODE_IMMERSIVE)
-            std::memset(calibration.control,0,sizeof(calibration.control));
+        if (mode==MODE_IMMERSIVE) {
+            for (int hand=0;hand<2;++hand)
+                std::fill_n(calibration.control[hand],
+                            CONTROL_FIELD_COUNT,0);
+            if (vehicleType!=VEHICLE_BIKE)
+                std::fill_n(calibration.wheel,
+                            WHEEL_CAL_FIELD_COUNT,0);
+        }
         calibration.acceleratorMode=BIKE_ACCEL_HOLD_TRIGGER;
     }
     Save(); ResetInteraction();
@@ -3158,6 +3401,8 @@ bool DoBikeHandsFollowTilt() { EnsureInit(); return g_bikeHandsFollowTilt.load()
 void ToggleBikeHandsFollowTilt() {
     EnsureInit(); g_bikeHandsFollowTilt.store(!g_bikeHandsFollowTilt.load()); Save();
 }
+bool IsBikeWheelieBlocked() { EnsureInit(); return g_bikeBlockWheelie.load(); }
+void ToggleBikeWheelieBlock() { EnsureInit(); g_bikeBlockWheelie.store(!g_bikeBlockWheelie.load()); Save(); }
 bool IsBikeHorizonLocked() { EnsureInit(); return g_bikeHorizonLocked.load(); }
 void ToggleBikeHorizonLock() {
     EnsureInit(); g_bikeHorizonLocked.store(!g_bikeHorizonLocked.load()); Save();
@@ -3351,12 +3596,32 @@ void ToggleMotionSteeringHand() {
          g_motionHand.load() ? "RIGHT" : "LEFT");
 }
 
+bool CabinVisualContext() {
+    if (!vrcam::IsStereoActive()||ThirdPersonViewActive()||
+        GetRemoteControlledVehicle()||!HasPlayerVehicle()) return false;
+    if (g.CCutsceneMgr_ms_running&&*g.CCutsceneMgr_ms_running) return false;
+    if (g.TheCamera&&*(static_cast<const std::uint8_t*>(g.TheCamera)+0x43)) return false;
+    if (g.PlayerIsEnteringCar&&g.PlayerIsEnteringCar()) return false;
+    return true;
+}
+
 void UpdateInput(const xr::InputState& input,bool gameplay,bool blocked) {
     // Controller-yaw MOTION steering is intentionally unavailable in this
     // release. Stick and physical cockpit modes remain the only driving paths.
     g_motionEngaged.store(false,std::memory_order_relaxed);
     g_motionSteering.store(0.0f,std::memory_order_relaxed);
+    blocked=blocked||vrfire::IsScriptedWeaponCamera();
     EnsureInit(); g_inputBlocked.store(blocked,std::memory_order_release);
+    {
+        // The retail "JustDown" queries may be polled more than once in a
+        // simulation frame. Publish one edge; do not consume it in a query.
+        static bool previousAction=false;
+        const bool actionContext=GetControlledVehicle()||IsCraneControlActive();
+        const bool bothGrips=input.grip[0]>=0.75f&&input.grip[1]>=0.75f;
+        g_vehicleActionEdge.store(gameplay&&!blocked&&actionContext&&
+            !bothGrips&&input.b&&!previousAction,std::memory_order_release);
+        previousAction=input.b;
+    }
     const bool radioAllowed = gameplay && !blocked && HasPlayerVehicle();
     const bool radioDown = radioAllowed && input.x;
     const bool wasRadioDown = g_radioButtonDown.exchange(
@@ -3449,6 +3714,7 @@ void UpdateInput(const xr::InputState& input,bool gameplay,bool blocked) {
             locomotion::BIND_ACT_JUMP,
             input.a,input.b,input.x,input.y,input.l3,input.r3,true);
         g_jumpEdge.store(gameplay&&!blocked&&activeType==VEHICLE_NONE&&
+                             !GetRemoteControlledVehicle()&&!IsCraneControlActive()&&
                              jumpButton&&!prevJumpButton,
                          std::memory_order_release);
         prevJumpButton=jumpButton;
@@ -3468,6 +3734,10 @@ void UpdateInput(const xr::InputState& input,bool gameplay,bool blocked) {
         (g_wheelSeatVehicle&&g_wheelSeatVehicle!=activeVehicle)) {
         ClearWheelSeatReferenceLocked();
     }
+    if (!gameplay||!CabinVisualContext()) {
+        ClearInteractionLocked();
+        return;
+    }
     const bool preview = blocked && g_menuPreview.load(std::memory_order_acquire);
     const int activeMode=ModeForAppearance(appearance);
     static int loggedAppearance=-1,loggedMode=-1;
@@ -3477,8 +3747,7 @@ void UpdateInput(const xr::InputState& input,bool gameplay,bool blocked) {
              gameplay,blocked,g_highlights.load());
         loggedAppearance=appearance; loggedMode=activeMode;
     }
-    // Cadence was an experimental bicycle input. HANDLEBAR + R2 now maps the
-    // held trigger directly in OnGetAccelerate, so keep the old pulse reset.
+    // Held R2 drives acceleration directly in OnGetAccelerate; keep cadence pulses cleared.
     UpdateBicycleTriggerCadenceLocked(input.triggers[1],false);
     UpdateInteriorGlassMaterials();
     if (!gameplay||(blocked&&!preview)||activeMode!=MODE_IMMERSIVE) {
@@ -3564,10 +3833,7 @@ void UpdateInput(const xr::InputState& input,bool gameplay,bool blocked) {
     const V3 right{visual.right[0],visual.right[1],visual.right[2]};
     const V3 up{visual.up[0],visual.up[1],visual.up[2]};
     V3 positions[2]{}; bool poseValid[2]{},justGrabbed[2]{};
-    // A hand that already holds the drawn sidearm must never also take the
-    // wheel/handlebar — the two grabs used to fire together when the holster
-    // and the rim overlap in space. The mask is a lock-free mirror, safe to
-    // read inside this state lock.
+    // A hand holding the drawn sidearm cannot also grab a vehicle control. The mask is lock-free.
     const unsigned int weaponHands = physicalweapon::HeldHandMaskRelaxed();
     for (int hand=0;hand<2;++hand) {
         positions[hand]={poses[hand].gripPos[0],poses[hand].gripPos[1],poses[hand].gripPos[2]};
@@ -3743,9 +4009,7 @@ void UpdateInput(const xr::InputState& input,bool gameplay,bool blocked) {
             }
             constexpr float kDeadZoneMetres=0.03f;
             const float rawDrift=yokeReferenceAxial-axial;
-            // Re-zero tracking drift ONLY near neutral. The old always-on
-            // leak also decayed a deliberately HELD pull, which is why the
-            // yoke felt heavy even at 200% sensitivity.
+            // Re-zero tracking drift only near neutral to preserve deliberate held input.
             if (std::abs(rawDrift)<kDeadZoneMetres)
                 yokeReferenceAxial+=(axial-yokeReferenceAxial)*0.03f;
             const float sensitivity=std::clamp(
@@ -3833,12 +4097,18 @@ void UpdateInput(const xr::InputState& input,bool gameplay,bool blocked) {
 }
 
 void ResetInteraction() { std::lock_guard<std::mutex> lock(g_stateMutex); ClearInteractionLocked(); }
+void ResetTracking() { std::lock_guard<std::mutex> lock(g_stateMutex); ClearInteractionLocked(); ClearWheelSeatReferenceLocked(); }
 void RefreshVisualTracking() {
     std::lock_guard<std::mutex> lock(g_stateMutex);
-    if (!g_visual.active||!g_visual.bike) return;
+    if (!CabinVisualContext()) { ClearInteractionLocked(); return; }
+    if (!g_visual.active||(!g_visual.bike&&g_visual.modelId!=532)) return;
     const WheelVisualState previous=g_visual;
-    WheelVisualState refreshed{};
-    if (!BuildBikeTracking(&refreshed)) return;
+    // Input runs before the camera publishes this frame's world-to-tracking
+    // transform. Reproject the combine wheel as well as bike bars afterwards;
+    // otherwise it uses the previous camera while the cab uses the current one.
+    WheelVisualState refreshed=previous;
+    if (!(previous.bike ? BuildBikeTracking(&refreshed) :
+                         BuildWheelTracking(&refreshed))) return;
     refreshed.physicalAngle=previous.physicalAngle;
     refreshed.steering=previous.steering;
     for (int hand=0;hand<2;++hand) {
@@ -3850,6 +4120,9 @@ void RefreshVisualTracking() {
 }
 bool GetWheelVisualState(WheelVisualState* out) {
     if (!out) return false; std::lock_guard<std::mutex> lock(g_stateMutex);
+    // A script may change scene/vehicle after UpdateInput. Do not publish the
+    // previous cabin into the new eye frame, even when simulation is paused.
+    if (!CabinVisualContext()) { ClearInteractionLocked(); *out={}; return false; }
     *out=g_visual; return out->active;
 }
 bool GetGrabbedHandVisual(int hand,float position[3],float right[3],float up[3],float forward[3]) {

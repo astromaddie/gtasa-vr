@@ -705,8 +705,7 @@ std::array<char, 64 * 1024> g_gameCsvBuffer{};
 
 FILE* OpenGameCsv() {
 #ifndef SAVR_DEV
-    // Player builds keep the in-memory pacing counters used by the runtime,
-    // but never create developer capture files on the user's headset.
+    // Player builds retain runtime pacing counters without writing developer captures.
     return nullptr;
 #else
     if (g_gameCsv || g_gameCsvAttempted) return g_gameCsv;

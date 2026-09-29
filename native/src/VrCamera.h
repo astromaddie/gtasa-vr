@@ -28,10 +28,7 @@ void EndGameFrameTelemetry();
 // this to choose the stereo projection layer over the flat theater screen.
 bool IsStereoActive();
 
-// Re-evaluate the stereo/theater gate. Called once per frame from the input
-// pump: the camera hook that normally maintains it stops running while the
-// game's own pause menu owns the frame, which used to freeze the last stereo
-// pair over the (invisible) menu.
+// Refresh the stereo/theater gate each input frame, including native pause menus.
 void RefreshStereoGate();
 
 // True while the engine's own flow-screen frontend (pause menu / main menu)
@@ -41,6 +38,8 @@ bool IsMobileMenuOpen();
 // True during freefall before the deploy widget confirms the canopy. Physical
 // weapon/throwable grabs are blocked while the deploy ring owns both hands.
 bool ParachuteWeaponInteractionBlocked();
+bool GroundWalkControlsActive();
+bool IsCrouched();
 
 // Preserve the OpenXR-recommended per-eye raster size when the engine's flat
 // SurfaceTexture uses a separate landscape size for Android menus/cutscenes.
@@ -86,6 +85,12 @@ bool GetWeaponRayTracking(const xr::HandPose& renderedPose, int hand,
 // used by the stereo camera into GTA world coordinates. Physical melee uses
 // this narrow bridge before passing tracked weapon sweeps to CWorld.
 bool TrackingPointToWorld(const float trackingPoint[3], float worldPoint[3]);
+
+// Latest tracked eye and gaze in the same GTA frame as the stereo camera.
+bool GetHeadWorldRay(float originOut[3], float directionOut[3]);
+// Throw from the tracked hand along controller AIM, independent of model rotation.
+bool FirePhotograph(void* weapon,void* ped,const float flashOrigin[3]);
+bool GetControllerThrowRay(int hand, float originOut[3], float directionOut[3]);
 
 // Inverse of TrackingPointToWorld for compositor-side world effects (for
 // example a stereo bullet tracer). Converts a GTA world point into the same

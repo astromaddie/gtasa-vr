@@ -1,4 +1,5 @@
 #include "Xr.h"
+#include "TrackingRecovery.h"
 
 #include "Appearance.h"
 #include "Basketball.h"
@@ -9,6 +10,7 @@
 #include "Driving.h"
 #include "FrameTarget.h"
 #include "HdWeapons.h"
+#include "ModelSets.h"
 #include "Jetpack.h"
 #include "Holster.h"
 #include "HudSettings.h"
@@ -66,11 +68,12 @@
 namespace savr::xr {
 namespace {
 
-constexpr char kModVersion[] = "0.2.0.0";  // internal build id (4th digit)
+constexpr char kModVersion[] = "0.3.0.0";  // internal build id (4th digit)
 #ifdef SAVR_DEV
-constexpr const char* kModVersionShown = "0.2.0";
+constexpr const char* kModVersionShown = "0.3.0.0 DEV";
+std::atomic<unsigned> g_profilerMode{PROFILER_OFF};
 #else
-constexpr const char* kModVersionShown = "0.2.0";
+constexpr const char* kModVersionShown = "0.3.0";
 #endif
 
 JavaVM*   g_hudTextVm{};
@@ -101,12 +104,23 @@ struct HudTextTexture {
 HudTextTexture g_briefTextTexture;
 HudTextTexture g_bigTextTexture;
 HudTextTexture g_timerTextTexture;
+HudTextTexture g_breathTextTexture;
+std::atomic<int> g_breathPercent{-1};
+HudTextTexture g_signalTextTexture;
+std::atomic<int> g_signalPercent{-1};
 
 // Head pose published by the render thread, read by the game thread. A plain
 // mutex is enough: it is written once per compositor frame and read once per
 // game frame, never in a hot loop.
 std::mutex     g_headPoseMutex;
 bool           g_headPoseValid = false;
+tracking::Recovery g_trackingRecovery{}; // under g_headPoseMutex
+XrTime g_trackingChangeTime{};
+void InvalidateTracking() {
+    std::lock_guard<std::mutex> lock(g_headPoseMutex);
+    g_headPoseValid=false;
+    g_trackingRecovery.Invalidate();
+}
 XrPosef        g_headPose{};
 XrPosef        g_eyePose[2]{};          // per-eye poses in local space (IPD apart)
 float          g_eyeFovXDeg = 90.0f;   // sane default until views are located
@@ -562,6 +576,7 @@ std::atomic<int>      g_drivingCalibSel{0};
 std::atomic<int>      g_drivingCalibHand{0};
 std::atomic<bool>     g_locomotionActive{false}; // movement/turning submenu
 std::atomic<int>      g_locomotionSel{0};
+std::atomic<bool> g_packageHint{false};
 std::atomic<int>      g_beatDir{0};              // rhythm prompt: 0/1U/2D/3L/4R
 std::atomic<int>      g_beatMs{0};
 std::atomic<bool>     g_jetpackMenuActive{false}; // jetpack settings submenu
@@ -580,6 +595,8 @@ std::atomic<int>      g_hudScanElement{-1};
 constexpr std::uint64_t kHudScanDurationNs=12000000000ULL;
 std::atomic<bool>     g_gfxActive{false};        // graphics/perf submenu shown
 std::atomic<int>      g_gfxSel{0};
+std::atomic<bool>     g_modelSetActive{false};
+std::atomic<int>      g_modelSetSel{0};
 std::atomic<bool>     g_controlsMenuActive{false};
 std::atomic<int>      g_controlsSel{0};
 std::atomic<bool>     g_controlsTipsActive{false};
@@ -1493,9 +1510,7 @@ void PinStereoReadUntilGpuComplete(StereoReadLease& lease) {
         ? eglFence.create(display, EGL_SYNC_FENCE_KHR, nullptr)
         : EGL_NO_SYNC_KHR;
     if (sync == EGL_NO_SYNC_KHR) {
-        // Preserve the previous, XR-only GLsync behavior on devices without the
-        // display-level extension. It cannot rescue the same producer callback,
-        // but it stays asynchronous and keeps lifetime correctness.
+        // Retain asynchronous XR-only GLsync behavior when the display extension is unavailable.
         const GLsync glSync = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
         if (!glSync) {
             static bool loggedFailure = false;
@@ -1761,11 +1776,7 @@ StereoSyncWaitPlan PlanStereoSyncWait(int newest, std::uint64_t startNs,
         return plan;
     }
 
-    // The four-slot ring retains three complete producer intervals. A single
-    // scheduler wobble must not disable prediction for the next otherwise
-    // healthy frame, so accept two cadence-valid intervals out of three. Until
-    // the fourth publication exists, preserve the old two-out-of-two proof.
-    // A genuinely slow 60 Hz producer still has fewer than two valid samples.
+    // Accept two cadence-valid producer intervals out of three, or both intervals before the fourth publication.
     std::uint64_t t0 = 0;
     std::uint64_t t1 = 0;
     std::uint64_t t2 = 0;
@@ -2062,16 +2073,9 @@ struct State {
     Swapchain theater;
     bool      theaterMode{true};
 
-    // Head-locked FPS/debug panel (toggled by both grips + A), in the spirit of
+    // Head-locked FPS/debug panel (selected only in the VR menu), in the spirit of
     // the Vice City VR port's overlay.
     Swapchain debug;
-#ifdef SAVR_DEV
-    // Keep diagnostics available without covering normal gameplay on launch.
-    // The same grips+A chord enables the panel when a capture needs it.
-    bool      debugVisible{false};
-#else
-    bool      debugVisible{false};
-#endif
 
     // Original mobile HUD rendered into a transparent shared texture and
     // submitted as a head-locked quad, independently of the world projection.
@@ -2122,9 +2126,7 @@ struct State {
     GLint  underwaterGreenGradeUniform{-1};
     GLint  underwaterBlueGradeUniform{-1};
 
-    // Full classic HUD is alpha-keyed into each finished eye. Unlike the old
-    // three OpenXR crop cards this has no opaque quad background or guessed
-    // radar/message bounds.
+    // Alpha-key the classic HUD directly into each finished eye.
     GLuint hudCompositeProgram{0};
     GLuint hudCompositeVertexArray{0};
     GLuint hudCompositeSampler{0};
@@ -2680,13 +2682,7 @@ const char* XrName(XrResult r) {
     return buffer;
 }
 
-// Every OpenXR call goes through this. A silent failure in setup shows up much
-// later as a black headset, which is the single most expensive way to debug VR.
-//
-// The rate limit is not politeness. A failing per-frame call in a loop that is
-// not being throttled by the compositor produces tens of thousands of lines a
-// second, which rolls the whole logcat buffer and destroys the evidence needed
-// to find out what failed in the first place.
+// Rate-limit OpenXR error logging to keep repeated per-frame failures bounded.
 bool Check(XrResult result, const char* what) {
     if (XR_SUCCEEDED(result)) {
         return true;
@@ -2963,6 +2959,7 @@ void PollEvents() {
         case XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED: {
             const auto& changed = *reinterpret_cast<XrEventDataSessionStateChanged*>(&event);
             s.sessionState = changed.state;
+            if(s.sessionState != XR_SESSION_STATE_FOCUSED) InvalidateTracking();
             g_sessionFocused.store(s.sessionState == XR_SESSION_STATE_FOCUSED,
                                    std::memory_order_release);
             if (s.sessionState != XR_SESSION_STATE_FOCUSED)
@@ -3012,6 +3009,15 @@ void PollEvents() {
             } else if (s.sessionState == XR_SESSION_STATE_EXITING ||
                        s.sessionState == XR_SESSION_STATE_LOSS_PENDING) {
                 s.running = false;
+            }
+            break;
+        }
+        case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING: {
+            const auto& changed=*reinterpret_cast<XrEventDataReferenceSpaceChangePending*>(&event);
+            if(changed.referenceSpaceType==XR_REFERENCE_SPACE_TYPE_LOCAL) {
+                g_trackingChangeTime=changed.changeTime;
+                InvalidateTracking();
+                LOGI("[tracking] LOCAL reference changed; waiting for fresh tracked pose");
             }
             break;
         }
@@ -3578,6 +3584,18 @@ void main() {
     vec2 local = (screenUv - uDestinationRect.xy) / uDestinationRect.zw;
     if (local.x < 0.0 || local.y < 0.0 || local.x > 1.0 || local.y > 1.0)
         discard;
+    // Solid oxygen gauge: sourceRect.x carries the current breath fraction.
+    // Drawing its fill on the GPU avoids rerasterising a 2048px text bitmap
+    // every time the native breath counter changes.
+    if (uHighlight > 3.5) {
+        bool border = local.x < 0.008 || local.x > 0.992 ||
+                      local.y < 0.15 || local.y > 0.85;
+        vec3 fill = uHighlight > 4.5 ? vec3(0.25,1.0,0.35) :
+                    uSourceRect.x <= 0.2 ? vec3(1.0,0.22,0.1) : vec3(0.15,0.8,1.0);
+        outColor = border ? vec4(0.85,0.95,1.0,0.95) :
+                   local.x <= uSourceRect.x ? vec4(fill,0.95) : vec4(0.015,0.025,0.04,0.8);
+        return;
+    }
     // The captured HUD texture has already passed through the RenderWare-to-GL
     // framebuffer path and arrives top-down here. Flipping it a second time was
     // why tutorial and money text appeared upside-down in the headset.
@@ -4100,7 +4118,8 @@ constexpr float kHudPlaneDistanceMetres = 1.8f;
 
 bool DrawHudComposite(GLuint sourceTexture,int targetWidth,int targetHeight,
                       bool drawClassicElements,int eye) {
-    if (!sourceTexture||!BuildHudCompositeProgram()) return false;
+    if ((!sourceTexture&&g_signalPercent.load(std::memory_order_relaxed)<0)||
+        !BuildHudCompositeProgram()) return false;
     const HudTextState textState=SnapshotHudText();
     const int selected=hud::CalibrationElement();
     const bool calibrating=g_hudActive.load(std::memory_order_relaxed);
@@ -4134,6 +4153,14 @@ bool DrawHudComposite(GLuint sourceTexture,int targetWidth,int targetHeight,
     UpdateHudTextTexture(g_briefTextTexture,smallText,0,textureRevision);
     UpdateHudTextTexture(g_bigTextTexture,bigText,1,textureRevision);
     UpdateHudTextTexture(g_timerTextTexture,timerText,0,textureRevision);
+    const int breath=g_breathPercent.load(std::memory_order_relaxed);
+    const int signal=g_signalPercent.load(std::memory_order_relaxed);
+    UpdateHudTextTexture(g_signalTextTexture,signal<0?u"":u"SIGNAL",0,
+                         signal<0?0u:1u);
+    const int breathLabel=breath<0?0:(breath<=20?1:2);
+    const std::u16string breathText=breathLabel==0?u"":(breathLabel==1?u"LOW AIR":u"AIR");
+    UpdateHudTextTexture(g_breathTextTexture,breathText,0,
+                         static_cast<std::uint64_t>(breathLabel));
     // Per-eye convergence: shift every destination rect toward the nose by
     // the parallax of a plane kHudPlaneDistanceMetres away, so crops and
     // text fuse at that depth instead of at infinity behind the world.
@@ -4156,6 +4183,7 @@ bool DrawHudComposite(GLuint sourceTexture,int targetWidth,int targetHeight,
     glBindSampler(0,s.hudCompositeSampler);
     glUniform1i(s.hudCompositeTextureUniform,0);
     for (int element=0;element<hud::ELEMENT_COUNT;++element) {
+        if (!sourceTexture) continue; // signal/text do not need a flat HUD crop
         // Text layers render published strings; their source crop is not
         // sampled at all; only their destination calibration is retained.
         if (hud::IsDirectTextElement(element)) continue;
@@ -4241,6 +4269,50 @@ bool DrawHudComposite(GLuint sourceTexture,int targetWidth,int targetHeight,
     drawDirectText(hud::MESSAGES,g_bigTextTexture);
     drawDirectText(hud::HELP_TEXT,g_briefTextTexture);
     drawDirectText(hud::TIMERS,g_timerTextTexture);
+
+    // Air remains readable in both immersive and classic HUD layouts, even
+    // when the stock status crop or mission timers are disabled by the player.
+    if (g_breathTextTexture.visible&&g_breathTextTexture.texture) {
+        glBindTexture(GL_TEXTURE_2D,g_breathTextTexture.texture);
+        glUniform4f(s.hudCompositeSourceRectUniform,0.0f,0.0f,1.0f,1.0f);
+        glUniform4f(s.hudCompositeDestinationRectUniform,
+                    0.36f+hudDepthShiftUv,0.67f,0.28f,0.08f);
+        glUniform1f(s.hudCompositeHighlightUniform,0.0f);
+        glDrawArrays(GL_TRIANGLES,0,3);
+    }
+    if (breath>=0) {
+        glUniform4f(s.hudCompositeSourceRectUniform,breath/100.0f,0.0f,1.0f,1.0f);
+        glUniform4f(s.hudCompositeDestinationRectUniform,
+                    0.40f+hudDepthShiftUv,0.745f,0.20f,0.012f);
+        glUniform1f(s.hudCompositeHighlightUniform,4.0f);
+        glDrawArrays(GL_TRIANGLES,0,3);
+    }
+
+    // The locator is mission information in both HUD presets, independent
+    // of wrist gaze or the optional TIMERS text. Match the other HUD depth.
+    if (signal>=0) {
+        static double nextSignalDrawLog=0;
+        if (eye==0 && perf::MonotonicMs()>=nextSignalDrawLog) {
+            nextSignalDrawLog=perf::MonotonicMs()+2000;
+            if (FILE* f=std::fopen("/sdcard/Android/data/com.rockstargames.gtasa/files/vr_toreno_signal.log","a")) {
+                std::fprintf(f,"draw percent=%d hud=%u label=%d\n",signal,sourceTexture,
+                    g_signalTextTexture.visible?1:0);std::fclose(f);
+            }
+        }
+        if (g_signalTextTexture.visible&&g_signalTextTexture.texture) {
+            glBindTexture(GL_TEXTURE_2D,g_signalTextTexture.texture);
+            glUniform4f(s.hudCompositeSourceRectUniform,0.0f,0.0f,1.0f,1.0f);
+            glUniform4f(s.hudCompositeDestinationRectUniform,
+                        0.36f+hudDepthShiftUv,0.17f,0.28f,0.08f);
+            glUniform1f(s.hudCompositeHighlightUniform,0.0f);
+            glDrawArrays(GL_TRIANGLES,0,3);
+        }
+        glUniform4f(s.hudCompositeSourceRectUniform,signal/100.0f,0.0f,1.0f,1.0f);
+        glUniform4f(s.hudCompositeDestinationRectUniform,
+                    0.40f+hudDepthShiftUv,0.245f,0.20f,0.018f);
+        glUniform1f(s.hudCompositeHighlightUniform,5.0f);
+        glDrawArrays(GL_TRIANGLES,0,3);
+    }
 
     if (calibrating) {
         // The calibration sample is always drawn at the element's real final
@@ -4615,10 +4687,7 @@ enum class TheaterFrameSource {
 std::atomic<int> g_theaterCropW{0};
 std::atomic<int> g_theaterCropH{0};
 
-// Draw a trusted flat game frame (menus/cutscenes) or an explicit neutral black
-// fallback into the theater swapchain.  Gameplay must never source this quad
-// from one stereo eye: that old path bypassed the ring generation/age checks and
-// made a left-eye image flash head-locked whenever projection setup failed.
+// The theater swapchain accepts a trusted flat frame or neutral black; stereo eyes require projection validation.
 bool RenderTheaterQuad(XrSpace space, XrCompositionLayerQuad& quad,
                        bool fillView = false,
                        TheaterFrameSource source = TheaterFrameSource::GameSurface) {
@@ -5059,6 +5128,10 @@ void PublishHudText(const std::int16_t* brief, int briefCapacity,
          g_hudTextState.big.size(),g_hudTextState.bigStyle);
 }
 
+void PublishTorenoSignal(int percent) {
+    g_signalPercent.store(percent<0?-1:std::min(percent,100),std::memory_order_relaxed);
+}
+
 void PublishMissionTimersText(const char* text) {
     std::u16string next;
     if (text) {
@@ -5073,6 +5146,12 @@ void PublishMissionTimersText(const char* text) {
     LOGI("[hud.text] timers publish rev=%llu chars=%zu",
          static_cast<unsigned long long>(g_hudTextState.revision),
          g_hudTextState.timers.size());
+}
+
+void PublishBreath(float fraction) {
+    const int percent=std::isfinite(fraction)&&fraction>=0.0f
+        ? static_cast<int>(std::lround(std::clamp(fraction,0.0f,1.0f)*100.0f)) : -1;
+    g_breathPercent.store(percent,std::memory_order_relaxed);
 }
 
 void PublishRadioText(const char* text) {
@@ -5090,12 +5169,16 @@ void PublishRadioText(const char* text) {
 
 void GetHandPoses(HandPose out[2]) {
     std::lock_guard<std::mutex> lock(g_headPoseMutex);
-    out[0] = g_handPose[0];
-    out[1] = g_handPose[1];
+    out[0] = g_headPoseValid?g_handPose[0]:HandPose{};
+    out[1] = g_headPoseValid?g_handPose[1]:HandPose{};
 }
 
 bool GetHeadPose(float positionOut[3], float orientationOut[4]) {
+    return GetHeadPose(positionOut,orientationOut,nullptr);
+}
+bool GetHeadPose(float positionOut[3], float orientationOut[4], std::uint64_t* epoch) {
     std::lock_guard<std::mutex> lock(g_headPoseMutex);
+    if(epoch)*epoch=g_trackingRecovery.epoch;
     if (!g_headPoseValid) {
         return false;
     }
@@ -5274,6 +5357,22 @@ void SetMainMenu(bool active, int selection) {
     g_mainSel.store(selection, std::memory_order_relaxed);
 }
 
+// Only the VR menu calls this: gameplay buttons must never open an overlay.
+void CycleProfilerMode() {
+#ifdef SAVR_DEV
+    g_profilerMode.store((g_profilerMode.load(std::memory_order_relaxed)+1u)%3u,
+                         std::memory_order_relaxed);
+#endif
+}
+int GetProfilerMode() {
+#ifdef SAVR_DEV
+    return static_cast<int>(g_profilerMode.load(std::memory_order_relaxed));
+#else
+    return PROFILER_OFF;
+#endif
+}
+bool ProfilerVisible() { return GetProfilerMode()!=PROFILER_OFF; }
+
 void SetHolsterMenu(bool active, int selection) {
     g_holsterMenuActive.store(active, std::memory_order_relaxed);
     g_holsterMenuSel.store(selection, std::memory_order_relaxed);
@@ -5300,6 +5399,8 @@ void SetLocomotionMenu(bool active, int selection) {
     g_locomotionActive.store(active,std::memory_order_relaxed);
     g_locomotionSel.store(selection,std::memory_order_relaxed);
 }
+
+void SetPackageHint(bool visible) { g_packageHint.store(visible,std::memory_order_relaxed); }
 
 void SetBeatArrow(int dir, int msUntil) {
     g_beatDir.store(dir, std::memory_order_relaxed);
@@ -5378,6 +5479,11 @@ void SetAboutMenu(bool active, bool firstRun) {
 void SetGraphicsMenu(bool active, int selection) {
     g_gfxActive.store(active, std::memory_order_relaxed);
     g_gfxSel.store(selection, std::memory_order_relaxed);
+}
+
+void SetModelSetMenu(bool active, int selection) {
+    g_modelSetSel.store(selection, std::memory_order_relaxed);
+    g_modelSetActive.store(active, std::memory_order_relaxed);
 }
 
 void SetGraphicsDistanceMenu(bool active, int selection) {
@@ -5644,10 +5750,7 @@ void AddBulletTracer(const float start[3], const float end[3], int weaponType) {
     const std::uint64_t now = MonotonicNowNs();
     const float rayLength = std::sqrt(lengthSq);
     const XrVector3f direction{dx / rayLength, dy / rayLength, dz / rayLength};
-    // Begin just beyond the weapon shell and preserve the exact physical ray.
-    // The old 45 m / 0.75-2 s untextured quad looked like a large grey strip in
-    // VR.  Keep enough length to read the shot direction but make it a genuine
-    // short-lived tracer rather than a persistent laser across the map.
+    // Emit a short-lived tracer beyond the weapon shell along the physical ray.
     const float along = std::min(0.18f, rayLength * 0.05f);
     const float streakLength = std::min(kBulletTracerMaxLength, rayLength) - along;
     if (streakLength < 0.01f) return;
@@ -5787,9 +5890,7 @@ bool TryBeginStereoEyeWrite(int seq) {
         g_stereoWriteClaimRescues.fetch_add(1, std::memory_order_relaxed);
     }
 
-    // Invalidate before the first RenderWare command can target this slot. The
-    // old implementation did this only after both eyes had already been
-    // recorded, which let XR begin copying the old generation during overwrite.
+    // Invalidate the slot before its first RenderWare write command.
     g_stereoGeneration[ws].store(-1, std::memory_order_release);
     g_stereoPublishedNs[ws].store(0, std::memory_order_relaxed);
     return true;
@@ -6202,7 +6303,7 @@ void StereoCommit(int idx) {
 }
 
 void SetStereoRenderFovX(float degrees) {
-    if (degrees > 20.0f && degrees < 160.0f) {
+    if (std::isfinite(degrees) && degrees >= 5.0f && degrees < 160.0f) {
         g_stereoRenderFovXDeg.store(degrees, std::memory_order_relaxed);
     }
 }
@@ -6450,7 +6551,7 @@ bool CreateSession() {
 
 // ---------------------------------------------------------------------------
 // Head-locked FPS/debug panel — a faithful port of the Vice City VR overlay:
-// a 512x512 RGBA panel with a 5x7 software font, toggled by both grips + A,
+// a 512x512 RGBA panel with a 5x7 software font, selected from the VR menu,
 // presented as a head-locked quad. No font asset or shader needed.
 // ---------------------------------------------------------------------------
 unsigned char g_panelPixels[kPanelW * kPanelH * 4];
@@ -6528,6 +6629,15 @@ void PanelTextFit(const char* text, int centreX, int y, int maxScale,
 // Rebuild the profiler from the same approximately-1Hz aggregates written to the
 // CSV. Stable windows are much easier to read while driving than raw frame-to-
 // frame values, and make the headset display agree with the later log analysis.
+void BuildFpsPanel(int fps) {
+    // Crop the submitted quad to this small badge; the rest stays transparent.
+    std::memset(g_panelPixels,0,sizeof(g_panelPixels));
+    for(int y=kPanelH/2-32;y<kPanelH/2+32;++y)
+        for(int x=kPanelW/2-100;x<kPanelW/2+100;++x)PanelPixel(x,y,8,12,20,200);
+    char line[32];std::snprintf(line,sizeof(line),"FPS %d",std::clamp(fps,0,999));
+    PanelText(line,kPanelW/2,kPanelH/2-14,4,255,240,160);
+}
+
 void BuildPanel(const perf::DebugStatsSnapshot& stats) {
     for (int i = 0; i < kPanelW * kPanelH; ++i) {
         g_panelPixels[i * 4 + 0] = 0; g_panelPixels[i * 4 + 1] = 0;
@@ -6542,7 +6652,7 @@ void BuildPanel(const perf::DebugStatsSnapshot& stats) {
         std::snprintf(line, sizeof(line), "GAME FPS %d", fps);
         PanelText(line, cx, 54, 3, 255, 230, 64);
         PanelText("WAITING FOR 1HZ SAMPLE", cx, 104, 2, 150, 190, 210);
-        PanelText("GRIPS+A CLOSE", cx, kPanelH - 24, 2, 150, 185, 150);
+        PanelText("VR MENU: PROFILER OFF", cx, kPanelH - 24, 2, 150, 185, 150);
         return;
     }
 
@@ -6634,9 +6744,7 @@ void BuildPanel(const perf::DebugStatsSnapshot& stats) {
                       stats.enginePreBreakdownFaults);
     }
     PanelText(line, cx, 145, 1, 140, 220, 255);
-    // P/S/T/O = engine before the stereo hook, stereo setup, stereo hook tail,
-    // and the engine work after the hook. These four rows are the old opaque
-    // `engine_other`; record stays on the line above.
+    // P/S/T/O represent engine pre-hook, stereo setup, stereo tail and post-hook work.
     std::snprintf(line, sizeof(line), "W PRE/SET/TAIL/POST %.1F/%.1F/%.1F/%.1F",
                   stats.enginePreWallMs, stats.stereoPrepareWallMs,
                   stats.stereoTailWallMs, stats.enginePostWallMs);
@@ -6928,7 +7036,7 @@ void BuildPanel(const perf::DebugStatsSnapshot& stats) {
         std::snprintf(line, sizeof(line), "LOD WITNESS WAITING");
     }
     PanelText(line, cx, 472, 2, 170, 190, 220);
-    PanelText("GRIPS+A CLOSE  1HZ SMOOTH", cx, kPanelH - 10,
+    PanelText("VR MENU: PROFILER OFF  1HZ SMOOTH", cx, kPanelH - 10,
               1, 150, 185, 150);
 }
 
@@ -6978,7 +7086,7 @@ void BuildAboutMenu() {
         "CUTSCENE: R3 CAMERA / L3 REMEMBER",
         "ACTIVE DEVELOPMENT - EXPECT ROUGH EDGES",
         "DISCUSSION: FLAT2VR DISCORD",
-        "discord.com/channels/747967102895390741/1543691482861408276",
+        "discord.gg/jwFTJwsh8",
         "PRESS ANY BUTTON TO CLOSE",
     };
     const int count = static_cast<int>(sizeof(kLines) / sizeof(kLines[0]));
@@ -7003,8 +7111,8 @@ void BuildControlsTipsMenu() {
         {"L3+R3  RECENTER VIEW",                    90, 185, 210, false},
 
         {"ON FOOT",                                140, 235, 150, true },
-        {"Y ENTER/EXIT   X JUMP   A SPRINT",       120, 195, 130, false},
-        {"L3  CROUCH",                             120, 195, 130, false},
+        {"Y ENTER/EXIT   X JUMP",       120, 195, 130, false},
+        {"L3 SPRINT ON/OFF   R3 CROUCH",                             120, 195, 130, false},
 
         {"WEAPONS",                                250, 205, 120, true },
         {"DRAW: GRAB FROM A BODY HOLSTER",         205, 170, 105, false},
@@ -7048,6 +7156,11 @@ void BuildControlsTipsMenu() {
         {"PROMPTS",                                235, 235, 235, true },
         {"R2 TAP = YES   L2 = NO",                 190, 200, 210, false},
         {"R2 HOLD = TAP-AND-HOLD PROMPTS",         190, 200, 210, false},
+
+        {"RC BARON - SUPPLY LINES",                235, 235, 235, true },
+        {"LEFT STICK TURN / CLIMB / DESCEND",      190, 200, 210, false},
+        {"R2 THROTTLE   L2 BRAKE   B FIRE",        190, 200, 210, false},
+        {"SOFT STICK CENTRE / WING STABILISATION", 190, 200, 210, false},
 
         {"CUTSCENES",                              215, 180, 255, true },
         {"R3 CHANGE CAMERA / ACTOR",               175, 150, 210, false},
@@ -7094,7 +7207,7 @@ void BuildControlsMenu() {
     PanelClear();
     const int cx = kPanelW / 2;
     PanelText("CONTROLS", cx, 20, 5, 100, 225, 255);
-    PanelTextFit("GAMEPLAY ONLY - MENU CURSOR STAYS RAW",
+    PanelTextFit("STICK UP/DOWN SELECT   L2/R2 CHANGE",
                  cx, 56, 2, 150, 185, 150);
     constexpr int firstStick = 1;
     constexpr int firstButton = firstStick + locomotion::STICK_OPT_COUNT;
@@ -7154,19 +7267,25 @@ void BuildMainMenu() {
         handSkinRow,
         "CHEATS",
         "GRAPHICS",
+        "MODEL SET",
         "CONTROLS",
         "BASKETBALL",
         "ABOUT",
+#ifdef SAVR_DEV
+        GetProfilerMode()==PROFILER_FPS ? "PROFILER   < FPS ONLY >" :
+        GetProfilerMode()==PROFILER_DETAILED ? "PROFILER   < DETAILED >" : "PROFILER   < OFF >",
+#endif
         "CLOSE"
     };
-    const int N   = 13;
+    constexpr int N = sizeof(kItems) / sizeof(kItems[0]);
+    static_assert(N == kMainMenuItemCount);
     const int sel = g_mainSel.load(std::memory_order_relaxed);
-    const int top = 82, rowH = 34;
+    const int top = 78, rowH = N > 14 ? 27 : 30;
     for (int i = 0; i < N; ++i) {
         const int y = top + i * rowH;
         if (i == sel) PanelFillRect(40, y - 6, kPanelW - 40, y + 30, 120, 40, 110, 235);
         const bool submenu=i==0||i==1||i==2||i==3||i==4||i==5||
-                           i==7||i==8||i==9||i==10||i==11;
+                           i==7||i==8||i==9||i==10||i==11||i==12;
         if (submenu)
             PanelText(kItems[i],cx,y,2,i==sel?255:100,
                       i==sel?235:225,i==sel?120:255);
@@ -7320,15 +7439,7 @@ void BuildGraphicsMenu() {
                   savr::animtex::IsEnabled() ? "ON" : "OFF");
     std::snprintf(rows[7], sizeof(rows[7]), "DYNAMIC SHADOWS  < %s >",
                   vrcam::GetDynamicShadowModeName());
-    if (!hdweapons::Available()) {
-        std::snprintf(rows[8], sizeof(rows[8]),
-                      "WEAPON MODELS  < NO FILES >");
-    } else {
-        const bool hd = vrcam::IsHdWeaponsEnabled();
-        std::snprintf(rows[8], sizeof(rows[8]), "WEAPON MODELS  < %s >%s",
-                      hd ? "HD" : "ORIGINAL",
-                      hd != hdweapons::Applied() ? "  [RESTART]" : "");
-    }
+    std::snprintf(rows[8], sizeof(rows[8]), "MODEL SET");
     std::snprintf(rows[9], sizeof(rows[9]), "CUTSCENES  < %s >",
                   locomotion::CutsceneModeName());
     std::snprintf(rows[10], sizeof(rows[10]), "GAME CUTSCENES  < %s >",
@@ -7364,6 +7475,25 @@ void BuildGraphicsMenu() {
                       "STICK SEL   L2/R2 ADJUST   B BACK");
     }
     PanelText(hint, cx, kPanelH - 22, 2, 150, 185, 150);
+}
+
+void BuildModelSetMenu() {
+    PanelClear();
+    const int cx = kPanelW / 2;
+    PanelText("MODEL SET", cx, 22, 5, 100, 225, 255);
+    PanelText("OPTIONAL PLAYER-INSTALLED PACKS", cx, 65, 2, 150, 190, 210);
+    const int sel = g_modelSetSel.load(std::memory_order_relaxed);
+    constexpr const char* names[] = {"HD WEAPONS", "PROPER FIXES", "BACK"};
+    for (int i = 0; i <= modelsets::COUNT; ++i) {
+        const int y = 124 + i * 75;
+        if (i == sel) PanelFillRect(24, y-8, kPanelW-24, y+44, 120, 40, 110, 235);
+        char row[80];
+        if (i == modelsets::COUNT) std::snprintf(row, sizeof(row), "BACK");
+        else std::snprintf(row, sizeof(row), "%s  < %s >", names[i], modelsets::Enabled(i) ? "ON" : "OFF");
+        PanelTextFit(row, cx, y, 2, i == sel ? 255 : 200, i == sel ? 255 : 200, i == sel ? 120 : 200);
+        if (i < modelsets::COUNT) PanelText(modelsets::Status(i), cx, y+25, 2, 150, 190, 210);
+    }
+    PanelText("CHANGES APPLY AFTER A FULL GAME RESTART", cx, kPanelH-58, 2, 150, 190, 210);
 }
 
 void BuildGraphicsDistanceMenu() {
@@ -7432,6 +7562,11 @@ void BuildDrivingMenu() {
                 std::snprintf(rows[row],sizeof(rows[row]),
                     "CAMERA VIEW   < %s >",
                     driving::GetCameraViewName(vehicleType));
+                break;
+            case driving::MENU_PLANE_INVERT_PITCH:
+                std::snprintf(rows[row],sizeof(rows[row]),
+                    "PLANE STICK INVERT Y   < %s >",
+                    driving::IsPlanePitchInverted()?"ON":"OFF");
                 break;
             case driving::MENU_YOKE_SENSITIVITY:
                 std::snprintf(rows[row],sizeof(rows[row]),
@@ -7519,6 +7654,9 @@ void BuildDrivingMenu() {
                 std::snprintf(rows[row],sizeof(rows[row]),
                     "LOCAL HORIZON   < %s >",
                     driving::IsBikeHorizonLocked()?"ON":"OFF");
+                break;
+            case driving::MENU_BIKE_BLOCK_WHEELIE:
+                std::snprintf(rows[row],sizeof(rows[row]),"BLOCK WHEELIE   < %s >",driving::IsBikeWheelieBlocked()?"ON":"OFF");
                 break;
             case driving::MENU_BIKE_VISUAL_LEAN:
                 std::snprintf(rows[row],sizeof(rows[row]),
@@ -8022,14 +8160,14 @@ void BuildCheatMenu() {
             PanelText(label,cx,y,2,i==sel?255:100,
                       i==sel?235:225,i==sel?120:255);
         else
-            PanelText(label, cx, y, 2, c, c,
+            PanelTextFit(label, cx, y, 2, c, c,
                       (i == sel && available) ? 120 : c);
     }
     if (start + shown < count)
         PanelText("- MORE -", cx, top + shown * rowH, 2, 120, 150, 120);
     PanelText(category==cheats::CATEGORY_VEHICLES?
               "STICK MOVE   L2/R2 SELECT   A SPAWN   B BACK":
-              "STICK MOVE   A USE   B BACK",
+              "L2/R2 CHANGE   A USE   B BACK",
               cx, kPanelH - 22, 2, 150, 185, 150);
 }
 
@@ -8125,6 +8263,7 @@ bool PresentDebugPanel(XrCompositionLayerQuad& quad) {
         g_basketballCalibActive.load(std::memory_order_relaxed);
     const bool hudMenu = g_hudActive.load(std::memory_order_relaxed);
     const bool graphicsMenu = g_gfxActive.load(std::memory_order_relaxed);
+    const bool modelSetMenu = g_modelSetActive.load(std::memory_order_relaxed);
     const bool graphicsDistanceMenu =
         g_gfxDistanceActive.load(std::memory_order_relaxed);
     const bool cheatMenu = g_menuVisible.load(std::memory_order_relaxed);
@@ -8135,16 +8274,30 @@ bool PresentDebugPanel(XrCompositionLayerQuad& quad) {
         holsterMenu || drivingMenu || drivingCalibMenu || locomotionMenu ||
         jetpackMenu || vehicleCameraMenu ||
         basketballMenu || basketballCalibMenu || hudMenu ||
-        graphicsMenu || graphicsDistanceMenu || cheatMenu ||
+        graphicsMenu || modelSetMenu || graphicsDistanceMenu || cheatMenu ||
         controlsMenuA || controlsTipsA || aboutMenuA);
 
+    const bool packagePanel=profilerPanel&&g_packageHint.load(std::memory_order_relaxed);
+    const int profilerMode=GetProfilerMode();
+    const bool fpsPanel=profilerPanel&&!packagePanel&&profilerMode==PROFILER_FPS;
     std::uint64_t contentRevision = 0;
-    if (profilerPanel) {
-        contentRevision = perf::DebugStatsRevision();
+    if (packagePanel) {
+        std::memset(g_panelPixels,0,sizeof(g_panelPixels));
+        PanelFillRect(8,kPanelH/2-25,kPanelW-8,kPanelH/2+25,8,12,20,225);
+        PanelTextFit("PRESS A TO STEAL PACKAGE",kPanelW/2,kPanelH/2-9,3,255,240,160);
+        g_profilerPanelRevision=~std::uint64_t{0};
+        std::fill(g_debugImageRevisions.begin(),g_debugImageRevisions.end(),~std::uint64_t{0});
+    } else if (profilerPanel) {
+        const int fps=std::clamp(g_fpsValue.load(std::memory_order_relaxed),0,999);
+        contentRevision=((fpsPanel?static_cast<std::uint64_t>(fps):perf::DebugStatsRevision())<<2)|
+            static_cast<std::uint64_t>(profilerMode);
         if (g_profilerPanelRevision != contentRevision) {
-            const perf::DebugStatsSnapshot stats = perf::GetDebugStats();
-            contentRevision = stats.revision;
-            BuildPanel(stats);
+            if(fpsPanel) BuildFpsPanel(fps);
+            else {
+                const perf::DebugStatsSnapshot stats = perf::GetDebugStats();
+                contentRevision=(stats.revision<<2)|static_cast<std::uint64_t>(profilerMode);
+                BuildPanel(stats);
+            }
             g_profilerPanelRevision = contentRevision;
         }
     } else {
@@ -8173,8 +8326,15 @@ bool PresentDebugPanel(XrCompositionLayerQuad& quad) {
         else if (basketballMenu)    BuildBasketballMenu();
         else if (hudMenu)           BuildHudMenu();
         else if (graphicsMenu)      BuildGraphicsMenu();
+        else if (modelSetMenu)      BuildModelSetMenu();
         else if (graphicsDistanceMenu) BuildGraphicsDistanceMenu();
         else if (cheatMenu)         BuildCheatMenu();
+        if (!aboutMenuA) {
+            // Common navigation legend across all interactive settings pages.
+            PanelFillRect(0,kPanelH-26,kPanelW,kPanelH,8,12,20,255);
+            PanelTextFit("STICK UP/DOWN SELECT   L2/R2 EDIT   A OK   B BACK",
+                kPanelW/2,kPanelH-20,2,150,185,150);
+        }
     }
 
     uint32_t idx = 0;
@@ -8201,7 +8361,7 @@ bool PresentDebugPanel(XrCompositionLayerQuad& quad) {
             g_debugImageNames[i] = s.debug.images[i].image;
         g_debugImageRevisions.assign(s.debug.images.size(), ~std::uint64_t{0});
     }
-    const bool needsUpload = !profilerPanel || idx >= g_debugImageRevisions.size() ||
+    const bool needsUpload = packagePanel || !profilerPanel || idx >= g_debugImageRevisions.size() ||
         g_debugImageRevisions[idx] != contentRevision;
     if (needsUpload) {
         GLint prevTex = 0;
@@ -8230,12 +8390,16 @@ bool PresentDebugPanel(XrCompositionLayerQuad& quad) {
     quad.subImage.imageRect.offset = {0, 0};
     quad.subImage.imageRect.extent = {kPanelW, kPanelH};
     quad.pose.orientation  = {0.0f, 0.0f, 0.0f, 1.0f};
-    quad.pose.position     = {0.0f, -0.20f, -1.65f};
-    // Vice City's settings surface is deliberately much larger than the old
-    // square debug card. Keep the proven 512 texture but present it at a useful
-    // cockpit-menu size so rows can be read without leaning forward.
+    quad.pose.position     = {0.0f, packagePanel?-0.48f:-0.20f, -1.65f};
+    // Present the 512-pixel settings texture at a readable cockpit-menu size.
     quad.size              = {1.8f, 1.8f * static_cast<float>(kPanelH) /
                                     static_cast<float>(kPanelW)};
+    if(fpsPanel) {
+        quad.subImage.imageRect.offset={kPanelW/2-100,kPanelH/2-32};
+        quad.subImage.imageRect.extent={200,64};
+        quad.pose.position={0.64f,0.48f,-1.65f};
+        quad.size={0.40f,0.128f};
+    }
     return true;
 }
 
@@ -9923,10 +10087,7 @@ void DrawParachuteToggles(const float* mvp) {
     glBindBuffer(GL_ARRAY_BUFFER, g_markerVbo);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_markerEbo);
 
-    // The previous implementation published and drew only the two handles;
-    // there was no strap geometry at all. Draw each riser as a tiny oriented
-    // prism instead of GL_LINES (Adreno is allowed to clamp line width to one
-    // pixel). This is 16 vertices / 24 triangles total and is effectively free.
+    // Render each riser as an oriented prism because GLES may clamp line width to one pixel.
     int strapVc = 0, strapIc = 0;
     for (int m = 0; m < 2; ++m) {
         const XrVector3f start{pos[m][0], pos[m][1], pos[m][2]};
@@ -10631,8 +10792,7 @@ void DrawBulletTracers(const float* mvp, XrVector3f eyePosition,
             }
         }
 
-        // A narrow view-facing core supplies the instantaneous flash without
-        // overpowering the smoke volume as the previous full-width beam did.
+        // Use a narrow view-facing core for the instantaneous flash.
         XrVector3f coreSide = vcross(
             vnorm(vsub(tracer.start, eyePosition)), direction);
         if (vdot(coreSide, coreSide) < 1.0e-5f)
@@ -11286,9 +11446,7 @@ bool RenderStereoEyeProjection(XrCompositionLayerProjection& layer,
     }
     const bool shaderCopyMayRun = fxaaStats.requested ||
         underWaterness > 0.001f || mobileColor.mode != 0;
-    // A projection layer MUST carry the pose its pixels were rendered at, or the
-    // reprojection is wrong (this was the old "projection layer trembles" bug).
-    // Until we have one, fall back to the theater screen rather than guess.
+    // Submit projection layers with their recorded render pose; use theater until that pose is available.
     if (!haveRenderPose) {
         outcome = perf::StereoProjectionOutcome::MissingPose;
         return false;
@@ -11424,7 +11582,7 @@ bool RenderStereoEyeProjection(XrCompositionLayerProjection& layer,
             e == 0 ? XrGpuStage::OverlayLeft : XrGpuStage::OverlayRight);
         // Mission/tutorial text is an independent immersive layer. Disabling
         // CLASSIC hides phone-HUD crops, not text or calibration samples.
-        if (hudSource)
+        if (hudSource||g_signalPercent.load(std::memory_order_relaxed)>=0)
             DrawHudComposite(hudSource,chain.width,chain.height,
                              hud::ShouldRenderClassicHud(),e);
         DrawHandsForEye(
@@ -11653,30 +11811,21 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs) {
     SyncInput(frameState.predictedDisplayTime);
 
 #ifdef SAVR_DEV
-    // Developer builds: the Vice City grips+A chord. Normally toggles the FPS
-    // panel; while the hidden cheat "SPAWN VEHICLE BY BUTTON" is ON it instead
-    // cycle-spawns the next vehicle model (400..611) so wheel/HUD calibration
-    // can be walked through fast without diving into the menu each time.
+    // Explicit developer vehicle-spawn cheat only. No profiler shortcut;
+    // ordinary gameplay button presses cannot toggle diagnostic overlays.
     {
         InputState in{};
         GetInput(in);
         const bool chord = in.grip[0] >= 0.75f && in.grip[1] >= 0.75f && in.a;
         static bool chordDown = false;
-        if (chord && !chordDown) {
+        if (chord && !chordDown && !g_mainMenuActive.load(std::memory_order_relaxed)) {
             if (savr::cheats::SpawnByButtonEnabled()) {
                 savr::cheats::RequestNextVehicle();
                 LOGI("[vr] grips+A -> spawn next vehicle (dev)");
-            } else {
-                s.debugVisible = !s.debugVisible;
-                LOGI("[vr] debug panel %s", s.debugVisible ? "ON" : "OFF");
             }
         }
         chordDown = chord;
     }
-#else
-    // Player builds: the FPS/debug panel is a developer tool; the chord was
-    // too easy to hit by accident. The rendering machinery stays for dev use.
-    s.debugVisible = false;
 #endif
 
     // Turn the GameThread frame counter into a rate every half second (using the
@@ -11757,6 +11906,8 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs) {
                        !g_fxaaRuntimeFailed;
     fxaaStats.errors = g_fxaaErrorCount;
 
+    bool publishTrackingPose=false;
+    XrPosef nextHead{},nextEyes[2]{};
     // Always locate the eye views and publish the head pose, so the game camera
     // hook can track the head no matter which screen we present below.
     {
@@ -11770,12 +11921,30 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs) {
         const XrResult located = xrLocateViews(s.session, &locateInfo, &viewState,
                                                static_cast<uint32_t>(s.views.size()),
                                                &viewCount, s.views.data());
+        const auto finitePose=[](const XrPosef& p) {
+            const auto& q=p.orientation;
+            const float norm=q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w;
+            return std::isfinite(p.position.x) && std::isfinite(p.position.y) &&
+                std::isfinite(p.position.z) && std::isfinite(norm) && norm>0.5f && norm<1.5f;
+        };
         const bool posesValid =
-            XR_SUCCEEDED(located) &&
-            (viewState.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0 &&
-            (viewState.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) != 0;
+            XR_SUCCEEDED(located) && viewCount>=2 &&
+            finitePose(s.views[0].pose) && finitePose(s.views[1].pose) &&
+            s.sessionState==XR_SESSION_STATE_FOCUSED &&
+            frameState.predictedDisplayTime>=g_trackingChangeTime &&
+            (viewState.viewStateFlags & (XR_VIEW_STATE_POSITION_VALID_BIT |
+                XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_TRACKED_BIT |
+                XR_VIEW_STATE_ORIENTATION_TRACKED_BIT)) ==
+                (XR_VIEW_STATE_POSITION_VALID_BIT | XR_VIEW_STATE_ORIENTATION_VALID_BIT |
+                 XR_VIEW_STATE_POSITION_TRACKED_BIT | XR_VIEW_STATE_ORIENTATION_TRACKED_BIT);
+        bool publishPose=false;
+        {
+            std::lock_guard<std::mutex> lock(g_headPoseMutex);
+            publishPose=g_trackingRecovery.Sample(posesValid);
+            if(!publishPose)g_headPoseValid=false;
+        }
 
-        if (posesValid) {
+        if (publishPose) {
             // Quest can advertise XR_KHR_visibility_mask yet return an empty
             // successful mesh during xrBeginSession and the immediate FOCUSED
             // transition. Retry only after xrLocateViews has produced physical
@@ -11801,11 +11970,8 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs) {
             centre.position.x = (l.position.x + r.position.x) * 0.5f;
             centre.position.y = (l.position.y + r.position.y) * 0.5f;
             centre.position.z = (l.position.z + r.position.z) * 0.5f;
-            std::lock_guard<std::mutex> lock(g_headPoseMutex);
-            g_headPose      = centre;
-            g_eyePose[0]    = l;
-            g_eyePose[1]    = r;
-            g_headPoseValid = true;
+            nextHead=centre;nextEyes[0]=l;nextEyes[1]=r;
+            publishTrackingPose=true;
         }
     }
 
@@ -11838,8 +12004,14 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs) {
             hp[h].trigger = s.input.triggers[h];
         }
         std::lock_guard<std::mutex> lock(g_headPoseMutex);
-        g_handPose[0] = hp[0];
-        g_handPose[1] = hp[1];
+        // One publication: readers cannot combine the new head origin with
+        // controllers still expressed in the previous LOCAL reference space.
+        if(publishTrackingPose) {
+            g_headPose=nextHead;g_eyePose[0]=nextEyes[0];g_eyePose[1]=nextEyes[1];
+            g_handPose[0]=hp[0];g_handPose[1]=hp[1];g_headPoseValid=true;
+        } else {
+            g_headPoseValid=false;g_handPose[0]={};g_handPose[1]={};
+        }
     }
 
     // Menus/cutscenes use the trusted flat SurfaceTexture. Gameplay normally
@@ -12026,12 +12198,10 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs) {
             }
         }
 
-        // The classic HUD is composited into each projection eye above. Do not
-        // submit the old three crop quads: their opaque black background and
-        // guessed SA regions were the broken path.
+        // Composite the classic HUD into projection eyes only.
 
-        // FPS/debug panel on top, as a head-locked quad (both grips + A toggles it).
-        if ((s.debugVisible || g_menuVisible.load(std::memory_order_relaxed) ||
+        // FPS/debug panel on top, selected only through the VR menu.
+        if ((g_packageHint.load(std::memory_order_relaxed) || ProfilerVisible() || g_menuVisible.load(std::memory_order_relaxed) ||
              g_calibActive.load(std::memory_order_relaxed) ||
              g_mainMenuActive.load(std::memory_order_relaxed) ||
              g_holsterCalibActive.load(std::memory_order_relaxed) ||
@@ -12045,6 +12215,7 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs) {
              g_basketballCalibActive.load(std::memory_order_relaxed) ||
              g_hudActive.load(std::memory_order_relaxed) ||
              g_gfxActive.load(std::memory_order_relaxed) ||
+             g_modelSetActive.load(std::memory_order_relaxed) ||
              g_gfxDistanceActive.load(std::memory_order_relaxed) ||
              g_controlsMenuActive.load(std::memory_order_relaxed) ||
              g_controlsTipsActive.load(std::memory_order_relaxed) ||

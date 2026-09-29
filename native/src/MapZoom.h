@@ -11,6 +11,7 @@ namespace savr::mapzoom {
 void Install(void* handle);
 
 // Fed every frame from the input pump with the raw squeeze axes [0,1].
+void SetBlocked(bool blocked);
 void SetGrips(float left, float right);
 
 }  // namespace savr::mapzoom

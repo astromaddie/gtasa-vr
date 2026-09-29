@@ -65,6 +65,10 @@ void PublishHudText(const std::int16_t* brief, int briefCapacity,
 // CUserDisplay::OnscnTimer each capture pass. Empty string clears the layer.
 // Rendered with the APK font as the TIMERS element.
 void PublishMissionTimersText(const char* text);
+// Native Mike Toreno signal percentage; -1 hides the mission gauge.
+void PublishTorenoSignal(int percent);
+// Actual native breath fraction [0,1], or negative to hide outside swimming.
+void PublishBreath(float fraction);
 // Transient radio-station line, shown in the TIMERS text layer while the
 // station changes (empty string clears it).
 void PublishRadioText(const char* text);
@@ -147,6 +151,8 @@ void SetTwoHandVisualState(const TwoHandVisualState& state);
 // Read from the game thread to drive the in-world camera; publishing happens on
 // the render thread, so the two never share a GL context.
 bool GetHeadPose(float positionOut[3], float orientationOut[4]);
+// Changes only when a fresh tracked pose is ready after focus/tracking/recenter loss.
+bool GetHeadPose(float positionOut[3], float orientationOut[4], std::uint64_t* epoch);
 
 // The horizontal field of view (degrees) the game should render its mono frame
 // at so the flat blit fills each eye's frustum without zoom mismatch. Derived
@@ -293,6 +299,7 @@ void SetHolsterMarkers(const float positions[][3], int count);
 // 3 LEFT, 4 RIGHT; msUntil counts down to the beat. Drawn head-locked because
 // the stock SCM arrow sprites never reach the VR eyes.
 void SetBeatArrow(int dir, int msUntil);
+void SetPackageHint(bool visible);
 
 // Immersive jetpack REALISTIC mode: when on, the present thread draws a jet
 // flame from each controller's nozzle (scaled by that hand's trigger). Publish
@@ -386,6 +393,15 @@ void SetCalibPage(bool active, int selection, int hand, int weaponType);
 // Root VR menu, holster loadout and Graphics submenu. Only one menu page is active
 // at a time; the GameThread publishes whichever is current each frame.
 void SetMainMenu(bool active, int selection);
+#ifdef SAVR_DEV
+inline constexpr int kMainMenuItemCount = 15;
+#else
+inline constexpr int kMainMenuItemCount = 14;
+#endif
+enum ProfilerMode { PROFILER_OFF=0, PROFILER_FPS=1, PROFILER_DETAILED=2 };
+void CycleProfilerMode();
+int GetProfilerMode();
+bool ProfilerVisible();
 void SetHolsterMenu(bool active, int selection);
 void SetHolsterCalibMenu(bool active, int selection);
 void SetDrivingMenu(bool active, int selection, int vehicleType);
@@ -408,6 +424,7 @@ bool HudSourceScanActive();
 // when the classic gameplay HUD itself is disabled.
 bool HudCalibrationActive();
 void SetGraphicsMenu(bool active, int selection);
+void SetModelSetMenu(bool active, int selection);
 void SetControlsMenu(bool active, int selection);
 void SetControlsTipsMenu(bool active, int scroll);
 void SetAboutMenu(bool active, bool firstRun);

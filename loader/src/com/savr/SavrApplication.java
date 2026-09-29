@@ -20,20 +20,8 @@ import java.io.IOException;
 import java.io.InputStream;
 
 /**
- * Loads the VR layer before anything of the game runs.
- *
- * <p>The APK patch points {@code <application android:name>} here. Android
- * instantiates this class before any activity, which is comfortably earlier than
- * the game pulling in {@code libGame.so} through ReLinker — so the native side
- * gets to install itself first and then waits for the game library to show up.
- *
- * <p>Two things can only come from the Java side and are handed over here: the
- * app class loader, without which a native thread cannot look up the game's
- * classes, and the game Activity, which the OpenXR loader needs before it will
- * talk to the runtime at all.
- *
- * <p>A failure to load is logged and swallowed on purpose: a broken VR layer
- * should leave a playable flat game behind, not a boot loop.
+ * Loads the VR layer before the game library and supplies the class loader
+ * and game activity to native code. A load failure leaves the game in flat mode.
  */
 public final class SavrApplication extends Application {
 
@@ -74,19 +62,14 @@ public final class SavrApplication extends Application {
         registerActivityLifecycleCallbacks(new ActivityLifecycleCallbacks() {
             @Override
             public void onActivityCreated(Activity activity, Bundle state) {
-                // Only the game activity is of interest. The stock launcher
-                // activity is a Play Asset Delivery downloader that this build
-                // skips entirely, and handing it to the OpenXR loader would tie
-                // the session to a window that is about to disappear.
+                // Bind OpenXR to the game activity, excluding the asset downloader.
                 if (GAME_ACTIVITY.equals(activity.getClass().getName())) {
                     supplyDataPacks(activity);
                     nativeOnActivityCreated(activity);
                 }
             }
 
-            // Logged because two separate symptoms — the OpenXR session never
-            // leaving IDLE and the engine never drawing — are both exactly what a
-            // paused activity looks like, and guessing between them is expensive.
+            // Record activity lifecycle transitions.
             @Override public void onActivityStarted(Activity activity) { log("started", activity); }
             @Override public void onActivityResumed(Activity activity) { log("resumed", activity); }
             @Override public void onActivityPaused(Activity activity) { log("paused", activity); }
@@ -95,11 +78,7 @@ public final class SavrApplication extends Application {
 
             @Override
             public void onActivityDestroyed(Activity activity) {
-                // Kill the process when the game activity is gone. The engine and
-                // our render loop do not survive a stop/restart cleanly, so a
-                // lingering frozen process would be what the next launch resumes
-                // (the activity is singleTask). Exiting guarantees every launch
-                // starts fresh instead of re-attaching to a hung instance.
+                // Recreate the engine and render loop on the next launch.
                 if (GAME_ACTIVITY.equals(activity.getClass().getName())) {
                     android.util.Log.i(TAG, "game activity destroyed - exiting for a clean next launch");
                     android.os.Process.killProcess(android.os.Process.myPid());
@@ -108,12 +87,7 @@ public final class SavrApplication extends Application {
         });
     }
 
-    /**
-     * Seeds a clean installation with the project owner's verified Quest
-     * settings. Existing files always win, so an update never destroys a
-     * player's own calibration. Deleting the SAVR INI files and launching the
-     * game again restores this exact shipping baseline.
-     */
+    /** Installs default settings without replacing existing calibration files. */
     private void installMissingDefaultSettings() {
         final File filesDirectory = getExternalFilesDir(null);
         if (filesDirectory == null) {
@@ -203,7 +177,7 @@ public final class SavrApplication extends Application {
         Canvas canvas = new Canvas(bitmap);
         canvas.drawColor(Color.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR);
 
-        // The layout was tuned on a 1024-wide raster. Native now requests any
+        // The layout uses a 1024-wide reference raster. Native code requests any
         // multiple of it for sharper glyphs, so every pixel metric scales with
         // the width and the on-screen composition stays identical.
         final float resolutionScale = width / 1024.0f;
@@ -241,21 +215,8 @@ public final class SavrApplication extends Application {
     }
 
     /**
-     * The surface the game renders into, in place of the one Horizon OS takes away.
-     *
-     * <p>An immersive app on Horizon OS has no 2D panel, so the SurfaceView the
-     * game normally draws to is destroyed the moment the session starts, and with
-     * it goes the game's EGL surface and its whole render loop. Handing the engine
-     * a buffer of our own keeps that loop alive and completely independent of the
-     * shell's window lifecycle.
-     *
-     * <p>It is a {@link SurfaceTexture} rather than a plain buffer because the
-     * finished frame then arrives back as an external GL texture in the game's own
-     * context — no readback, no copy, nothing crossing the CPU. From there it is
-     * just a textured quad into each eye's swapchain.
-     *
-     * <p>Called from native code, on the render thread, with {@code texName} owned
-     * by the context that will consume it.
+     * Provides a game render surface independent of the Horizon OS panel lifecycle.
+     * Native code attaches the SurfaceTexture to the consuming GL context.
      */
     public static Surface createGameSurface(int width, int height) {
         if (gameSurface == null) {

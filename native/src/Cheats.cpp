@@ -1,4 +1,6 @@
 #include "Cheats.h"
+#include "MissionCatalog.h"
+#include "DirectMission.h"
 
 #include "Basketball.h"
 #include "Holster.h"
@@ -176,21 +178,16 @@ int* g_currentMissionPage = nullptr;
 int* g_currentSkipToMissionNumber = nullptr;
 int* g_skipToMissionNumber = nullptr;
 int* g_numMissions = nullptr;
+directmission::Api g_directMission;
+std::atomic<const char*> g_directMissionBlock{"LOADER UNAVAILABLE"};
 std::atomic<int> g_missionPageSel{0};
 std::atomic<int> g_missionNumberSel{0};
-constexpr int kMissionPageCount = 6;
-constexpr int kLegacyMissionCountFallback = 20;
+constexpr int kMissionPageCount = missioncatalog::kPageCount;
 
 int MissionCountForPage(int page) {
     page = std::clamp(page, 0, kMissionPageCount - 1);
-    if (g_numMissions != nullptr) {
-        const int count = g_numMissions[page];
-        // Retail lays out six consecutive counts immediately before its
-        // mission-label storage. Fail closed if another binary has a
-        // different or not-yet-initialized layout.
-        if (count > 0 && count <= 512) return count;
-    }
-    return kLegacyMissionCountFallback;
+    return missioncatalog::Count(page, g_numMissions && page < missioncatalog::kRetailPageCount
+        ? g_numMissions[page] : 0);
 }
 
 void StepMissionSelection(bool pageRow, int direction) {
@@ -465,16 +462,44 @@ void Init(void* handle) {
     g_skipToMissionNumber = static_cast<int*>(
         dlsym(handle, "SkipToMissionNumber"));
     g_numMissions = static_cast<int*>(dlsym(handle, "numMissions"));
+    g_directMission.init = reinterpret_cast<void (*)(void*)>(
+        dlsym(handle, "_ZN14CRunningScript4InitEv"));
+    g_directMission.process = reinterpret_cast<int (*)(void*, int)>(
+        dlsym(handle, "_ZN14CRunningScript25ProcessCommands1000To1099Ei"));
+    g_directMission.onMission = g_isPlayerOnAMission;
+    g_directMission.running = static_cast<bool*>(
+        dlsym(handle, "_ZN11CTheScripts29bAlreadyRunningAMissionScriptE"));
+    g_directMission.idleScripts = static_cast<void**>(
+        dlsym(handle, "_ZN11CTheScripts12pIdleScriptsE"));
+    g_directMission.missionCount = static_cast<std::uint16_t*>(
+        dlsym(handle, "_ZN11CTheScripts22NumberOfMissionScriptsE"));
+    g_directMission.exclusiveCount = static_cast<std::uint16_t*>(
+        dlsym(handle, "_ZN11CTheScripts31NumberOfExclusiveMissionScriptsE"));
+    g_directMission.missionPack = static_cast<bool*>(
+        dlsym(handle, "_ZN5CGame16bMissionPackGameE"));
+    g_directMission.area = static_cast<int*>(
+        dlsym(handle, "_ZN5CGame8currAreaE"));
+    g_directMission.kingMarkerStage = g.CTheScripts_ScriptSpace ?
+        reinterpret_cast<int*>(static_cast<unsigned char*>(
+            g.CTheScripts_ScriptSpace) + 0x0b38) : nullptr;
+    g_directMission.catalinaProgress = g.CTheScripts_ScriptSpace ?
+        reinterpret_cast<int*>(static_cast<unsigned char*>(
+            g.CTheScripts_ScriptSpace) + 0x00fc) : nullptr;
+
     if (g_nativeInvincible != nullptr)
         g_godMode.store(*g_nativeInvincible, std::memory_order_release);
     LOGI("cheats: resolved %d/%d handlers, native god state=%s mission counts=%s",
          ok,
          static_cast<int>(std::size(g_cheats)),
          g_nativeInvincible != nullptr ? "yes" : "no",
-         g_numMissions != nullptr ? "retail" : "legacy-20");
+         g_numMissions != nullptr ? "retail+catalog" : "catalog");
 }
 
 void Tick() {
+    g_directMissionBlock.store(g_directMission.BlockReason(
+        !g.FindPlayerVehicle || g.FindPlayerVehicle(-1, false) != nullptr,
+        g_missionLaunchProbe.load(std::memory_order_acquire) != 0),
+        std::memory_order_release);
     ProcessDevVehicleRequest();
     const std::uintptr_t probe =
         g_missionLaunchProbe.load(std::memory_order_acquire);
@@ -530,20 +555,30 @@ int Count() { return static_cast<int>(std::size(g_cheats)); }
 
 const char* Name(int index) {
     if (index < 0 || index >= Count()) return "";
-    if (g_cheats[index].kind == Kind::MissionSelect) {
-        static char label[2][48];
+    if (g_cheats[index].kind == Kind::MissionSelect ||
+        g_cheats[index].kind == Kind::MissionLaunch) {
+        static thread_local char label[3][128];
+        const int page = std::clamp(g_missionPageSel.load(), 0,
+                                    kMissionPageCount - 1);
+        const int number = std::clamp(g_missionNumberSel.load(), 0,
+                                      MissionCountForPage(page) - 1);
         const bool pageRow =
             std::strcmp(g_cheats[index].label, "MISSION GROUP") == 0;
-        if (pageRow) {
-            std::snprintf(label[0], sizeof(label[0]), "%s   < %d >",
-                          g_cheats[index].label, g_missionPageSel.load());
+        const bool launchRow = g_cheats[index].kind == Kind::MissionLaunch;
+        const int row = pageRow ? 0 : (launchRow ? 2 : 1);
+        const char* blocked = page == missioncatalog::kDirectPage && launchRow
+            ? g_directMissionBlock.load(std::memory_order_acquire) : nullptr;
+        if (blocked) {
+            std::snprintf(label[row], sizeof(label[row]), "%s", blocked);
+        } else if (pageRow) {
+            std::snprintf(label[row], sizeof(label[row]), "GROUP < %d > %s",
+                          page, missioncatalog::kPageNames[page]);
         } else {
-            const int count = MissionCountForPage(g_missionPageSel.load());
-            std::snprintf(label[1], sizeof(label[1]), "%s   < %d / %d >",
-                          g_cheats[index].label, g_missionNumberSel.load(),
-                          count - 1);
+            std::snprintf(label[row], sizeof(label[row]),
+                          launchRow ? "LAUNCH %d:%d %s" : "< %d:%d > %s",
+                          page, number, missioncatalog::Name(page, number));
         }
-        return label[pageRow ? 0 : 1];
+        return label[row];
     }
     if (g_cheats[index].kind == Kind::SpawnByButton)
         return g_spawnByButton.load(std::memory_order_acquire)
@@ -554,6 +589,12 @@ const char* Name(int index) {
 }
 
 bool Available(int index) {
+    if (index >= 0 && index < Count() &&
+        g_cheats[index].kind == Kind::MissionLaunch &&
+        g_missionPageSel.load() == missioncatalog::kDirectPage)
+        return g_directMission.Available() &&
+            g_directMissionBlock.load(std::memory_order_acquire) == nullptr;
+
     if (index >= 0 && index < Count() &&
         (g_cheats[index].kind == Kind::MissionSelect ||
          g_cheats[index].kind == Kind::SpawnByButton))
@@ -631,15 +672,6 @@ void Activate(int index) {
             LOGW("teleport ignored: leave the vehicle first");
             return;
         }
-        // Basketball-glitch repair + diagnosis. Story scripts (the известный
-        // "no basketballs after Madd Dogg" bug) can switch the object brain
-        // entries off in CTheScripts::ScriptsForBrains, after which no court
-        // ever prompts again. Dump the live table, and re-enable any
-        // inactive entry with the basketball activation radius (70.0 — the
-        // opcode-0929 registrations for hoop models 946/947/3496/3497).
-        // Entry layout disasm-verified (AddNewScriptBrain @0x437974):
-        // stride 20; +0 u16 streamedIndex (0xFFFF = free), +2 s8 type,
-        // +3 s8 groupingId, +4 u8 active, +8 f32 radius, +0xC u16 model.
         if (g.CTheScripts_ScriptsForBrains != nullptr) {
             auto* table =
                 static_cast<unsigned char*>(g.CTheScripts_ScriptsForBrains);
@@ -839,9 +871,7 @@ void Activate(int index) {
     }
     if (cheat.kind == Kind::NeverTired) {
         if (cheat.fn == nullptr) { LOGW("infinite sprint unavailable"); return; }
-        // 0x188, not 0x189: the retail SET_PLAYER_NEVER_GETS_TIRED handler
-        // (disasm @0x41c3b4: strb [players + id*0x1D8 + 0x188]) — the old
-        // off-by-one wrote a neighbouring byte and did nothing.
+        // SET_PLAYER_NEVER_GETS_TIRED stores at players + id*0x1D8 + 0x188 (retail 0x41c3b4).
         g_neverTiredByte = static_cast<unsigned char*>(cheat.fn) + 0x188;
         const bool enabled = !g_neverTiredActive.load(std::memory_order_acquire);
         g_neverTiredActive.store(enabled, std::memory_order_release);
@@ -863,6 +893,26 @@ void Activate(int index) {
         return;
     }
     if (cheat.kind == Kind::MissionLaunch) {
+        if (g_missionPageSel.load() == missioncatalog::kDirectPage) {
+            const int number = g_missionNumberSel.load();
+            const bool started = g_directMission.Launch(number,
+                !g.FindPlayerVehicle || g.FindPlayerVehicle(-1, false) != nullptr,
+                g_missionLaunchProbe.load(std::memory_order_acquire) != 0);
+            g_directMissionBlock.store(g_directMission.BlockReason(
+                !g.FindPlayerVehicle || g.FindPlayerVehicle(-1, false) != nullptr,
+                g_missionLaunchProbe.load(std::memory_order_acquire) != 0),
+                std::memory_order_release);
+            LOGI("mission direct: number=%d name=%s started=%d", number,
+                 missioncatalog::Name(missioncatalog::kDirectPage, number), started);
+            if (FILE* f=std::fopen(
+                    "/sdcard/Android/data/com.rockstargames.gtasa/files/savr_debug.txt","a")) {
+                std::fprintf(f,"direct page=6 num=%d started=%d name=%s\n",number,
+                    started,missioncatalog::Name(missioncatalog::kDirectPage,number));
+                std::fclose(f);
+            }
+            return;
+        }
+
         if (cheat.fn == nullptr || g_currentMissionPage == nullptr ||
             g_currentSkipToMissionNumber == nullptr) {
             LOGW("mission launch unavailable (symbols missing)");
@@ -889,15 +939,15 @@ void Activate(int index) {
             reinterpret_cast<std::uintptr_t>(cheat.fn),
             std::memory_order_release);
         g_missionLaunchTicks.store(0, std::memory_order_release);
-        LOGI("mission launch: page=%d number=%d flag=%p page@%p num@%p",
-             page, number,
+        LOGI("mission launch: page=%d number=%d name=%s flag=%p page@%p num@%p",
+             page, number, missioncatalog::Name(page, number),
              cheat.fn, static_cast<void*>(g_currentMissionPage),
              static_cast<void*>(g_currentSkipToMissionNumber));
         if (FILE* f = std::fopen(
                 "/sdcard/Android/data/com.rockstargames.gtasa/files/savr_debug.txt",
                 "a")) {
-            std::fprintf(f, "launch page=%d num=%d\n",
-                         page, number);
+            std::fprintf(f, "launch page=%d num=%d name=%s\n",
+                         page, number, missioncatalog::Name(page, number));
             std::fclose(f);
         }
         return;

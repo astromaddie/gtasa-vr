@@ -7,6 +7,7 @@ umask 077
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 CONFIGURATION="RelWithDebInfo"
+SAVR_DEV=OFF
 ANDROID_SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
 JAVA_HOME_ARG="${JAVA_HOME:-}"
 OPENXR_LOADER="${SAVR_OPENXR_LOADER_SO:-}"
@@ -26,6 +27,7 @@ Usage: tools/build.sh [options]
 
 Build options:
   --configuration NAME       Debug, RelWithDebInfo (default), or Release
+  --developer                Enable developer profiler/menu and capture logs
   --android-sdk DIR          Android SDK root (or ANDROID_SDK_ROOT/ANDROID_HOME)
   --java-home DIR            JDK 21 root (or JAVA_HOME)
   --openxr-loader FILE       Verified Khronos 1.1.43 arm64 libopenxr_loader.so
@@ -170,6 +172,7 @@ sha256_file() {
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --configuration|-Configuration) CONFIGURATION="${2:?missing configuration}"; shift 2 ;;
+    --developer|-Developer) SAVR_DEV=ON; shift ;;
     --android-sdk|-AndroidSdk) ANDROID_SDK="${2:?missing Android SDK}"; shift 2 ;;
     --java-home|-JavaHome) JAVA_HOME_ARG="${2:?missing Java home}"; shift 2 ;;
     --openxr-loader|-OpenXrLoader) OPENXR_LOADER="${2:?missing OpenXR loader}"; shift 2 ;;
@@ -285,10 +288,10 @@ echo "==> libsavr.so ($CONFIGURATION, arm64-v8a)"
   "-DOPENXR_LOADER_SO=$OPENXR_LOADER" \
   -DANDROID_ABI=arm64-v8a \
   -DANDROID_PLATFORM=android-28 \
-  -DSAVR_DEV=OFF \
+  "-DSAVR_DEV=$SAVR_DEV" \
   "-DCMAKE_BUILD_TYPE=$CONFIGURATION"
-grep -q '^SAVR_DEV:BOOL=OFF$' "$NATIVE_BUILD/CMakeCache.txt" || {
-  echo 'CMake cache did not retain the required player setting SAVR_DEV=OFF' >&2
+grep -q "^SAVR_DEV:BOOL=$SAVR_DEV$" "$NATIVE_BUILD/CMakeCache.txt" || {
+  echo "CMake cache did not retain the requested SAVR_DEV=$SAVR_DEV" >&2
   exit 1
 }
 "$CMAKE" --build "$NATIVE_BUILD"

@@ -1,4 +1,5 @@
 #include "ScopeAim.h"
+#include "MissionComfort.h"
 
 #include "Log.h"
 #include "PhysicalWeapon.h"
@@ -29,6 +30,8 @@ constexpr int kColPointSize = 0x2c;
 constexpr float kSniperZoom = 2.5f;
 constexpr float kLauncherZoom = 1.8f;
 constexpr float kCameraZoom = 1.8f;
+constexpr float kCameraMinZoom = 1.0f;
+constexpr float kCameraMaxZoom = 8.0f;
 constexpr float kCentreRayDistance = 150.0f;
 constexpr std::uint64_t kEnterDwellMs = 120;
 constexpr std::uint64_t kReleaseGraceMs = 180;
@@ -86,6 +89,8 @@ static_assert(sizeof(ColPoint) == kColPointSize);
 std::atomic<int> gActivePacked{0};
 std::atomic<bool> gSniperFireAvailable{false};
 std::atomic<bool> gProjectileFireAvailable{false};
+std::atomic<float> gCameraZoom{kCameraZoom};
+std::uint64_t gCameraZoomTime = 0;
 int gCandidateHand = -1;
 int gCandidateType = -1;
 std::uint64_t gCandidateSince = 0;
@@ -114,8 +119,25 @@ float ZoomForWeapon(int type) {
     return type == kSniperType ? kSniperZoom
          : type == kRpgType || type == kHeatSeekerType
                               ? kLauncherZoom
-         : type == kCameraType ? kCameraZoom
+         : type == kCameraType ? gCameraZoom.load(std::memory_order_relaxed)
                                : 1.0f;
+}
+
+void UpdateCameraZoom(std::uint64_t now) {
+    const float elapsed = gCameraZoomTime != 0 && now >= gCameraZoomTime
+        ? std::min(static_cast<float>(now - gCameraZoomTime) * 0.001f, 0.1f)
+        : 0.0f;
+    gCameraZoomTime = now;
+    xr::InputState input{};
+    xr::GetInput(input);
+    const float axis = input.rightStick[1];
+    if (!std::isfinite(axis) || std::abs(axis) <= 0.25f) return;
+    const float rate = std::copysign(
+        (std::min(std::abs(axis), 1.0f) - 0.25f) / 0.75f, axis);
+    const float zoom = gCameraZoom.load(std::memory_order_relaxed);
+    gCameraZoom.store(std::clamp(zoom * std::exp(rate * elapsed * 1.2f),
+                               kCameraMinZoom, kCameraMaxZoom),
+                      std::memory_order_relaxed);
 }
 
 bool FireRouteAvailable(int type) {
@@ -212,10 +234,7 @@ bool CandidateMetrics(void* ped, int hand, V3 head, V3 headRight,
     const float height = Dot(relative, headUp);
     const float lateral = Dot(relative, headRight);
 
-    // Match current Quest VC: the alignment gate follows the same calibrated,
-    // model-bound barrel ray as the laser and physical shot. The old raw AIM
-    // controller axis let an upward-pointing gun enter scope mode merely
-    // because the controller itself remained near the player's face.
+    // Use the calibrated model barrel ray for scope alignment, lasers and physical shots.
     float rayOriginValues[3]{},rayDirectionValues[3]{};
     if (!vrcam::GetWeaponFireRay(hand,type,
                                 rayOriginValues,rayDirectionValues)) {
@@ -230,8 +249,13 @@ bool CandidateMetrics(void* ped, int hand, V3 head, V3 headRight,
                              rayDirectionValues[2]});
     const float alignment=Dot(worldHeadForward,aim);
 
-    // Keep the current Quest-VC eye envelope after the support grip has latched.
-    if (distance < 0.04f || distance > 0.65f ||
+    // Camera needs a deliberate, close-to-eye pose, aligned within 20 degrees.
+    // Leave supported long-gun optics and the native photo zoom bridge alone.
+    const int active=gActivePacked.load(std::memory_order_acquire);
+    if (type==kCameraType) {
+        if (!missioncomfort::CameraAtEye(distance,forward,height,lateral,alignment,
+                PackedHand(active)==hand&&PackedType(active)==type)) return false;
+    } else if (distance < 0.04f || distance > 0.65f ||
         forward < -0.03f || forward > 0.58f ||
         height < -0.30f || height > 0.14f ||
         std::abs(lateral) > 0.30f || alignment < 0.70f) {
@@ -282,6 +306,7 @@ void Reset() {
     ResetCandidate();
     gReleaseSince = 0;
     gOwner = nullptr;
+    gCameraZoomTime = 0;
 }
 
 void SetSniperFireAvailable(bool available) {
@@ -357,6 +382,8 @@ void Update(bool interactionsBlocked) {
     const int activeType = PackedType(active);
     if (candidateHand >= 0) {
         if (activeHand == candidateHand && activeType == candidateType) {
+            if (activeType == kCameraType) UpdateCameraZoom(now);
+            else gCameraZoomTime = 0;
             gReleaseSince = 0;
             ResetCandidate();
             return;
@@ -370,6 +397,7 @@ void Update(bool interactionsBlocked) {
         if (gCandidateSince == 0) gCandidateSince = now;
         if (now - gCandidateSince >= kEnterDwellMs) {
             SetActive(candidateHand, candidateType);
+            gCameraZoomTime = candidateType == kCameraType ? now : 0;
             gReleaseSince = 0;
             ResetCandidate();
         }

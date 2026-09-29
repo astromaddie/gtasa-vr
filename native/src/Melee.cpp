@@ -11,6 +11,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
+#include <cstdarg>
 
 namespace savr::melee {
 namespace {
@@ -80,6 +82,15 @@ V3 RotateQuaternion(const float q[4], V3 v) {
 double NowSeconds() {
     using Clock = std::chrono::steady_clock;
     return std::chrono::duration<double>(Clock::now().time_since_epoch()).count();
+}
+
+void Trace(const char* format, ...) {
+    char line[384]{};va_list args;va_start(args,format);
+    std::vsnprintf(line,sizeof(line),format,args);va_end(args);
+    LOGI("[vr.melee] %s",line);
+    if(FILE* f=std::fopen("/sdcard/Android/data/com.rockstargames.gtasa/files/vr_melee.log","a")) {
+        std::fprintf(f,"%.3f %s\n",NowSeconds(),line);std::fclose(f);
+    }
 }
 
 struct ColPoint {
@@ -423,6 +434,19 @@ int DamageForWeapon(int weaponType) {
     return damage > 0 ? std::clamp(damage, 1, 200) : fallback;
 }
 
+bool StealthKnife(void* player,void* target,int weaponType) {
+    if(weaponType!=4 || !player || !target || player==target ||
+       EntityType(target)!=kEntityPed || !g.CPed_IsAlive(target) ||
+       !g.CPedIntelligence_GetTaskDuck || !g.CPedIntelligence_TestForStealthKill)return false;
+    void* intelligence=nullptr;void* targetMatrix=nullptr;void* targetIntelligence=nullptr;
+    std::memcpy(&intelligence,static_cast<const std::uint8_t*>(player)+0x538,sizeof(intelligence));
+    std::memcpy(&targetMatrix,static_cast<const std::uint8_t*>(target)+0x18,sizeof(targetMatrix));
+    std::memcpy(&targetIntelligence,static_cast<const std::uint8_t*>(target)+0x538,sizeof(targetIntelligence));
+    // Native false = full range/rear/awareness test; true only checks victim pose.
+    return intelligence && targetIntelligence && targetMatrix && g.CPedIntelligence_GetTaskDuck(intelligence,true) &&
+           g.CPedIntelligence_TestForStealthKill(intelligence,target,false);
+}
+
 void ApplyContact(void* player, int hand, int weaponType, float speed,
                   V3 root, void* target, const ColPoint& contact) {
     // These strict type checks are part of the ABI boundary: GenerateDamageEvent
@@ -453,6 +477,10 @@ void ApplyContact(void* player, int hand, int weaponType, float speed,
                 LOGI("[vr.melee] katana head strike dist=%.2f",
                      Length(impact - headPos));
             }
+        }
+        if(StealthKnife(player,target,weaponType)) {
+            finalDamage=10000; // Native damage/death bookkeeping, no direct health writes.
+            Trace("STEALTH knife hand=%d",hand);
         }
         GameVec3 centre{};
         g.CEntity_GetBoundCentre(target, &centre);
@@ -544,8 +572,8 @@ void ApplyContact(void* player, int hand, int weaponType, float speed,
 
     static unsigned hitCount = 0;
     ++hitCount;
-    if (hitCount <= 12 || (hitCount % 100) == 0) {
-        LOGI("[vr.melee] hit hand=%d type=%d targetType=%d damage=%d "
+    if (hitCount <= 40 || (hitCount % 100) == 0) {
+        Trace("hit hand=%d type=%d targetType=%d damage=%d "
              "piece=%d speed=%.2f accepted=%d at=(%.2f,%.2f,%.2f)",
              hand, weaponType, type, damage, piece, speed, accepted ? 1 : 0,
              impact.x, impact.y, impact.z);
@@ -565,7 +593,7 @@ void Update(bool interactionsBlocked) {
     if (!CoreReady()) {
         if (!gMissingSymbolsLogged) {
             gMissingSymbolsLogged = true;
-            LOGW("[vr.melee] exact SA 2.11 collision/damage symbols missing; disabled");
+            Trace("DISABLED native collision/damage symbols missing");
         }
         Reset();
         return;
@@ -600,13 +628,23 @@ void Update(bool interactionsBlocked) {
             continue;
         }
 
+        static int reportedType[2]{-1,-1};
+        if(reportedType[hand]!=segment.weaponType) {
+            reportedType[hand]=segment.weaponType;
+            Trace("TRACK hand=%d slot=%d type=%d enabled=%d length=%.3f",
+                hand,segment.slot,segment.weaponType,segment.enabled,Length(segment.tip-segment.root));
+        }
         Motion& motion = gMotion[hand];
         const double dt = now - motion.previousAt;
         if (!motion.valid || motion.slot != segment.slot ||
             motion.weaponType != segment.weaponType ||
-            motion.modelBound != segment.modelBound || dt <= 0.0 || dt > 0.05) {
+            motion.modelBound != segment.modelBound || dt <= 0.0 || dt > 0.125) {
             ResetMotion(motion);
             motion.valid = true;
+            // Seeding records no contact. The next deliberate movement may be
+            // a first strike; requiring 70 ms of perfect stillness first made
+            // a freshly drawn bat inert while the player kept swinging.
+            motion.armed = segment.enabled;
             motion.slot = segment.slot;
             motion.weaponType = segment.weaponType;
             motion.modelBound = segment.modelBound;
@@ -664,6 +702,11 @@ void Update(bool interactionsBlocked) {
                                 tipSpeed >= threshold && deliberate &&
                                 cooldownReady;
         if (fastSample) {
+            static double lastSwingTrace[2]{};
+            if(segment.weaponType>1 && now-lastSwingTrace[hand]>1.0) {
+                lastSwingTrace[hand]=now;
+                Trace("SWING hand=%d type=%d speed=%.2f dt=%.3f",hand,segment.weaponType,tipSpeed,dt);
+            }
             motion.strikeInProgress = true;
             motion.strikePeakSpeed = std::max(motion.strikePeakSpeed, tipSpeed);
             motion.strikeContinueUntil = now + 0.180;

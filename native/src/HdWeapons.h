@@ -9,6 +9,8 @@ bool Available();
 // The image and texture database are registered in this session. Turning the
 // option off after this point takes effect on the next app start.
 bool Applied();
+// Register a small optional PNG database with the shared thumbnail-sort fix.
+void* LoadLooseDatabase(const char* name, bool preload);
 // Called from the per-frame input pump on the GameThread; applies once as
 // soon as the engine is ready.
 void Tick(bool enabled);

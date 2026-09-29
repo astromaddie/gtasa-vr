@@ -2,6 +2,7 @@
 
 namespace savr::locomotion {
 
+
 enum MovementMode {
     MOVEMENT_BODY = 0,
     MOVEMENT_HEAD,
@@ -94,7 +95,7 @@ enum ButtonAction {
     BIND_ACT_JUMP,     // Square
     BIND_ACT_ATTACK,   // Circle (vehicle fire stays on the shipped button)
     BIND_ACT_ENTER,    // Triangle
-    BIND_ACT_CROUCH,   // L3 in the shipped layout
+    BIND_ACT_CROUCH,   // R3 in the default on-foot layout
     BIND_ACT_COUNT
 };
 enum ButtonSource {
@@ -130,6 +131,8 @@ void MapGameplaySticks(float leftX, float leftY, float rightX, float rightY,
                        float* turnX, float* turnY);
 // True while any mapped button is held. onFoot=false uses the shipped layout
 // regardless of custom bindings (vehicle controls retain their vocabulary).
+void UpdateRunToggle(bool enabled,bool held,bool crouch,bool l3,bool r3);
+bool RunEnabled();
 bool ActionHeld(int action, bool a, bool b, bool x, bool y,
                 bool l3, bool r3, bool onFoot);
 

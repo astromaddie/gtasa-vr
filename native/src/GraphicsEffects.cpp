@@ -11,6 +11,7 @@
 #include <dlfcn.h>
 #include <sys/mman.h>
 #include <sys/system_properties.h>
+#include "CoronaTextures.h"
 #include <unistd.h>
 
 #include <algorithm>
@@ -644,17 +645,6 @@ bool ReadCoronaEyeBasis(void* rwCamera, CoronaEyeBasis* out) {
     return true;
 }
 
-int CoronaTextureSlot(void* texture) {
-    if (!texture || !g_coronaTextures) return -1;
-    if (texture == g_coronaTextures[kCoronaTextureShinyStar])
-        return kCoronaTextureShinyStar;
-    if (texture == g_coronaTextures[kCoronaTextureHeadlight])
-        return kCoronaTextureHeadlight;
-    if (texture == g_coronaTextures[kCoronaTextureHeadlightLine])
-        return kCoronaTextureHeadlightLine;
-    return -1;
-}
-
 bool ReadCoronaWorldPosition(const std::uint8_t* record,
                              CoronaV3* world,
                              bool* attachedMatrixMissing) {
@@ -807,16 +797,19 @@ bool RenderStereoCoronaBillboards(void* rwCamera, int eye) {
     g_fn.renderStateSet(11, reinterpret_cast<void*>(2));
     g_fn.renderStateSet(20, reinterpret_cast<void*>(1));
 
-    constexpr int kTextureSlots[] = {
-        kCoronaTextureShinyStar,
-        kCoronaTextureHeadlight,
-        kCoronaTextureHeadlightLine,
-    };
+    CoronaTextures<kCoronaCount> textures;
+    for (int i = 0; i < kCoronaCount; ++i) {
+        const auto* record = g_coronaArray + i * kCoronaStride;
+        if (*reinterpret_cast<const std::uint64_t*>(record + kCoronaIdOffset) <= 2u)
+            continue;
+        if (!record[kCoronaFadedIntensityOffset] &&
+            !record[kCoronaRequestedIntensityOffset]) continue;
+        textures.Add(*reinterpret_cast<void* const*>(record + kCoronaTextureOffset));
+    }
     constexpr unsigned int kIm3DFlags = 1u | 8u | 16u; // UV | XYZ | RGBA
     constexpr int kTriangleList = 3;
 
-    for (const int textureSlot : kTextureSlots) {
-        void* const texture = g_coronaTextures[textureSlot];
+    for (void* const texture : textures) {
         void* const raster = texture
             ? *reinterpret_cast<void* const*>(texture)
             : nullptr;
@@ -840,7 +833,7 @@ bool RenderStereoCoronaBillboards(void* rwCamera, int eye) {
                 void* const recordTexture =
                     *reinterpret_cast<void* const*>(
                         record + kCoronaTextureOffset);
-                if (CoronaTextureSlot(recordTexture) != textureSlot) continue;
+                if (recordTexture != texture) continue;
                 const std::uint8_t requested =
                     record[kCoronaRequestedIntensityOffset];
                 const std::uint8_t faded =
@@ -2785,9 +2778,7 @@ bool BuildFlamethrowerMuzzleRay(int hand,
     }
 
     constexpr float kCalibrationUnitMetres = 0.005f;
-    // Startup can fire before the first render has published a model pose. Use
-    // the VC flamethrower's proven long-muzzle source for that bounded window,
-    // never the old model +X ray that created the visible downward burst.
+    // Use the bounded long-muzzle source until the first render publishes a model pose.
     constexpr float kViceCityFlameMuzzleForward = 0.68f;
     FlameV3 fallbackSource{
         tracked.aimPos[0], tracked.aimPos[1], tracked.aimPos[2]};
@@ -3887,12 +3878,7 @@ void RenderEye(void* rwCamera, int eye) {
         Call(g_fn.glass);
         if (profile >= 3) Call(g_fn.movingThings);
     }
-    // RenderScene leaves several backend states tailored to its final world
-    // batch. The stock late-effects path starts from the game's canonical 3D
-    // state, while this injected per-eye path used to enter Fx directly. Fx
-    // sets its texture, blend and Z-write state, but deliberately inherits the
-    // remaining raster/alpha/depth state. Re-establish the exact retail base
-    // state before recording its immediate-mode fire triangles into each eye.
+    // Restore the canonical retail 3D raster, alpha and depth state before recording per-eye Fx triangles.
     g_fn.definedState();
     if (moveEssentialLights && g_coronaBillboardReady &&
         RenderStereoCoronaBillboards(rwCamera, eye)) {

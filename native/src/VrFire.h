@@ -9,6 +9,10 @@ using PhysicalFireQuery = bool (*)(int weaponType, int* firingHand);
 
 void SetPhysicalFireQuery(PhysicalFireQuery query);
 
+// Native attached-gunner state (bike/car/helicopter mission sequences).
+// Ordinary on-foot rifle aiming does not activate this route.
+bool IsScriptedWeaponCamera();
+
 // Installs narrow hooks on player hitscan entry points. Non-player shots,
 // vehicle shots, unheld weapons and invalid tracking all call the original game
 // functions unchanged.

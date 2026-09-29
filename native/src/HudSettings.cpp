@@ -31,8 +31,7 @@ struct ElementDefaults {
     int scaleTenths;
 };
 
-// Calibrated on-device on 2026-08-24. Radar and Health are the two authoritative
-// real-image crops; Health contains the complete top-right status block.
+// Radar and Health use image crops. Health includes the full top-right status block.
 constexpr ElementDefaults kElementDefaults[ELEMENT_COUNT] = {
     {1,   0, 104, 284, 284,  25, 47, 28, 34,  2}, // radar
     {1, 776,  16, 244,  84,  53, 42,  8,  3, 14}, // complete top-right status
@@ -52,8 +51,7 @@ const char* const kFieldKeys[ELEMENT_FIELD_COUNT] = {
     "Enabled", "SourceX", "SourceY", "SourceWidth", "SourceHeight",
     "ScreenX", "ScreenY", "ScreenWidth", "ScreenHeight", "ScaleTenths"
 };
-// Millimetre-resolution keys (0.1 cm calibration step). The old *Cm keys are
-// intentionally not read: their coarse values are superseded.
+// Read millimetre-resolution keys (0.1 cm calibration steps); ignore superseded *Cm keys.
 const char* const kWristFieldKeys[WRIST_SLOT_COUNT][WRIST_FIELD_COUNT] = {
     {"WristAlongMm", "WristAcrossMm", "WristLiftMm",
      "WristPitchDeg", "WristYawDeg", "WristRollDeg", "WristScaleTenths"},
@@ -136,9 +134,7 @@ void LoadWristDefaults() {
         g_wrist[WRIST_SLOT_VEHICLE][HEALTH][field].store(
             kDashHealthDefaults[field], std::memory_order_relaxed);
     }
-    // Weapon-grip starting points (the user calibrates the exact spots):
-    // one-hand grip slides the panel outboard of the gripping hand; the
-    // two-hand grip stacks both panels beside the primary hand.
+    // One-hand grip places the panel outboard; two-hand grip stacks panels beside the primary hand.
     for (int element = 0; element < ELEMENT_COUNT; ++element) {
         g_wrist[WRIST_SLOT_WEAPON][element][WRIST_ACROSS_MM].store(
             -120, std::memory_order_relaxed);
@@ -257,10 +253,7 @@ void Load() {
         }
         std::fclose(file);
     }
-    // Old crop-based message calibration often needed a 0.1x scale because the
-    // source window contained a huge slice of the phone HUD. Direct font layers
-    // have no such source slice; migrate only that obsolete scale so the first
-    // real string is readable while preserving the user's screen position/box.
+    // Migrate obsolete crop-scale values while preserving the configured panel position and bounds.
     if (g_element[MESSAGES][ELEMENT_SCALE].load(std::memory_order_relaxed)<5)
         g_element[MESSAGES][ELEMENT_SCALE].store(10,std::memory_order_relaxed);
     g_preset.store(preset, std::memory_order_release);

@@ -1,3 +1,7 @@
+#include "Tbone.h"
+#include "BeachDance.h"
+#include "MissionScenes.h"
+#include "JustBusiness.h"
 #include "AnimatedTextures.h"
 #include "Appearance.h"
 #include "Hydraulics.h"
@@ -7,14 +11,21 @@
 #include "Driving.h"
 #include "FrameTarget.h"
 #include "HdWeapons.h"
+#include "ModelSets.h"
 #include "Holster.h"
 #include "HudSettings.h"
 #include "Locomotion.h"
 #include "Log.h"
 #include "Melee.h"
+#include "MissionControls.h"
+#include "Catalyst.h"
+#include "MenuNavigation.h"
+#include "Swimming.h"
+#include "BoatEntry.h"
 #include "PerfTelemetry.h"
 #include "Basketball.h"
 #include "MapZoom.h"
+#include "FrontendPointer.h"
 #include "BrainDiag.h"
 #include "Pickups.h"
 #include "PhysicalWeapon.h"
@@ -943,6 +954,9 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
 
     // Keep the stereo/theater decision fresh even in frames the camera hook
     // never sees — the pause menu freeze was exactly this gate going stale.
+    savr::justbusiness::Update();
+    savr::beachdance::Update();
+    savr::missionscenes::Update();
     vrcam::RefreshStereoGate();
 
     // Hold the game's own user pause for the whole pause-menu visit. Our
@@ -990,7 +1004,7 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
     // walks the player or drops/switches the weapon in hand.
     enum { PG_NONE = 0, PG_MAIN, PG_CALIB, PG_HOLSTER_CALIB, PG_HOLSTERS,
            PG_DRIVING, PG_DRIVING_CALIB, PG_LOCOMOTION, PG_HUD, PG_HUD_CROP,
-           PG_HUD_WRIST, PG_CHEATS, PG_GRAPHICS, PG_GRAPHICS_DISTANCES,
+           PG_HUD_WRIST, PG_CHEATS, PG_GRAPHICS, PG_GRAPHICS_DISTANCES, PG_MODEL_SETS,
            PG_CONTROLS, PG_CONTROLS_TIPS, PG_ABOUT, PG_BASKETBALL,
            PG_BASKETBALL_CALIB,
            PG_VEHICLE_CAMERA, PG_JETPACK };
@@ -1006,7 +1020,8 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
     static int  jetpackSel = 0;
     static int  controlsTipsScroll = 0;
     static int  locomotionSel = 0, hudSel = 0, hudCropSel = 0, hudWristSel = 0,
-                gfxSel = 0, gfxDistanceSel = 0, controlsSel = 0;
+                gfxSel = 0, gfxDistanceSel = 0, controlsSel = 0, modelSetSel = 0;
+    static int modelSetParent = PG_MAIN;
     static bool aboutFirstRun = false, aboutArmed = false;
     static bool openPrev = false, enterPrev = false, backPrev = false;
     static int  tUp = 0, tDown = 0, tMinus = 0, tPlus = 0;
@@ -1036,14 +1051,9 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
             return 3;                                    // ~216/s
         };
 
-        // Primary open chord is grips+Menu (Vice City style); grips+Y is the
-        // fallback for setups where the Menu click is swallowed. grips+B was a
-        // legacy third fallback and is deliberately GONE: B now fires the
-        // drive-by/held weapon in vehicles, and the hidden chord kept opening
-        // the menu mid-fight.
-        // Stereo cutscenes own the stick clicks exactly like Vice City: R3
-        // cycles director/actor cameras and L3 keeps the current camera for
-        // this named scene. Both-click recenter resumes outside a cutscene.
+        // Open with grips+Menu or grips+Y. B remains available for vehicle weapons.
+        // In stereo cutscenes, R3 cycles cameras and L3 retains the scene camera.
+        // Both-click recenter is available outside cutscenes.
         const bool cutsceneCameras = menuPage == PG_NONE &&
             vrcam::CutsceneCameraControlsActive();
         static bool cutsceneCyclePrev = false;
@@ -1060,7 +1070,7 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
         // L3+R3 (both thumbstick clicks) recenters the view: the current head
         // pose becomes straight-ahead. Edge-triggered so holding does it once.
         static bool recenterPrev = false;
-        const bool recenterChord = !cutsceneCameras && in.l3 && in.r3;
+        const bool recenterChord = in.l3 && in.r3;
         if (recenterChord && !recenterPrev) vrcam::RequestRecenter();
         recenterPrev = recenterChord;
 
@@ -1130,14 +1140,16 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
         }
         openPrev = openChord;
 
-        const bool navUp   = held(in.leftStick[1] >  0.65f, tUp);
-        const bool navDown = held(in.leftStick[1] < -0.65f, tDown);
+        const auto menuNav=savr::menu::Navigate(menuPage!=PG_NONE,
+            in.leftStick[0],in.leftStick[1],grips);
+        const bool navUp   = held(menuNav.up, tUp);
+        const bool navDown = held(menuNav.down, tDown);
         // Ints carrying the acceleration magnitude; every existing boolean use
         // (`if (minus)`, `minus?-1:...`) keeps its meaning unchanged.
         const int minus = heldValue(
-            in.leftStick[0] < -0.65f || in.triggers[0] >= 0.55f, tMinus);
+            !grips && in.triggers[0] >= 0.55f, tMinus);
         const int plus = heldValue(
-            in.leftStick[0] >  0.65f || in.triggers[1] >= 0.55f, tPlus);
+            !grips && in.triggers[1] >= 0.55f, tPlus);
         const bool enter   = in.a && !enterPrev && !grips;   // A: enter/activate/reset
         const bool back    = in.b && !backPrev && !grips;    // B: step back / close (grips = open chord)
         enterPrev = in.a; backPrev = in.b;
@@ -1146,7 +1158,7 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
         case PG_MAIN: {
             // Weapon/holster setup, driving, HUD, hand appearance, cheats,
             // graphics, controls, about and close.
-            const int N = 13;
+            const int N = xr::kMainMenuItemCount;
             if (navUp)   mainSel = (mainSel - 1 + N) % N;
             if (navDown) mainSel = (mainSel + 1) % N;
             if (mainSel == 6) {
@@ -1178,10 +1190,16 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
                     menuPage = PG_CHEATS; cheatCategory = -1; cheatSel = 0;
                 }
                 else if (mainSel == 8) { menuPage = PG_GRAPHICS; gfxSel = 0; }
-                else if (mainSel == 9) { menuPage = PG_CONTROLS; controlsSel = 0; }
-                else if (mainSel == 10) { menuPage = PG_BASKETBALL; basketballSel = 0; }
-                else if (mainSel == 11) { menuPage = PG_ABOUT; aboutFirstRun = false; aboutArmed = false; }
-                else if (mainSel == 12)  menuPage = PG_NONE;
+                else if (mainSel == 9) { menuPage = PG_MODEL_SETS; modelSetSel = 0; modelSetParent = PG_MAIN; }
+                else if (mainSel == 10) { menuPage = PG_CONTROLS; controlsSel = 0; }
+                else if (mainSel == 11) { menuPage = PG_BASKETBALL; basketballSel = 0; }
+                else if (mainSel == 12) { menuPage = PG_ABOUT; aboutFirstRun = false; aboutArmed = false; }
+#ifdef SAVR_DEV
+                else if (mainSel == 13) {
+                    xr::CycleProfilerMode();
+                }
+#endif
+                else if (mainSel == N - 1) menuPage = PG_NONE;
             }
             if (back) menuPage = PG_NONE;
             break;
@@ -1238,8 +1256,8 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
             const int type = calibWeaponType;
 
             // Value adjust (accelerated): L2 / stick-left = -1, R2 / stick-right = +1.
-            const int dir = (in.triggers[1] >= 0.55f || in.leftStick[0] >  0.65f) ? +1
-                          : (in.triggers[0] >= 0.55f || in.leftStick[0] < -0.65f) ? -1 : 0;
+            const int dir = !grips && in.triggers[1] >= 0.55f ? +1
+                          : !grips && in.triggers[0] >= 0.55f ? -1 : 0;
             if (dir != calAdjDir) { calAdjDir = dir; calAdjHeld = 0; calAdjSince = 999; }
             bool fire = false;
             if (dir != 0) {
@@ -1355,6 +1373,8 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
                     savr::driving::GetMenuItemCount(drivingVehicleType)-1);
             } else if (item==savr::driving::MENU_CAMERA_VIEW&&(enter||step)) {
                 savr::driving::CycleCameraView(drivingVehicleType,step?step:+1);
+            } else if (item==savr::driving::MENU_PLANE_INVERT_PITCH&&(enter||step)) {
+                savr::driving::TogglePlanePitchInversion();
             } else if (item==savr::driving::MENU_YOKE_SENSITIVITY&&step) {
                 savr::driving::AdjustYokeSensitivity(step);
             } else if (item==savr::driving::MENU_BICYCLE_MODE&&(enter||step)) {
@@ -1382,6 +1402,8 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
                 savr::driving::ToggleHandleHighlights();
             } else if (item==savr::driving::MENU_BIKE_HAND_TILT&&enter) {
                 savr::driving::ToggleBikeHandsFollowTilt();
+            } else if (item==savr::driving::MENU_BIKE_BLOCK_WHEELIE&&(enter||step)) {
+                savr::driving::ToggleBikeWheelieBlock();
             } else if (item==savr::driving::MENU_LOCAL_HORIZON&&enter) {
                 savr::driving::ToggleBikeHorizonLock();
             } else if (item==savr::driving::MENU_BIKE_VISUAL_LEAN&&step) {
@@ -1649,7 +1671,7 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
         }
         case PG_GRAPHICS: {
             // scale, CPU, GPU, world effects, neon, grading, animated textures,
-            // dynamic shadows, weapon models, cutscenes, game cutscenes,
+            // dynamic shadows, model sets, cutscenes, game cutscenes,
             // distances, defaults, Back
             const int N = 14;
             if (navUp)   gfxSel = (gfxSel - 1 + N) % N;
@@ -1672,8 +1694,6 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
                 savr::animtex::SetEnabled(step > 0);
             } else if (step && gfxSel == 7) {
                 vrcam::AdjustDynamicShadowMode(step);
-            } else if (step && gfxSel == 8 && savr::hdweapons::Available()) {
-                vrcam::SetHdWeaponsEnabled(step > 0);
             }
             if (enter && !step && gfxSel == 3) {
                 vrcam::SetWorldEffectsEnabled(
@@ -1687,8 +1707,9 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
             } else if (enter && !step && gfxSel == 7) {
                 vrcam::AdjustDynamicShadowMode(1);
             } else if (enter && !step && gfxSel == 8) {
-                if (savr::hdweapons::Available())
-                    vrcam::SetHdWeaponsEnabled(!vrcam::IsHdWeaponsEnabled());
+                menuPage = PG_MODEL_SETS;
+                modelSetSel = 0;
+                modelSetParent = PG_GRAPHICS;
             } else if ((step || enter) && gfxSel == 9) {
                 savr::locomotion::CycleCutsceneMode(step < 0 ? -1 : +1);
             } else if ((step || enter) && gfxSel == 10) {
@@ -1705,10 +1726,18 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
             if (back) menuPage = PG_MAIN;
             break;
         }
+        case PG_MODEL_SETS: {
+            constexpr int N = savr::modelsets::COUNT + 1;
+            if (navUp) modelSetSel = (modelSetSel + N - 1) % N;
+            if (navDown) modelSetSel = (modelSetSel + 1) % N;
+            const int step = minus ? -1 : (plus ? 1 : 0);
+            if (modelSetSel < savr::modelsets::COUNT && (step || enter))
+                savr::modelsets::SetEnabled(modelSetSel, step ? step > 0 : !savr::modelsets::Enabled(modelSetSel));
+            if (back || (enter && modelSetSel == savr::modelsets::COUNT)) menuPage = modelSetParent;
+            break;
+        }
         case PG_CONTROLS: {
-            // Layout + five independent stick options + six button sources.
-            // This page intentionally edits only the gameplay mapping; its own
-            // navigation keeps consuming the raw left stick above.
+            // Menu accessibility remains separate from gameplay remapping.
             const int firstStick = 1;
             const int firstButton = firstStick + savr::locomotion::STICK_OPT_COUNT;
             const int tipsRow = firstButton + savr::locomotion::BIND_SRC_COUNT;
@@ -1816,6 +1845,7 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
             : savr::cheats::CategoryCount(cheatCategory)) + 1;
         xr::SetMenuState(menuPage == PG_CHEATS,cheatSel,cheatRows,cheatCategory);
         xr::SetGraphicsMenu(menuPage == PG_GRAPHICS, gfxSel);
+        xr::SetModelSetMenu(menuPage == PG_MODEL_SETS, modelSetSel);
         xr::SetControlsMenu(menuPage == PG_CONTROLS, controlsSel);
         xr::SetControlsTipsMenu(menuPage == PG_CONTROLS_TIPS,
                                 controlsTipsScroll);
@@ -1863,6 +1893,12 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
 
     // The left stick drives the menu, not the player, while a menu is up.
     vrcam::SetInputBlocked(anyMenu);
+    savr::locomotion::UpdateRunToggle(
+        inGameplay && !anyMenu && !grips && vrcam::GroundWalkControlsActive(),
+        savr::locomotion::ActionHeld(savr::locomotion::BIND_ACT_SPRINT,
+            in.a,in.b,in.x,in.y,in.l3,in.r3,true),
+        vrcam::IsCrouched() || savr::locomotion::ActionHeld(savr::locomotion::BIND_ACT_CROUCH,
+            in.a,in.b,in.x,in.y,in.l3,in.r3,true),in.l3,in.r3);
 
     // HD weapon model set: registers its image + textures once the engine is
     // ready, before any weapon streams in. Runs outside the gameplay gate so
@@ -1876,8 +1912,12 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
     // respawn. Menus/open chords only block transitions and firing; they do not
     // silently return an already-held weapon to its socket.
     if (inGameplay) {
-        const bool weaponInteractionsBlocked = anyMenu ||
-            vrcam::ParachuteWeaponInteractionBlocked();
+        float trackingPosition[3]{},trackingOrientation[4]{};
+        const bool trackingReady=xr::GetHeadPose(trackingPosition,trackingOrientation);
+        const bool catalystBlocked = anyMenu || !trackingReady || vrcam::ParachuteWeaponInteractionBlocked();
+        const bool weaponInteractionsBlocked = catalystBlocked || savr::catalyst::Active() ||
+            driving::GetRemoteControlledVehicle() != nullptr ||
+            driving::IsCraneControlActive();
         savr::physicalweapon::Update(
             weaponInteractionsBlocked,
             menuPage == PG_HOLSTER_CALIB && savr::holster::GripMarkersEnabled(),
@@ -1892,17 +1932,18 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
         savr::cheats::Tick();
         savr::pickups::Tick();
         savr::basketball::Update();
+        savr::catalyst::Update(catalystBlocked);
     }
     else {
         savr::physicalweapon::ResetTransient();
         savr::melee::Reset();
         savr::scopeaim::Reset();
+        savr::vrfire::Update(true);
         savr::throwable::Reset();
+        savr::catalyst::Reset();
     }
 
-    // The old CPU-geometry probe is deliberately disabled. Per-slot RenderWare
-    // clumps are now authoritative; publishing the probe for a rare model that
-    // retains morph vertices would draw a second orange gun in the GL hand pass.
+    // Per-slot RenderWare clumps own weapon rendering; keep the CPU geometry probe disabled.
 
     static int n = 0;
     static bool loggedA = false;
@@ -1943,14 +1984,22 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
         prev = now;
     };
 
+    static bool providerA = false, providerB = false, providerX = false;
+    static bool providerUp = false, providerDown = false;
+    static bool providerLeft = false, providerRight = false;
     if (inGameplay && !anyMenu && !grips) {
         // The engine's stick Y runs the opposite way to OpenXR's, so it is flipped.
-        const bool driving = g.FindPlayerVehicle && g.FindPlayerVehicle(-1, false);
+        const bool driving = (g.FindPlayerVehicle && g.FindPlayerVehicle(-1, false)) ||
+            savr::driving::GetRemoteControlledVehicle() != nullptr ||
+            savr::driving::IsCraneControlActive();
+        const bool beachDance = savr::beachdance::Active();
+        savr::beachdance::SetInput(true,in.rightStick[0],in.rightStick[1]);
+        const bool scriptedWeapon = savr::vrfire::IsScriptedWeaponCamera() || savr::catalyst::Active() || beachDance;
         // On foot, whichever physical hand owns the selected gun drives the game's
         // single fire axis. An empty/dropped hand publishes zero. Vehicle controls
         // retain their original left/right trigger mapping.
-        const float gameLT = driving ? in.triggers[0] : 0.0f;
-        const float gameRT = driving ? in.triggers[1]
+        const float gameLT = driving && !savr::catalyst::Active() ? in.triggers[0] : 0.0f;
+        const float gameRT = savr::catalyst::Active() ? 0.0f : driving ? in.triggers[1]
                                      : savr::physicalweapon::FireTrigger();
         float gameMoveX=0.0f, gameMoveY=0.0f;
         float gameTurnX=0.0f, gameTurnY=0.0f;
@@ -1969,29 +2018,32 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
         }
         // Thumbrest D-pad mode: the provider must not see the raw right
         // stick while it acts as the D-pad.
+        const auto scope = savr::scopeaim::Snapshot();
+        const bool cameraZoom = scope.active && scope.weaponType == 43;
         const bool dpadMode = (in.thumbrest[0] || in.thumbrest[1]) &&
-                              !driving;
+                              !driving && !cameraZoom;
         g.implOnGamepadAxesChanged(env, clazz, 0,
-                                   gameMoveX, -gameMoveY,
-                                   dpadMode ? 0.0f : gameTurnX,
-                                   dpadMode ? 0.0f : -gameTurnY,
-                                   gameLT, gameRT);
+                                   scriptedWeapon ? 0.0f : gameMoveX,
+                                   scriptedWeapon ? 0.0f : -gameMoveY,
+                                   dpadMode || scriptedWeapon ? 0.0f : gameTurnX,
+                                   dpadMode || cameraZoom || scriptedWeapon ? 0.0f : -gameTurnY,
+                                   scriptedWeapon ? 0.0f : gameLT,
+                                   scriptedWeapon ? 0.0f : gameRT);
 
-        const bool sprintHeld = savr::locomotion::ActionHeld(
+        const bool sprintHeld = driving ? savr::locomotion::ActionHeld(
             savr::locomotion::BIND_ACT_SPRINT,
-            in.a,in.b,in.x,in.y,in.l3,in.r3,!driving);
+            in.a,in.b,in.x,in.y,in.l3,in.r3,false) : savr::locomotion::RunEnabled();
         const bool jumpHeld = savr::locomotion::ActionHeld(
             savr::locomotion::BIND_ACT_JUMP,
             in.a,in.b,in.x,in.y,in.l3,in.r3,!driving);
         const bool attackHeld = savr::locomotion::ActionHeld(
             savr::locomotion::BIND_ACT_ATTACK,
             in.a,in.b,in.x,in.y,in.l3,in.r3,!driving);
-        static bool pa = false, pb = false, px = false;
-        edge(sprintHeld, pa, 0);
-        edge(driving ? false : attackHeld, pb, 1);
+        edge(!scriptedWeapon && sprintHeld, providerA, 0);
+        edge(driving || scriptedWeapon ? false : attackHeld, providerB, 1);
         // In a vehicle X is owned by Driving's exact NextStationJustUp hook;
         // keep Square released so it cannot compete with the L2 brake mapping.
-        edge(driving ? false : jumpHeld, px, 2);
+        edge(driving || scriptedWeapon ? false : jumpHeld, providerX, 2);
         // Y is handled once by vrcam's mobile ExitVehicleJustDown hook. Sending
         // it through the generic Java provider as well duplicates the enter task.
 
@@ -1999,13 +2051,24 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
         // stick while a thumb rests on a thumbrest (UEVR-parity D-pad
         // mode: gang commands / conversation replies without a chord).
         constexpr float kThreshold = 0.6f;
-        static bool pu = false, pd = false, pl = false, pr = false;
-        const float dpx = dpadMode ? in.rightStick[0] : in.leftStick[0];
-        const float dpy = dpadMode ? in.rightStick[1] : in.leftStick[1];
-        edge(dpy >  kThreshold, pu, 8);   // up
-        edge(dpy < -kThreshold, pd, 9);   // down
-        edge(dpx < -kThreshold, pl, 10);  // left
-        edge(dpx >  kThreshold, pr, 11);  // right
+        const float dpx = scriptedWeapon ? 0.0f :
+            dpadMode ? in.rightStick[0] : in.leftStick[0];
+        const float dpy = scriptedWeapon ? 0.0f :
+            dpadMode ? in.rightStick[1] : in.leftStick[1];
+        edge(dpy >  kThreshold, providerUp, 8);
+        edge(dpy < -kThreshold, providerDown, 9);
+        edge(dpx < -kThreshold, providerLeft, 10);
+        edge(dpx >  kThreshold, providerRight, 11);
+    } else {
+        savr::beachdance::SetInput(false,0,0);
+        g.implOnGamepadAxesChanged(env, clazz, 0, 0, 0, 0, 0, 0, 0);
+        edge(false, providerA, 0);
+        edge(false, providerB, 1);
+        edge(false, providerX, 2);
+        edge(false, providerUp, 8);
+        edge(false, providerDown, 9);
+        edge(false, providerLeft, 10);
+        edge(false, providerRight, 11);
     }
 
     // Open the game's own pause menu. Neither gamepad Start (the provider
@@ -2029,20 +2092,19 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
     }
     gameMenuWasDown=gameMenuDown;
 
-    // B is the VR-menu open chord (grips+B) AND its "back/close", so it must not also
-    // trigger the game's Back/pause. Grips are analog and ramp through the threshold,
-    // so a B click can land a frame before both grips cross 0.75; gating Back on the
-    // instantaneous `grips` would leak a stray pause on every menu-open. Instead defer
-    // Back to B's RELEASE edge and cancel it the moment any grip squeeze or menu shows
-    // this was a chord, not a lone Back press.
+    // Defer native Back until B release; cancel it when a grip or VR menu
+    // consumes the press so UI actions cannot also pause the game.
     static bool pb = false, bBackPending = false;
     const bool gripActive = in.grip[0] >= 0.25f || in.grip[1] >= 0.25f;
     if (in.b && !pb) bBackPending = !menuWasOpen;
     if (in.b && (grips || gripActive || menuWasOpen || anyMenu)) bBackPending = false;
     // In a vehicle B is the fire button (stock drive-by in DEFAULT, the held
     // physical weapon in IMMERSIVE) — it must never double as Back/pause.
-    if (in.b && inGameplay && g.FindPlayerVehicle &&
-        g.FindPlayerVehicle(-1, false) != nullptr)
+    if (in.b && inGameplay &&
+        ((g.FindPlayerVehicle && g.FindPlayerVehicle(-1, false) != nullptr) ||
+         savr::driving::GetRemoteControlledVehicle() != nullptr ||
+         savr::driving::IsCraneControlActive() ||
+         savr::vrfire::IsScriptedWeaponCamera()))
         bBackPending = false;
     if (!in.b && pb && bBackPending && g.implOnBackButtonPressed != nullptr) {
         LOGI("back button -> implOnBackButtonPressed");
@@ -2051,50 +2113,29 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
     }
     pb = in.b;
 
-    // Pause-map zoom: feed the raw squeeze axes to the Menu_MapUpdate hook
-    // (it only acts while the map page is on screen).
-    savr::mapzoom::SetGrips(in.grip[0], in.grip[1]);
+    // VR panels own input through the closing frame. Freeze the native map
+    // update while cancelling an old touch so its release cannot place a blip.
+    const bool frontendBlocked = inGameplay || anyMenu || menuWasOpen;
+    savr::mapzoom::SetBlocked(frontendBlocked);
+    static bool zoomReleaseRequired=false;
+    if (frontendBlocked) zoomReleaseRequired=true;
+    else if (in.grip[0]<0.25f && in.grip[1]<0.25f) zoomReleaseRequired=false;
+    savr::mapzoom::SetGrips(zoomReleaseRequired?0.0f:in.grip[0],
+                           zoomReleaseRequired?0.0f:in.grip[1]);
 
-    // Laser pointer -> touch, menus only. Pointing at the theater screen and
-    // clicking (A or the right trigger) is a tap there. In gameplay there is no
-    // screen to point at, so leaving this on would fire stray touches, hence the
-    // menu gate. A touch only becomes a drag once the pointer has actually moved a
-    // real distance from where it went down — else tiny aim jitter turned every
-    // tap into a drag that scrolled the screen.
-    if (!inGameplay && g.implOnTouchStart != nullptr) {
-        const float px = in.pointerU * static_cast<float>(g_gameWidth);
-        const float py = in.pointerV * static_cast<float>(g_gameHeight);
-        const bool  click = in.pointerValid && (in.a || in.pointerPressed);
-
-        // A tap must read as a tap, not a nudge. Pointing a controller at a
-        // screen a few metres away wobbles by a couple of percent just from hand
-        // tremor, so a tight move threshold turned every tap into a scroll swipe
-        // ("поддёргивание"). Only a deliberate, larger move counts as a drag, and
-        // a tap releases exactly where it went down so the menu sees one point.
-        static bool  touching = false, dragging = false;
-        static float downU = 0.0f, downV = 0.0f;
-        static float downPx = 0.0f, downPy = 0.0f;
-        if (click && !touching) {
-            g.implOnTouchStart(env, clazz, 0, px, py);
-            touching = true; dragging = false;
-            downU = in.pointerU; downV = in.pointerV;
-            downPx = px; downPy = py;
-        } else if (click && touching) {
-            const float moved = std::abs(in.pointerU - downU) + std::abs(in.pointerV - downV);
-            if (!dragging && moved > 0.09f) {
-                dragging = true;
-            }
-            if (dragging) {
-                g.implOnTouchMove(env, clazz, 0, px, py);
-            }
-        } else if (!click && touching) {
-            // Clean tap -> up at the down point; a real drag -> up where it ended.
-            if (dragging) g.implOnTouchEnd(env, clazz, 0, px, py);
-            else          g.implOnTouchEnd(env, clazz, 0, downPx, downPy);
-            LOGI("touch %s at (%.0f,%.0f)", dragging ? "drag-end" : "tap", downPx, downPy);
-            touching = false;
-        }
-    }
+    // Require a fresh press after closing any VR page; holding A/trigger while
+    // navigating cheats must never start a map tap on the next frame.
+    static frontendpointer::State frontendPointer;
+    const auto touch=frontendPointer.Update(frontendBlocked,
+        in.a || in.pointerPressed,in.pointerValid,in.pointerU,in.pointerV,
+        static_cast<float>(g_gameWidth),static_cast<float>(g_gameHeight));
+    using TouchAction=frontendpointer::Action;
+    if (touch.action==TouchAction::Down && g.implOnTouchStart)
+        g.implOnTouchStart(env,clazz,0,touch.x,touch.y);
+    else if (touch.action==TouchAction::Move && g.implOnTouchMove)
+        g.implOnTouchMove(env,clazz,0,touch.x,touch.y);
+    else if ((touch.action==TouchAction::Up || touch.action==TouchAction::Cancel) && g.implOnTouchEnd)
+        g.implOnTouchEnd(env,clazz,0,touch.x,touch.y);
 
     // Cutscene skipping is owned by the game's own on-screen arrow; a face
     // button here kept skipping scenes people were actually watching in the
@@ -2219,11 +2260,7 @@ void OnDrawFrame(JNIEnv* env, jclass clazz, jfloat deltaTime) {
         swapMs = perf::MonotonicMs() - swapT0;
     }
 
-    // Pace the engine to display rate. Left unbounded it runs at tens of
-    // thousands of frames a second, and GTA's boot sequence is frame-timed —
-    // splash fades, the frontend hand-off — so at that speed the boot logic
-    // never advances correctly. Capping each frame to the headset period is what
-    // let the engine reach the menu when the old design happened to pace it.
+    // Pace the engine to the headset period so frame-timed boot and frontend transitions advance normally.
     timespec now{};
     clock_gettime(CLOCK_MONOTONIC, &now);
     const long long nowNs = now.tv_sec * 1000000000LL + now.tv_nsec;
@@ -2439,6 +2476,7 @@ void* WaitForGameLibrary(void*) {
     savr::locomotion::Init();     // load movement/turning comfort settings
     savr::holster::Init();        // load the persistent Vice City-style loadout
     savr::physicalweapon::Init(); // reference Quest build grab/drop/transfer/catch ownership
+    savr::modelsets::Install(handle); // latch optional assets before engine databases open
 
     // StartUserPause is only four instructions in the exact 2.11 binary. Verify
     // all of them before replacing it; OnStartUserPause reproduces its one-byte
@@ -2512,6 +2550,14 @@ void* WaitForGameLibrary(void*) {
     savr::animtex::Install(handle);  // re-enable frozen UV-scrolling textures
     savr::jetpack::Init(handle);     // immersive rocket-belt control
     savr::hydraulics::Install(handle);  // lowrider hydraulics on the right stick
+    savr::missioncontrols::Install(handle);
+    savr::catalyst::Install(handle);
+    savr::justbusiness::Install(handle);
+    savr::beachdance::Install(handle);
+    savr::tbone::Install(handle);
+    savr::missionscenes::Install(handle);
+    savr::swimming::Install(handle);
+    savr::boatentry::Install(handle);
     savr::braindiag::Install(handle);  // basketball brain-chain diagnostics
     savr::basketball::Install(handle);  // custom immersive basketball
     savr::mapzoom::Install(handle);  // pause-map zoom on the grips

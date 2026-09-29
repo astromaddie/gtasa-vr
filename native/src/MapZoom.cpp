@@ -29,6 +29,7 @@ using MapUpdateFn = void (*)(float dt);
 MapUpdateFn   g_origMapUpdate = nullptr;
 std::uint8_t* g_mobileMenu    = nullptr;
 
+std::atomic<bool> g_blocked{false};
 std::atomic<float> g_gripL{0.0f};
 std::atomic<float> g_gripR{0.0f};
 
@@ -112,6 +113,7 @@ float ClampCentre(float centre, float size, float half, float full) {
 }
 
 void OnMapUpdate(float dt) {
+    if (g_blocked.load(std::memory_order_relaxed)) return;
     if (g_origMapUpdate) g_origMapUpdate(dt);
     if (!g_mobileMenu) return;
     if (!std::isfinite(dt) || dt <= 0.0f || dt > 0.1f) dt = 1.0f / 60.0f;
@@ -159,6 +161,8 @@ void Install(void* handle) {
         target, reinterpret_cast<void*>(&OnMapUpdate), kPrologue,
         "Menu_MapUpdate"));
 }
+
+void SetBlocked(bool blocked) { g_blocked.store(blocked,std::memory_order_relaxed); }
 
 void SetGrips(float left, float right) {
     g_gripL.store(left, std::memory_order_relaxed);

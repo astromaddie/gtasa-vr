@@ -152,10 +152,7 @@ WeaponCalib& EditableProfile(int clampedType) {
 }
 
 void ApplyEffectiveSupportDefaults(WeaponCalib& c, bool configured) {
-    // Profiles written before two-hand support contain explicit zeroes in all
-    // SUPPORT columns. Present reference Quest build's generic SA-safe socket until the user
-    // touches those rows, then seed the same values into storage so the first
-    // adjustment cannot make the foregrip jump back to the weapon origin.
+    // Seed unset SUPPORT rows from the default socket before applying calibration edits.
     if (configured) return;
     if (c.supOffX == 0 && c.supOffY == 0 && c.supOffZ == 0) {
         c.supOffY = 60;   // 30 cm along the model-bound barrel axis
@@ -330,9 +327,7 @@ void Init() {
     for (int t = 0; t < kMaxWeapons; ++t) {
         const bool anySeen = seen[0][0][t] || seen[0][kMasterHand][t] ||
                              seen[1][0][t] || seen[1][kMasterHand][t];
-        // v5 stored one global cosmetic flag and could not identify its weapon.
-        // Preserve the old SAVED indication for existing profiles; the next AIM
-        // edit immediately makes only that weapon dirty under the v6 scheme.
+        // Retain the saved marker when reading v5 profiles; v6 tracks edits per weapon.
         if (legacyLaserLocked && !anyTypedLockSeen && !lockSeen[t] && anySeen)
             g_laserLocked[t].store(true, std::memory_order_relaxed);
     }
@@ -342,16 +337,13 @@ void Init() {
 
 void Save() {
     std::lock_guard<std::mutex> guard(g_calibMutex);
-    // Preserve the last complete profile even if Android pauses or kills the
-    // process during a burst of menu edits. Direct fopen("w") used to leave a
-    // truncated calibration file, which looked like a laser reset on restart.
+    // Write profiles atomically so interruption preserves the last complete file.
     FILE* f = std::fopen(kTempPath, "w");
     if (!f) { LOGW("[calib] cannot write %s", kTempPath); return; }
     std::fputs("# vr_calib v6  w <type> <hand> <19 fields>; laser_locked_type <type> 1; support_configured <type> 1; holster <type> <6 fields>\n", f);
     std::fprintf(f, "laser_enabled %d\n", LaserEnabled() ? 1 : 0);
     std::fprintf(f, "recoil_level %d\n", RecoilLevel());
-    // Keep the old line for downgrade compatibility; v6 readers use the
-    // per-weapon rows below.
+    // Retain the compatibility row for readers that do not support per-weapon state.
     std::fprintf(f, "laser_locked %d\n", LaserLocked() ? 1 : 0);
     int saved = 0;
     for (int t = 0; t < kMaxWeapons; ++t) {
@@ -360,12 +352,7 @@ void Save() {
             std::fprintf(f, "laser_mode_type %d %d\n", t, laserMode);
         if (g_laserLocked[t].load(std::memory_order_relaxed))
             std::fprintf(f, "laser_locked_type %d 1\n", t);
-        // AIM edits are live and AdjustField already persists every real
-        // change.  Never replace them with the previous committed snapshot
-        // merely because the optional SAVE LASER action was missed: on Quest
-        // that made a perfectly calibrated ray jump back after every restart.
-        // The per-type lock remains a useful UI confirmation marker, not a
-        // second persistence gate.
+        // Persist live AIM edits independently of the optional SAVE LASER confirmation marker.
         if (g_supportConfigured[t])
             std::fprintf(f, "support_configured %d 1\n", t);
         // Persist both model-set profiles: "w" original, "wm" HD/modern. A set

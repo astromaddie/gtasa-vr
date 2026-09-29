@@ -13,8 +13,7 @@ int main() {
         bool expected;
     };
     const Case cases[] = {
-        // This is the affected player's actual game surface. Its height was
-        // rejected by the old 1024 minimum before any stereo frame published.
+        // The registered game surface may be shorter than 1024 pixels.
         {"Quest 2 registered surface", 1440, 1008, 1440, 1008, true},
         {"Quest 2 old fallback rejection", 1440, 1008, 0, 0, false},
         {"Quest 3 representative surface", 1680, 1176, 1680, 1176, true},

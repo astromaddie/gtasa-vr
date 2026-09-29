@@ -12,39 +12,12 @@
 #include "Log.h"
 #include "Symbols.h"
 
-// Animated (UV-scrolling) textures on GTA:SA Android 2.11.311 arm64 (libGame.so,
-// sha 4C6A7445…). Disasm-verified, simulated against all 28 shipped UV anims.
-//
-// TWO separate defects keep them frozen on this build:
-//
-//  (1) The per-frame advance is gated OFF. RtAnimInterpolatorAddAnimTime
-//      (@0x787730) only re-interpolates keyframes while the transient byte
-//      RunUVAnim (@0xd13498) reads 1, and the engine only raises it around a
-//      BIND (RpMaterialUVAnimStreamRead: Set360UVAnimHack(1) -> SetCurrentAnim
-//      -> Set360UVAnimHack(0)). At advance time it is always 0 -> the clock
-//      ticks but nothing re-interpolates. (Every UV bind IS overlay-seeded; the
-//      binder and the advance both run on the game thread; a static poke of the
-//      byte black-screened, and wrapping the byte around the advance did not
-//      help either — so we do NOT touch the byte at all.)
-//
-//  (2) A real 64-bit porting bug: RpUVAnimParamKeyFrameInterpolate (@0x731944)
-//      writes the interpolated frame at {theta@0x10,s0@0x14,s1@0x18,skew@0x1c,
-//      x@0x20,y@0x24} (16-byte {kf1,kf2} header on arm64), but the two Param
-//      APPLY readers — RpUVAnimParamKeyFrameApply (@0x73184c) and the inlined
-//      path in RpMaterialUVAnimApplyUpdate (@0x732818..0x73287c) — still read
-//      the 32-bit keyframe offsets {0xc,0x10,0x14,0x18,0x1c,0x20}: +4 off. So
-//      rotation = pointer bits, 'y' is never read, and 'x' lands on the wrong
-//      axis. All 28 shipped anims are Param type, so even a perfect advance
-//      looks frozen. Fix = bump those 11 load immediates by +4.
-//
-// FIX (hang-proof by construction):
-//  - Hook RpMaterialUVAnimAddAnimTime (@0x732bcc) and perform the advance
-//    ourselves for the material's 8 interpolator slots: tick time, wrap+reseed
-//    on duration, step the keyframe cursor with every pointer range-checked and
-//    every loop bounded, then call the anim's own interpolate callback. The
-//    engine's gated loops (the ones that could spin) are never executed and
-//    RunUVAnim stays 0, so binds/skeletal/streaming are untouched.
-//  - Patch the 11 Param-apply words so the interpolated values are applied.
+// Android 2.11 arm64 UV animation uses 16-byte keyframe headers.
+// Interpolation at 0x731944 writes values at +0x10..+0x24; the apply paths
+// at 0x73184c and 0x732818..0x73287c require eleven load offsets increased by 4.
+// RtAnimInterpolatorAddAnimTime (0x787730) is gated by RunUVAnim (0xd13498).
+// Advance eight material interpolators through a bounded, pointer-checked
+// replacement at 0x732bcc without changing RunUVAnim or bind behavior.
 namespace savr::animtex {
 namespace {
 
