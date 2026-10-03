@@ -8,6 +8,14 @@ if(SAVR_DEV)
     add_compile_definitions(SAVR_DEV=1)
 endif()
 
+# Valve Steam Frame (Lepton, Android 11 container) variant: Frame manifest and
+# OpenXR input profiles, relocated storage root, logging left on for bring-up.
+# Quest builds leave this OFF and are unchanged.
+option(SAVR_STEAM_FRAME "Steam Frame (Lepton) build variant" OFF)
+if(SAVR_STEAM_FRAME)
+    add_compile_definitions(SAVR_STEAM_FRAME=1)
+endif()
+
 # Keep the producer-backpressure implementation available in normal builds.
 # Its runtime property remains opt-in, so an ordinary player run pays no
 # atomic traffic while diagnostics can still enable it without rebuilding.

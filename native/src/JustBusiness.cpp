@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cstdio>
 #include <dlfcn.h>
+#include "StoragePaths.h"
 namespace savr::justbusiness {
 namespace {
 void** scripts{};
@@ -19,7 +20,7 @@ std::atomic<bool> active{};
 template<class T>T Read(const void* p,std::size_t off){T v{};std::memcpy(&v,static_cast<const std::uint8_t*>(p)+off,sizeof(v));return v;}
 void Trace(const char* event,int value,int extra=0) {
     LOGI("[justbusiness] %s value=%d extra=%d",event,value,extra);
-    if(FILE* f=std::fopen("/sdcard/Android/data/com.rockstargames.gtasa/files/vr_justbusiness.log","a")) {
+    if(FILE* f=std::fopen(savr::storage::Files("vr_justbusiness.log").c_str(),"a")) {
         const unsigned time=g.CTimer_m_snTimeInMilliseconds?*g.CTimer_m_snTimeInMilliseconds:0;
         std::fprintf(f,"%u %s value=%d extra=%d\n",time,event,value,extra);std::fclose(f);
     }

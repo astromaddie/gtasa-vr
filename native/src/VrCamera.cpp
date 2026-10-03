@@ -60,6 +60,7 @@
 #include <limits>
 #include <mutex>
 #include <vector>
+#include "StoragePaths.h"
 
 namespace savr::vrcam {
 namespace {
@@ -560,8 +561,7 @@ constexpr int kRenderScaleCount =
 // raise the app resolution externally, so silently stacking 110% on top wastes
 // GPU time. The menu still exposes up to 200% for deliberate local testing.
 constexpr int kDefaultRenderScaleIndex = 4;
-const char* const kGraphicsSettingsPath =
-    "/sdcard/Android/data/com.rockstargames.gtasa/files/vr_graphics.ini";
+const char* const kGraphicsSettingsPath = savr::storage::FilesPath("vr_graphics.ini");
 
 std::once_flag g_graphicsSettingsLoadOnce;
 std::mutex g_graphicsSettingsSaveMutex;
@@ -2445,7 +2445,7 @@ struct Origin { bool valid{}; V3 pos; Q ori; };
 Origin g_origin{};
 std::uint64_t g_cameraResetSerial{};
 void TraceTracking(const char* event,V3 point) {
-    if(FILE* f=std::fopen("/sdcard/Android/data/com.rockstargames.gtasa/files/vr_tracking.log","a")) {
+    if(FILE* f=std::fopen(savr::storage::Files("vr_tracking.log").c_str(),"a")) {
         std::fprintf(f,"%.0f %s reset=%llu pos=(%.3f %.3f %.3f)\n",NowMs(),event,
             (unsigned long long)g_cameraResetSerial,point.x,point.y,point.z);
         std::fclose(f);
@@ -4905,7 +4905,7 @@ void OnUpdatePads() {
     static double nextSignalLog=0;
     if (lastSignal!=torenoSignal && (torenoSignal<0||lastSignal<0||NowMs()>=nextSignalLog)) {
         lastSignal=torenoSignal;nextSignalLog=NowMs()+1000;
-        if (FILE* f=std::fopen("/sdcard/Android/data/com.rockstargames.gtasa/files/vr_toreno_signal.log","a")) {
+        if (FILE* f=std::fopen(savr::storage::Files("vr_toreno_signal.log").c_str(),"a")) {
             std::fprintf(f,"source percent=%d timer=%p script=%p stereo=%d\n",
                 torenoSignal,g.CUserDisplay_OnscnTimer,g.CTheScripts_ScriptSpace,stereo?1:0);
             std::fclose(f);
@@ -29891,7 +29891,7 @@ bool FirePhotograph(void* weapon,void* ped,const float flashOrigin[3]) {
     if(g.CDraw_SetFOV)g.CDraw_SetFOV(savedDrawFov,false);
     if(g.CDraw_ms_fFOV)*g.CDraw_ms_fFOV=savedDrawFov;
     g.CCamera_CalculateDerivedValues(g.TheCamera,false,true);
-    if(FILE* log=std::fopen("/sdcard/Android/data/com.rockstargames.gtasa/files/vr_photo.log","a")){
+    if(FILE* log=std::fopen(savr::storage::Files("vr_photo.log").c_str(),"a")){
         std::fprintf(log,"shot=%d fov=%.3f head=(%.2f,%.2f,%.2f) dir=(%.3f,%.3f,%.3f)\n",
             fired,zoomed,view.pos.x,view.pos.y,view.pos.z,view.forward.x,view.forward.y,view.forward.z);
         std::fclose(log);

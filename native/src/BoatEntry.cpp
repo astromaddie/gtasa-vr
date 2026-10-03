@@ -10,6 +10,7 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <initializer_list>
+#include "StoragePaths.h"
 
 namespace savr::boatentry {
 namespace {
@@ -39,7 +40,7 @@ float DistanceSquared(Vec a,Vec b) {
 void Report(const char* result,void* boat,float distance) {
     // One bounded record per explicit boarding attempt, also in player builds.
     // A failed headset test then identifies target/gate/native-result failures.
-    const char* path="/sdcard/Android/data/com.rockstargames.gtasa/files/vr_boat_entry.log";
+    static const char* const path=savr::storage::FilesPath("vr_boat_entry.log");
     if (FILE* f=std::fopen(path,"a+")) {
         std::fseek(f,0,SEEK_END);
         if (std::ftell(f)>32768) {

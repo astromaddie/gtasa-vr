@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cmath>
 #include <dlfcn.h>
+#include "StoragePaths.h"
 namespace savr::missionscenes {
 namespace {
 void** scripts{};
@@ -24,7 +25,7 @@ template<class T>T Read(const void* p,unsigned off=0) {
 }
 void Trace(const char* event,int a=0,int b=0,int c=0) {
     LOGI("[mission.scene] %s %d %d %d",event,a,b,c);
-    if(FILE* f=std::fopen("/sdcard/Android/data/com.rockstargames.gtasa/files/vr_mission_scenes.log","a")) {
+    if(FILE* f=std::fopen(savr::storage::Files("vr_mission_scenes.log").c_str(),"a")) {
         std::fprintf(f,"%u %s %d %d %d\n",g.CTimer_m_snTimeInMilliseconds?*g.CTimer_m_snTimeInMilliseconds:0,event,a,b,c);
         std::fclose(f);
     }

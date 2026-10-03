@@ -16,16 +16,17 @@
 #include <mutex>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "StoragePaths.h"
 
 namespace savr::perf {
 namespace {
 
 constexpr int kMaxWindowSamples = 256;
 #ifdef SAVR_DEV
-constexpr const char* kGameCsvPath =
-    "/sdcard/Android/data/com.rockstargames.gtasa/files/savr_game_perf_v2.csv";
-constexpr const char* kXrCsvPath =
-    "/sdcard/Android/data/com.rockstargames.gtasa/files/savr_xr_perf_v2.csv";
+const char* const kGameCsvPath =
+    savr::storage::FilesPath("savr_game_perf_v2.csv");
+const char* const kXrCsvPath =
+    savr::storage::FilesPath("savr_xr_perf_v2.csv");
 #endif
 
 struct DebugStatsAtomic {

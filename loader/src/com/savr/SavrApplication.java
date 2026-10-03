@@ -89,12 +89,21 @@ public final class SavrApplication extends Application {
 
     /** Installs default settings without replacing existing calibration files. */
     private void installMissingDefaultSettings() {
-        final File filesDirectory = getExternalFilesDir(null);
+        // Steam Frame builds keep settings under the central storage root the
+        // native layer resolved (StoragePaths.h); Quest builds and a Frame
+        // fallback return "" and keep the app's external files directory.
+        final String storageRoot = nativeStorageDir(STORAGE_FILES);
+        final File filesDirectory = storageRoot.isEmpty()
+                ? getExternalFilesDir(null) : new File(storageRoot);
         if (filesDirectory == null) {
             android.util.Log.w(TAG, "default settings skipped: no writable app directory");
             return;
         }
         final File destinationDirectory = filesDirectory;
+        if (!destinationDirectory.isDirectory() && !destinationDirectory.mkdirs()) {
+            android.util.Log.w(TAG, "default settings skipped: cannot create " + destinationDirectory);
+            return;
+        }
 
         for (String name : DEFAULT_SETTINGS) {
             final File destination = new File(destinationDirectory, name);
@@ -292,6 +301,12 @@ public final class SavrApplication extends Application {
     private static final String DATA_PACK_PATH =
             "/storage/emulated/0/savr/data_main/assets";
 
+    // Selectors for nativeStorageDir. The native side owns the storage root
+    // (Steam Frame: /sdcard/Documents/GTASAVR/{files,data_main}); it answers
+    // "" when this layer should keep the legacy locations above.
+    private static final int STORAGE_FILES = 0;
+    private static final int STORAGE_DATA_MAIN = 1;
+
     private static void supplyDataPacks(Activity activity) {
         android.content.Intent intent = activity.getIntent();
         if (intent == null) {
@@ -300,10 +315,15 @@ public final class SavrApplication extends Application {
         if (intent.getStringArrayExtra("packPaths") != null) {
             return; // a real downloader already provided them
         }
+        final String dataMainRoot = nativeStorageDir(STORAGE_DATA_MAIN);
+        final String packPath = dataMainRoot.isEmpty()
+                ? DATA_PACK_PATH : dataMainRoot + "/assets";
         intent.putExtra("packNames", new String[] { DATA_PACK_NAME });
-        intent.putExtra("packPaths", new String[] { DATA_PACK_PATH });
-        android.util.Log.i(TAG, "supplied data pack path " + DATA_PACK_PATH);
+        intent.putExtra("packPaths", new String[] { packPath });
+        android.util.Log.i(TAG, "supplied data pack path " + packPath);
     }
+
+    private static native String nativeStorageDir(int which);
 
     private static native void nativeOnApplicationCreate(ClassLoader loader);
 

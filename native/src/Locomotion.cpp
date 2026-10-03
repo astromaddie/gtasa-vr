@@ -10,12 +10,12 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include "StoragePaths.h"
 
 namespace savr::locomotion {
 namespace {
 
-const char* const kPath =
-    "/sdcard/Android/data/com.rockstargames.gtasa/files/vr_locomotion.ini";
+const char* const kPath = savr::storage::FilesPath("vr_locomotion.ini");
 
 std::once_flag g_initOnce;
 std::mutex g_saveMutex;

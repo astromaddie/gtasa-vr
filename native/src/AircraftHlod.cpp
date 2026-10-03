@@ -13,12 +13,12 @@
 #include <cstring>
 #include <limits>
 #include <vector>
+#include "StoragePaths.h"
 
 namespace savr::airhlod {
 namespace {
 
-constexpr char kPackPath[] =
-    "/sdcard/Android/data/com.rockstargames.gtasa/files/savr_aircraft.hlod";
+const char* const kPackPath = savr::storage::FilesPath("savr_aircraft.hlod");
 constexpr char kEnableProperty[] = "debug.savr.air_hlod";
 constexpr float kMinimumRadiusM = 1200.0f;
 constexpr float kMaximumRadiusM = 1800.0f;

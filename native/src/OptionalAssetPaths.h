@@ -3,8 +3,11 @@
 #include <string>
 #include <string_view>
 
+#include "StoragePaths.h"
+
 namespace savr::modelsets {
-inline constexpr char kFiles[] = "/sdcard/Android/data/com.rockstargames.gtasa/files/";
+// Trailing slash included. Resolved once from the central storage root.
+inline const std::string kFiles = savr::storage::FilesDir() + "/";
 
 inline bool SafeRelative(std::string_view path) {
     if (path.empty() || path.size() > 240 || path.front() == '/') return false;
@@ -30,7 +33,13 @@ inline std::string AssetKey(const char* name) {
         if (c == '\\') c = '/';
         else if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
     }
-    constexpr std::string_view roots[] = {
+    // The path was lowercased above, so compare against lowercased roots: the
+    // active storage root plus the legacy app-private locations.
+    std::string active = savr::storage::FilesDir() + "/";
+    for (char& c : active)
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+    const std::string_view roots[] = {
+        active,
         "/sdcard/android/data/com.rockstargames.gtasa/files/",
         "/storage/emulated/0/android/data/com.rockstargames.gtasa/files/"};
     for (auto root : roots)

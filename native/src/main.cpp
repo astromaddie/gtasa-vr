@@ -16,6 +16,7 @@
 #include "HudSettings.h"
 #include "Locomotion.h"
 #include "Log.h"
+#include "StoragePaths.h"
 #include "Melee.h"
 #include "MissionControls.h"
 #include "Catalyst.h"
@@ -38,6 +39,8 @@
 #include "Xr.h"
 
 #include <jni.h>
+#include <android/asset_manager.h>
+#include <android/asset_manager_jni.h>
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -55,8 +58,10 @@
 #include <cstdint>
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
+#include <string>
 #include <cstdlib>
 #include <ctime>
 #include <iterator>
@@ -1070,7 +1075,13 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
         // L3+R3 (both thumbstick clicks) recenters the view: the current head
         // pose becomes straight-ahead. Edge-triggered so holding does it once.
         static bool recenterPrev = false;
+#ifdef SAVR_STEAM_FRAME
+        // The Frame's system layer recentres on a View long press instead;
+        // thumbstick clicks stay plain game actions.
+        const bool recenterChord = false;
+#else
         const bool recenterChord = in.l3 && in.r3;
+#endif
         if (recenterChord && !recenterPrev) vrcam::RequestRecenter();
         recenterPrev = recenterChord;
 
@@ -1140,6 +1151,33 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
         }
         openPrev = openChord;
 
+        // Steam Frame system layer on the View button: a short press steps back
+        // in the VR menu (same as B), holding it for 1.0 s recentres with a
+        // short buzz on both hands. Ignored while the session is unfocused.
+        bool viewBack = false;
+#ifdef SAVR_STEAM_FRAME
+        {
+            using ViewClock = std::chrono::steady_clock;
+            static bool viewPrev = false, viewFired = false;
+            static ViewClock::time_point viewDownAt{};
+            const bool viewNow = in.view && xr::IsSessionFocused();
+            if (viewNow && !viewPrev) {
+                viewDownAt = ViewClock::now();
+                viewFired = false;
+            } else if (viewNow && !viewFired &&
+                       ViewClock::now() - viewDownAt >= std::chrono::milliseconds(1000)) {
+                viewFired = true;
+                vrcam::RequestRecenter();
+                xr::TriggerHaptic(0, 0.6f, 0.0f, 80.0f);
+                xr::TriggerHaptic(1, 0.6f, 0.0f, 80.0f);
+                LOGW("[savr-frame] View held 1.0 s: recentre");
+            } else if (!viewNow && viewPrev && !viewFired) {
+                viewBack = true;   // released before the hold threshold
+            }
+            viewPrev = viewNow;
+        }
+#endif
+
         const auto menuNav=savr::menu::Navigate(menuPage!=PG_NONE,
             in.leftStick[0],in.leftStick[1],grips);
         const bool navUp   = held(menuNav.up, tUp);
@@ -1151,7 +1189,7 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
         const int plus = heldValue(
             !grips && in.triggers[1] >= 0.55f, tPlus);
         const bool enter   = in.a && !enterPrev && !grips;   // A: enter/activate/reset
-        const bool back    = in.b && !backPrev && !grips;    // B: step back / close (grips = open chord)
+        const bool back    = (in.b && !backPrev && !grips) || viewBack;   // B (or View on Frame): step back / close (grips = open chord)
         enterPrev = in.a; backPrev = in.b;
 
         switch (menuPage) {
@@ -2436,6 +2474,42 @@ bool InterceptGameNative(JNIEnv* env) {
     return true;
 }
 
+#ifdef SAVR_STEAM_FRAME
+// True when the APK's assets hold the retail audio banks (monolithic package).
+bool ApkHasRetailAudio() {
+    if (g_vm == nullptr || g_activity == nullptr) return false;
+    JNIEnv* env = nullptr;
+    bool attached = false;
+    if (g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+        if (g_vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return false;
+        attached = true;
+    }
+    bool found = false;
+    jclass cls = env->GetObjectClass(g_activity);
+    jmethodID getAssets = cls ? env->GetMethodID(cls, "getAssets",
+        "()Landroid/content/res/AssetManager;") : nullptr;
+    jobject assetManager = getAssets ? env->CallObjectMethod(g_activity, getAssets) : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); assetManager = nullptr; }
+    if (assetManager != nullptr) {
+        if (AAssetManager* manager = AAssetManager_fromJava(env, assetManager)) {
+            static const char* const kProbe[] = {
+                "audio/config/banklkup.dat", "audio/sfx/genrl.osw",
+                "audio/streams/cutscene.osw"};
+            found = true;
+            for (const char* name : kProbe) {
+                AAsset* asset = AAssetManager_open(manager, name, AASSET_MODE_UNKNOWN);
+                if (asset == nullptr) { found = false; LOGW("[savr-frame] APK asset missing: %s", name); break; }
+                AAsset_close(asset);
+            }
+        }
+        env->DeleteLocalRef(assetManager);
+    }
+    if (cls) env->DeleteLocalRef(cls);
+    if (attached) g_vm->DetachCurrentThread();
+    return found;
+}
+#endif
+
 void* WaitForGameLibrary(void*) {
     LOGI("waiting for libGame.so (pid %d)", getpid());
 
@@ -2516,9 +2590,30 @@ void* WaitForGameLibrary(void*) {
     // through CFileMgr, which prepends the data dir.) The fix is to point cwd at
     // the game's data dir so the relative fopen lands on the deployed packs; the
     // case-insensitive /sdcard FUSE maps AUDIO/ -> audio/. Fixes SFX and radio.
-    const char* kDataDir = "/sdcard/Android/data/com.rockstargames.gtasa/files";
-    const bool audioPacksPresent =
-        access("/sdcard/Android/data/com.rockstargames.gtasa/files/audio/CONFIG/BankLkup.dat", F_OK) == 0;
+    const std::string dataDirString = storage::FilesDir();
+    const char* kDataDir = dataDirString.c_str();
+    bool audioPacksPresent =
+        access((dataDirString + "/audio/CONFIG/BankLkup.dat").c_str(), F_OK) == 0;
+#ifdef SAVR_STEAM_FRAME
+    // The game lowercases every data-area path (OS_NormalizeFilename) before
+    // its relative fopen, and /sdcard/Documents may be case-sensitive, so the
+    // Frame payload is staged lowercase. Accept either spelling here.
+    audioPacksPresent = audioPacksPresent ||
+        access((dataDirString + "/audio/config/banklkup.dat").c_str(), F_OK) == 0;
+#endif
+#ifdef SAVR_STEAM_FRAME
+    // No supplementary sound pack: a monolithic APK still carries the retail
+    // audio under assets/audio, which the engine opens through AAssetManager
+    // (NvAPKOpen) with the same lowercase paths. Leave the loaders un-stubbed
+    // and do not touch the cwd in that case.
+    const bool retailAudioInApk = !audioPacksPresent && ApkHasRetailAudio();
+    LOGW("[savr-frame] audio: ps2 pack %s, retail audio in APK %s",
+         audioPacksPresent ? "present" : "absent",
+         retailAudioInApk ? "present" : "absent");
+    if (retailAudioInApk) {
+        LOGI("audio: using the APK's own retail audio (loaders not stubbed)");
+    } else
+#endif
     if (audioPacksPresent && chdir(kDataDir) == 0) {
         // Packs will now open through the real loaders — do NOT stub them, or the
         // stub's return-null keeps radio silent.
@@ -2581,6 +2676,15 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     savr::g_vm = vm;
     LOGI("libsavr.so loaded, JavaVM %p", static_cast<void*>(vm));
     return JNI_VERSION_1_6;
+}
+
+// Resolved storage directories for the Java loader. Returns "" when the Java
+// side should keep its own legacy locations (Quest builds, or Frame fallback).
+JNIEXPORT jstring JNICALL
+Java_com_savr_SavrApplication_nativeStorageDir(JNIEnv* env, jclass, jint which) {
+    const auto& roots = savr::storage::GetRoots();
+    if (!roots.relocated) return env->NewStringUTF("");
+    return env->NewStringUTF(which == 0 ? roots.files.c_str() : roots.dataMain.c_str());
 }
 
 JNIEXPORT void JNICALL

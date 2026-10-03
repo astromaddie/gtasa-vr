@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdarg>
+#include "StoragePaths.h"
 
 namespace savr::melee {
 namespace {
@@ -88,7 +89,7 @@ void Trace(const char* format, ...) {
     char line[384]{};va_list args;va_start(args,format);
     std::vsnprintf(line,sizeof(line),format,args);va_end(args);
     LOGI("[vr.melee] %s",line);
-    if(FILE* f=std::fopen("/sdcard/Android/data/com.rockstargames.gtasa/files/vr_melee.log","a")) {
+    if(FILE* f=std::fopen(savr::storage::Files("vr_melee.log").c_str(),"a")) {
         std::fprintf(f,"%.3f %s\n",NowSeconds(),line);std::fclose(f);
     }
 }

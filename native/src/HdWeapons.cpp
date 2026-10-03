@@ -26,12 +26,12 @@
 
 #include "Log.h"
 #include "Symbols.h"
+#include "StoragePaths.h"
 
 namespace savr::hdweapons {
 namespace {
 
-constexpr char kFilesDir[] =
-    "/sdcard/Android/data/com.rockstargames.gtasa/files";
+const char* const kFilesDir = savr::storage::FilesDir().c_str();
 // Registered RELATIVE to the files dir (Apply chdirs there first): the
 // ms_files name field is only 40 bytes and an absolute /sdcard path aborts
 // the engine's fortified strcpy. The engine lowercases + converts '\'->'/'
@@ -45,12 +45,10 @@ constexpr char kFilesDir[] =
 // equals "hdweapons" both fixes that AND makes GetDatabase("hdweapons") match
 // our loose-PNG texture database, so the HD textures actually bind.
 constexpr char kImgPath[] = "hdweapons\\hdweapons.img";
-constexpr char kImgPathReal[] =
-    "/sdcard/Android/data/com.rockstargames.gtasa/files/hdweapons/"
-    "hdweapons.img";
-constexpr char kTexDbListing[] =
-    "/sdcard/Android/data/com.rockstargames.gtasa/files/texdb/hdweapons/"
-    "hdweapons.txt";
+const char* const kImgPathReal =
+    savr::storage::FilesPath("hdweapons/hdweapons.img");
+const char* const kTexDbListing =
+    savr::storage::FilesPath("texdb/hdweapons/hdweapons.txt");
 
 constexpr int kInfoStride = 0x14;      // CStreamingInfo on arm64
 constexpr int kFilesStride = 0x30;     // CStreaming::ms_files entry
@@ -93,8 +91,7 @@ bool PayloadPresent() {
 // the outcome also lands in a file the next debugging session can read.
 void WriteStatus(const char* text) {
     if (FILE* f = std::fopen(
-            "/sdcard/Android/data/com.rockstargames.gtasa/files/hdweapons/"
-            "status.txt", "w")) {
+            savr::storage::Files("hdweapons/status.txt").c_str(), "w")) {
         std::fputs(text, f);
         std::fclose(f);
     }

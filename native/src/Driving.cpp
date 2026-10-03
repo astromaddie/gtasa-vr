@@ -28,6 +28,7 @@
 #include <ctime>
 #include <map>
 #include <mutex>
+#include "StoragePaths.h"
 
 namespace savr::driving {
 namespace {
@@ -106,8 +107,7 @@ constexpr int kDefaults[F_COUNT] = {
 // Enable tracked wheel rendering and immersive vehicle input.
 constexpr bool kImmersiveDrivingEnabled = true;
 constexpr int kDrivingConfigVersion = 3;
-const char* const kPath =
-    "/sdcard/Android/data/com.rockstargames.gtasa/files/vr_driving.ini";
+const char* const kPath = savr::storage::FilesPath("vr_driving.ini");
 
 std::once_flag g_initOnce;
 // Save() is refused until Load() has actually read the file (or proved it
@@ -1611,8 +1611,7 @@ void TraceCombineCabin(float requested, const void* frame) {
     static unsigned int samples=0;
     const unsigned int sample=samples++;
     if (sample%120u!=0u || sample>=36000u) return;
-    FILE* file=std::fopen(
-        "/sdcard/Android/data/com.rockstargames.gtasa/files/vr_combine_cabin.log",
+    FILE* file=std::fopen(savr::storage::Files("vr_combine_cabin.log").c_str(),
         sample==0?"w":"a");
     if (!file)return;
     const auto* local=static_cast<const char*>(frame)+0x20;

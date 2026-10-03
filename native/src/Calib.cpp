@@ -9,6 +9,7 @@
 #include <mutex>
 
 #include <unistd.h>
+#include "StoragePaths.h"
 
 namespace savr::calib {
 namespace {
@@ -35,8 +36,8 @@ std::atomic<bool> g_laserLocked[kMaxWeapons]{};
 // 1 = always on for this weapon, 2 = always off for this weapon.
 std::atomic<int> g_laserMode[kMaxWeapons]{};
 
-const char* kPath = "/sdcard/Android/data/com.rockstargames.gtasa/files/vr_calib.ini";
-const char* kTempPath = "/sdcard/Android/data/com.rockstargames.gtasa/files/vr_calib.ini.tmp";
+const char* kPath = savr::storage::FilesPath("vr_calib.ini");
+const char* kTempPath = savr::storage::FilesPath("vr_calib.ini.tmp");
 
 int ClampType(int t) { return (t < 0) ? 0 : (t >= kMaxWeapons ? kMaxWeapons - 1 : t); }
 

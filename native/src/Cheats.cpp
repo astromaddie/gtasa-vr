@@ -17,6 +17,7 @@
 #include <cstring>
 #include <ctime>
 #include <iterator>
+#include "StoragePaths.h"
 
 namespace savr::cheats {
 namespace {
@@ -520,8 +521,7 @@ void Tick() {
             const int value = *reinterpret_cast<const unsigned char*>(probe);
             LOGI("[mission] flag after launch: DoMissionSkip=%d (tick %d)",
                  value, tick);
-            if (FILE* f = std::fopen(
-                    "/sdcard/Android/data/com.rockstargames.gtasa/files/savr_debug.txt",
+            if (FILE* f = std::fopen(savr::storage::Files("savr_debug.txt").c_str(),
                     "a")) {
                 std::fprintf(f, "flag tick=%d value=%d\n", tick, value);
                 std::fclose(f);
@@ -904,8 +904,7 @@ void Activate(int index) {
                 std::memory_order_release);
             LOGI("mission direct: number=%d name=%s started=%d", number,
                  missioncatalog::Name(missioncatalog::kDirectPage, number), started);
-            if (FILE* f=std::fopen(
-                    "/sdcard/Android/data/com.rockstargames.gtasa/files/savr_debug.txt","a")) {
+            if (FILE* f=std::fopen(savr::storage::Files("savr_debug.txt").c_str(),"a")) {
                 std::fprintf(f,"direct page=6 num=%d started=%d name=%s\n",number,
                     started,missioncatalog::Name(missioncatalog::kDirectPage,number));
                 std::fclose(f);
@@ -943,8 +942,7 @@ void Activate(int index) {
              page, number, missioncatalog::Name(page, number),
              cheat.fn, static_cast<void*>(g_currentMissionPage),
              static_cast<void*>(g_currentSkipToMissionNumber));
-        if (FILE* f = std::fopen(
-                "/sdcard/Android/data/com.rockstargames.gtasa/files/savr_debug.txt",
+        if (FILE* f = std::fopen(savr::storage::Files("savr_debug.txt").c_str(),
                 "a")) {
             std::fprintf(f, "launch page=%d num=%d name=%s\n",
                          page, number, missioncatalog::Name(page, number));

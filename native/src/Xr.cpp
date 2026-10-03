@@ -13,6 +13,7 @@
 #include "ModelSets.h"
 #include "Jetpack.h"
 #include "Holster.h"
+#include "InputBindings.h"
 #include "HudSettings.h"
 #include "Locomotion.h"
 #include "Log.h"
@@ -56,6 +57,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -64,6 +66,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include "StoragePaths.h"
 
 namespace savr::xr {
 namespace {
@@ -2050,6 +2053,10 @@ struct HiddenAreaMaskStorage {
 std::array<HiddenAreaMaskStorage, 2> g_hiddenAreaMasks;
 std::atomic<bool> g_hiddenAreaMasksReady{false};
 bool g_hasVisibilityMaskExt = false;
+#ifdef SAVR_STEAM_FRAME
+constexpr const char* kFrameControllerExtension = "XR_VALVE_frame_controller_interaction";
+bool g_hasFrameControllerExt = false;
+#endif
 PFN_xrGetVisibilityMaskKHR g_xrGetVisibilityMaskKHR = nullptr;
 void LoadHiddenAreaMasks();
 
@@ -2146,6 +2153,7 @@ struct State {
     XrAction    xAction{XR_NULL_HANDLE};
     XrAction    yAction{XR_NULL_HANDLE};
     XrAction    menuAction{XR_NULL_HANDLE};
+    XrAction    viewAction{XR_NULL_HANDLE};       // Steam Frame / Index system button
     XrAction    stickClickAction{XR_NULL_HANDLE}; // L3/R3, per-hand subactions
     XrAction    aimAction{XR_NULL_HANDLE};
     XrAction    gripPoseAction{XR_NULL_HANDLE};
@@ -2952,6 +2960,28 @@ EGLConfig ConfigOfContext(EGLDisplay display, EGLContext context) {
     return config;
 }
 
+// Log which controller profile the runtime bound for each hand.
+void LogInteractionProfiles() {
+    static const char* const kHands[2] = {"left", "right"};
+    for (int h = 0; h < 2; ++h) {
+        XrInteractionProfileState state{XR_TYPE_INTERACTION_PROFILE_STATE};
+        char text[XR_MAX_PATH_LENGTH] = "<none>";
+        const XrPath handPath = s.handPaths[h];
+        const XrResult result = handPath == XR_NULL_PATH ? XR_ERROR_PATH_INVALID :
+            xrGetCurrentInteractionProfile(s.session, handPath, &state);
+        if (XR_SUCCEEDED(result) && state.interactionProfile != XR_NULL_PATH) {
+            uint32_t length = 0;
+            if (XR_FAILED(xrPathToString(s.instance, state.interactionProfile,
+                                         sizeof(text), &length, text))) {
+                std::strcpy(text, "<unreadable>");
+            }
+        } else if (XR_FAILED(result)) {
+            std::snprintf(text, sizeof(text), "<error %d>", static_cast<int>(result));
+        }
+        LOGW("[savr-frame] interaction profile %s: %s", kHands[h], text);
+    }
+}
+
 void PollEvents() {
     XrEventDataBuffer event{XR_TYPE_EVENT_DATA_BUFFER};
     while (xrPollEvent(s.instance, &event) == XR_SUCCESS) {
@@ -3012,6 +3042,9 @@ void PollEvents() {
             }
             break;
         }
+        case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED:
+            LogInteractionProfiles();
+            break;
         case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING: {
             const auto& changed=*reinterpret_cast<XrEventDataReferenceSpaceChangePending*>(&event);
             if(changed.referenceSpaceType==XR_REFERENCE_SPACE_TYPE_LOCAL) {
@@ -3128,11 +3161,43 @@ bool CreateSwapchains() {
         xrEnumerateSwapchainFormats(s.session, 0, &fc, nullptr);
         std::vector<int64_t> formats(fc ? fc : 1);
         if (fc) xrEnumerateSwapchainFormats(s.session, fc, &fc, formats.data());
-        bool offersSrgb = false;
-        for (uint32_t k = 0; k < fc; ++k) if (formats[k] == GL_SRGB8_ALPHA8) { offersSrgb = true; break; }
-        g_swapchainSrgb   = offersSrgb && g_srgbWriteControl;
-        g_swapchainFormat = g_swapchainSrgb ? static_cast<int64_t>(GL_SRGB8_ALPHA8)
-                                            : static_cast<int64_t>(GL_RGBA8);
+        const auto offers = [&](int64_t format) {
+            for (uint32_t k = 0; k < fc; ++k) if (formats[k] == format) return true;
+            return false;
+        };
+        const bool offersSrgb = offers(GL_SRGB8_ALPHA8);
+        const bool offersRgba = offers(GL_RGBA8);
+        // Only ever pick a format the runtime enumerated. Preference: sRGB with
+        // write control (raw blit of the game's encoded pixels), then plain
+        // RGBA8, then sRGB without write control (re-encodes: washed but works),
+        // then whatever the runtime lists first.
+        if (offersSrgb && g_srgbWriteControl) {
+            g_swapchainFormat = GL_SRGB8_ALPHA8;
+        } else if (offersRgba) {
+            g_swapchainFormat = GL_RGBA8;
+        } else if (offersSrgb) {
+            g_swapchainFormat = GL_SRGB8_ALPHA8;
+        } else if (fc) {
+            g_swapchainFormat = formats[0];
+        } else {
+            LOGE("[savr-frame] runtime enumerated no swapchain formats; trying RGBA8");
+            g_swapchainFormat = GL_RGBA8;
+        }
+        g_swapchainSrgb = g_swapchainFormat == static_cast<int64_t>(GL_SRGB8_ALPHA8) &&
+                          g_srgbWriteControl;
+        {
+            std::string list;
+            for (uint32_t k = 0; k < fc; ++k) {
+                char one[24];
+                std::snprintf(one, sizeof(one), "0x%llx ",
+                              static_cast<unsigned long long>(formats[k]));
+                list += one;
+            }
+            LOGW("[savr-frame] swapchain formats offered (%u): %s", fc, list.c_str());
+            LOGW("[savr-frame] swapchain format chosen 0x%llx (sRGB write control=%d)",
+                 static_cast<unsigned long long>(g_swapchainFormat),
+                 g_srgbWriteControl ? 1 : 0);
+        }
         LOGI("[stereo] swapchain format=0x%llx sRGB=%d (runtime offers sRGB=%d, writeControl=%d)",
              static_cast<unsigned long long>(g_swapchainFormat), g_swapchainSrgb,
              offersSrgb, g_srgbWriteControl);
@@ -4294,7 +4359,7 @@ bool DrawHudComposite(GLuint sourceTexture,int targetWidth,int targetHeight,
         static double nextSignalDrawLog=0;
         if (eye==0 && perf::MonotonicMs()>=nextSignalDrawLog) {
             nextSignalDrawLog=perf::MonotonicMs()+2000;
-            if (FILE* f=std::fopen("/sdcard/Android/data/com.rockstargames.gtasa/files/vr_toreno_signal.log","a")) {
+            if (FILE* f=std::fopen(savr::storage::Files("vr_toreno_signal.log").c_str(),"a")) {
                 std::fprintf(f,"draw percent=%d hud=%u label=%d\n",signal,sourceTexture,
                     g_signalTextTexture.visible?1:0);std::fclose(f);
             }
@@ -4843,16 +4908,73 @@ XrPath StringToPath(const char* text) {
     return path;
 }
 
-bool CreateAction(XrAction& action, XrActionType type, const char* name, bool perHand) {
+bool CreateAction(XrAction& action, XrActionType type, const char* name,
+                  const char* localizedName, bool perHand) {
     XrActionCreateInfo info{XR_TYPE_ACTION_CREATE_INFO};
     info.actionType = type;
     std::strncpy(info.actionName, name, XR_MAX_ACTION_NAME_SIZE - 1);
-    std::strncpy(info.localizedActionName, name, XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+    std::strncpy(info.localizedActionName, localizedName, XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
     if (perHand) {
         info.countSubactionPaths = 2;
         info.subactionPaths      = s.handPaths;
     }
     return Check(xrCreateAction(s.actionSet, &info, &action), name);
+}
+
+XrAction* ActionSlot(bindings::Act id) {
+    using bindings::Act;
+    switch (id) {
+    case Act::Stick:      return &s.stickAction;
+    case Act::Trigger:    return &s.triggerAction;
+    case Act::Grip:       return &s.gripAction;
+    case Act::A:          return &s.aAction;
+    case Act::B:          return &s.bAction;
+    case Act::X:          return &s.xAction;
+    case Act::Y:          return &s.yAction;
+    case Act::Menu:       return &s.menuAction;
+    case Act::View:       return &s.viewAction;
+    case Act::StickClick: return &s.stickClickAction;
+    case Act::Thumbrest:  return &s.thumbrestAction;
+    case Act::Aim:        return &s.aimAction;
+    case Act::GripPose:   return &s.gripPoseAction;
+    case Act::Haptic:     return &s.hapticAction;
+    }
+    return nullptr;
+}
+
+XrActionType ActionType(bindings::Kind kind) {
+    switch (kind) {
+    case bindings::Kind::Bool:   return XR_ACTION_TYPE_BOOLEAN_INPUT;
+    case bindings::Kind::Float:  return XR_ACTION_TYPE_FLOAT_INPUT;
+    case bindings::Kind::Vec2:   return XR_ACTION_TYPE_VECTOR2F_INPUT;
+    case bindings::Kind::Pose:   return XR_ACTION_TYPE_POSE_INPUT;
+    case bindings::Kind::Haptic: return XR_ACTION_TYPE_VIBRATION_OUTPUT;
+    }
+    return XR_ACTION_TYPE_BOOLEAN_INPUT;
+}
+
+// Suggest one interaction profile on its own. A rejected profile (unknown path
+// on this runtime, bad component) must not take the others down with it.
+template <std::size_t N>
+bool SuggestProfile(const char* profilePath, const bindings::Binding (&table)[N]) {
+    std::vector<XrActionSuggestedBinding> suggested;
+    for (const bindings::Binding& b : table) {
+        XrAction* slot = ActionSlot(b.action);
+        if (slot == nullptr || *slot == XR_NULL_HANDLE) continue;
+        suggested.push_back({*slot, StringToPath(b.path)});
+    }
+    XrInteractionProfileSuggestedBinding profile{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    profile.interactionProfile     = StringToPath(profilePath);
+    profile.countSuggestedBindings = static_cast<uint32_t>(suggested.size());
+    profile.suggestedBindings      = suggested.data();
+    const XrResult result = xrSuggestInteractionProfileBindings(s.instance, &profile);
+    if (XR_FAILED(result)) {
+        LOGW("[savr-frame] suggest %s -> FAILED (%d), %zu bindings",
+             profilePath, static_cast<int>(result), suggested.size());
+        return false;
+    }
+    LOGW("[savr-frame] suggest %s -> ok, %zu bindings", profilePath, suggested.size());
+    return true;
 }
 
 bool CreateInput() {
@@ -4866,56 +4988,24 @@ bool CreateInput() {
         return false;
     }
 
-    if (!CreateAction(s.stickAction,   XR_ACTION_TYPE_VECTOR2F_INPUT, "stick",   true)  ||
-        !CreateAction(s.triggerAction, XR_ACTION_TYPE_FLOAT_INPUT,    "trigger", true)  ||
-        !CreateAction(s.gripAction,    XR_ACTION_TYPE_FLOAT_INPUT,    "grip",    true)  ||
-        !CreateAction(s.aAction,       XR_ACTION_TYPE_BOOLEAN_INPUT,  "a",       false) ||
-        !CreateAction(s.bAction,       XR_ACTION_TYPE_BOOLEAN_INPUT,  "b",       false) ||
-        !CreateAction(s.xAction,       XR_ACTION_TYPE_BOOLEAN_INPUT,  "x",       false) ||
-        !CreateAction(s.yAction,       XR_ACTION_TYPE_BOOLEAN_INPUT,  "y",       false) ||
-        !CreateAction(s.menuAction,    XR_ACTION_TYPE_BOOLEAN_INPUT,  "menu",    false) ||
-        !CreateAction(s.stickClickAction, XR_ACTION_TYPE_BOOLEAN_INPUT, "stickclick", true) ||
-        !CreateAction(s.thumbrestAction, XR_ACTION_TYPE_BOOLEAN_INPUT, "thumbrest", true) ||
-        !CreateAction(s.aimAction,     XR_ACTION_TYPE_POSE_INPUT,     "aim",     true)  ||
-        !CreateAction(s.gripPoseAction,XR_ACTION_TYPE_POSE_INPUT,     "grippose", true) ||
-        !CreateAction(s.hapticAction,  XR_ACTION_TYPE_VIBRATION_OUTPUT, "haptic", true)) {
-        return false;
+    for (const bindings::ActionDef& def : bindings::kActions) {
+        XrAction* slot = ActionSlot(def.id);
+        if (slot == nullptr ||
+            !CreateAction(*slot, ActionType(def.kind), def.name, def.localized, def.perHand)) {
+            return false;
+        }
     }
 
-    struct Bind { XrAction action; const char* path; };
-    const Bind binds[] = {
-        {s.stickAction,   "/user/hand/left/input/thumbstick"},
-        {s.stickAction,   "/user/hand/right/input/thumbstick"},
-        {s.triggerAction, "/user/hand/left/input/trigger/value"},
-        {s.triggerAction, "/user/hand/right/input/trigger/value"},
-        {s.gripAction,    "/user/hand/left/input/squeeze/value"},
-        {s.gripAction,    "/user/hand/right/input/squeeze/value"},
-        {s.aAction,       "/user/hand/right/input/a/click"},
-        {s.bAction,       "/user/hand/right/input/b/click"},
-        {s.xAction,       "/user/hand/left/input/x/click"},
-        {s.yAction,       "/user/hand/left/input/y/click"},
-        {s.menuAction,    "/user/hand/left/input/menu/click"},
-        {s.stickClickAction, "/user/hand/left/input/thumbstick/click"},
-        {s.stickClickAction, "/user/hand/right/input/thumbstick/click"},
-        {s.thumbrestAction,  "/user/hand/left/input/thumbrest/touch"},
-        {s.thumbrestAction,  "/user/hand/right/input/thumbrest/touch"},
-        {s.aimAction,     "/user/hand/right/input/aim/pose"},
-        {s.aimAction,     "/user/hand/left/input/aim/pose"},
-        {s.gripPoseAction,"/user/hand/left/input/grip/pose"},
-        {s.gripPoseAction,"/user/hand/right/input/grip/pose"},
-        {s.hapticAction,  "/user/hand/left/output/haptic"},
-        {s.hapticAction,  "/user/hand/right/output/haptic"},
-    };
-    std::vector<XrActionSuggestedBinding> suggested;
-    for (const Bind& b : binds) {
-        suggested.push_back({b.action, StringToPath(b.path)});
-    }
-    XrInteractionProfileSuggestedBinding profile{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
-    profile.interactionProfile     = StringToPath("/interaction_profiles/oculus/touch_controller");
-    profile.countSuggestedBindings = static_cast<uint32_t>(suggested.size());
-    profile.suggestedBindings      = suggested.data();
-    if (!Check(xrSuggestInteractionProfileBindings(s.instance, &profile),
-               "xrSuggestInteractionProfileBindings")) {
+    bool anySuggested = false;
+#ifdef SAVR_STEAM_FRAME
+    // Frame controller first, then Index, then the Touch map as a last resort.
+    // Each is suggested separately; the session only fails if none is accepted.
+    anySuggested |= SuggestProfile(bindings::kProfileFrame, bindings::kFrameBindings);
+    anySuggested |= SuggestProfile(bindings::kProfileIndex, bindings::kIndexBindings);
+#endif
+    anySuggested |= SuggestProfile(bindings::kProfileTouch, bindings::kTouchBindings);
+    if (!anySuggested) {
+        LOGE("[savr-frame] no interaction profile accepted; controller input unavailable");
         return false;
     }
 
@@ -5053,6 +5143,7 @@ void SyncInput(XrTime displayTime) {
     in.x    = ReadBool(s.xAction);
     in.y    = ReadBool(s.yAction);
     in.menu = ReadBool(s.menuAction);
+    in.view = ReadBool(s.viewAction);
     in.l3   = ReadBool(s.stickClickAction, s.handPaths[0]);
     in.r3   = ReadBool(s.stickClickAction, s.handPaths[1]);
     in.thumbrest[0] = ReadBool(s.thumbrestAction, s.handPaths[0]);
@@ -6387,8 +6478,32 @@ bool Initialize(JavaVM* vm, jobject activity) {
 
     std::vector<const char*> extensions = {
         XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME,
-        XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME,
     };
+    // Only enable (and chain the matching create-info for) what the runtime
+    // advertises. Quest always has it; a runtime without it must not fail here.
+    const bool hasAndroidCreateInstance = hasExt(XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME);
+    if (hasAndroidCreateInstance) {
+        extensions.push_back(XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME);
+    } else {
+        LOGW("[savr-frame] %s not advertised; XrInstanceCreateInfoAndroidKHR not chained",
+             XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME);
+    }
+    if (!hasExt(XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME)) {
+        LOGE("[savr-frame] %s not advertised by the runtime",
+             XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME);
+    }
+#ifdef SAVR_STEAM_FRAME
+    // Newer than the vendored headers, so the name is a literal.
+    g_hasFrameControllerExt = hasExt(kFrameControllerExtension);
+    if (g_hasFrameControllerExt) extensions.push_back(kFrameControllerExtension);
+    LOGW("[savr-frame] %s advertised=%d", kFrameControllerExtension,
+         g_hasFrameControllerExt ? 1 : 0);
+    {
+        std::string advertised;
+        for (const auto& e : avail) { advertised += e.extensionName; advertised += ' '; }
+        LOGW("[savr-frame] runtime advertises %u extensions: %s", availCount, advertised.c_str());
+    }
+#endif
     // CPU/GPU clock boost + thread scheduling. The port is CPU-bound (RenderScene
     // recorded twice); a clock hint alone barely helped because the heavy GameThread
     // can sit on a little core — registering it as the app-main thread pins it to a
@@ -6425,13 +6540,14 @@ bool Initialize(JavaVM* vm, jobject activity) {
     androidInfo.applicationActivity = activity;
 
     XrInstanceCreateInfo create{XR_TYPE_INSTANCE_CREATE_INFO};
-    create.next                  = &androidInfo;
+    create.next                  = hasAndroidCreateInstance ? &androidInfo : nullptr;
     create.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
     create.enabledExtensionNames = extensions.data();
     create.applicationInfo.apiVersion = XR_API_VERSION_1_0;
     std::strcpy(create.applicationInfo.applicationName, "GTA SA VR");
     std::strcpy(create.applicationInfo.engineName, "RenderWare");
 
+    for (const char* name : extensions) LOGW("[savr-frame] enabling extension %s", name);
     if (!Check(xrCreateInstance(&create, &s.instance), "xrCreateInstance")) {
         return false;
     }
@@ -8643,7 +8759,8 @@ GLuint LoadRgbaTexture(const char* path, int w, int h) {
 void EnsureHandAssets() {
     if (g_handAssetsTried) return;
     g_handAssetsTried = true;
-    const char* dir = "/sdcard/Android/data/com.rockstargames.gtasa/files/vrhands/";
+    const std::string handsDir = savr::storage::Files("vrhands/");
+    const char* dir = handsDir.c_str();
     char path[256];
     std::snprintf(path, sizeof(path), "%sBigHandLeft.uxrh", dir);  LoadUxrh(path, g_handMesh[0]);
     std::snprintf(path, sizeof(path), "%sBigHandRight.uxrh", dir); LoadUxrh(path, g_handMesh[1]);

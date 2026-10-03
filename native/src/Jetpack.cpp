@@ -15,6 +15,7 @@
 
 #include "Log.h"
 #include "Symbols.h"
+#include "StoragePaths.h"
 
 // CTaskSimpleJetPack control model (gta-reversed decomp + arm64 disasm of
 // 2.11.311). ProcessControlInput @0x680c1c reads the flat pad and sets the
@@ -28,8 +29,7 @@
 namespace savr::jetpack {
 namespace {
 
-const char* const kIniPath =
-    "/sdcard/Android/data/com.rockstargames.gtasa/files/vr_jetpack.ini";
+const char* const kIniPath = savr::storage::FilesPath("vr_jetpack.ini");
 
 std::atomic<Mode> g_mode{Mode::Reliable};   // rock-solid default (SIMPLE)
 std::atomic<bool> g_lockInAir{true};        // block B-drop while airborne (default ON)

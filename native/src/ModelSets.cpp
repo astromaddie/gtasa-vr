@@ -21,11 +21,12 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "StoragePaths.h"
 
 namespace savr::modelsets {
 namespace {
 constexpr const char* kNames[COUNT] = {"hdweapons", "properfixes"};
-constexpr char kSettings[] = "/sdcard/Android/data/com.rockstargames.gtasa/files/vr_modelsets.ini";
+const char* const kSettings = savr::storage::FilesPath("vr_modelsets.ini");
 struct Pack {
     std::string root;
     std::string generation;

@@ -956,7 +956,7 @@ def validate_audio(source: Path, work: Path, build_root: Path) -> AudioTree:
     return AudioTree(audio_root, tuple(verified))
 
 
-def patch_manifest(text: str) -> str:
+def patch_manifest(text: str, steam_frame: bool = False) -> str:
     app_match = re.search(r"<application\b([^>]*)>", text)
     if not app_match:
         raise KitError("application tag not found in decoded manifest")
@@ -966,23 +966,20 @@ def patch_manifest(text: str) -> str:
         "<application", f'<application android:name="{APPLICATION_CLASS}"', 1
     ) + text[app_match.end() :]
 
+    # Steam Frame's single-APK input is a merged package whose GameActivity is
+    # already the launcher (there is no Play DownloaderActivity); retarget that
+    # activity's own intent-filters instead of the downloader/game split.
     pattern = rf'<activity[^>]*android:name="{re.escape(LAUNCHER_ACTIVITY)}".*?</activity>'
     match = re.search(pattern, text, re.DOTALL)
-    if match is None:
-        raise KitError(f"launcher activity {LAUNCHER_ACTIVITY} not found")
-    block = match.group(0)
-    stripped = re.sub(
-        r"\s*<intent-filter>(?:(?!</intent-filter>).)*?LAUNCHER.*?</intent-filter>",
-        "",
-        block,
-        flags=re.DOTALL,
+    # Steam Frame (Lepton) has no Oculus focus-aware contract, so that
+    # meta-data is dropped; everything else about the VR activity is kept.
+    focus_aware = (
+        ""
+        if steam_frame
+        else '\n            <meta-data android:name="com.oculus.vr.focusaware" android:value="true"/>'
     )
-    if stripped == block:
-        raise KitError(f"no launcher intent-filter on {LAUNCHER_ACTIVITY}")
-    text = text.replace(block, stripped, 1)
-
     body = (
-        '\n            <meta-data android:name="com.oculus.vr.focusaware" android:value="true"/>'
+        focus_aware +
         "\n            <intent-filter>"
         '\n                <action android:name="android.intent.action.MAIN"/>'
         '\n                <category android:name="android.intent.category.LAUNCHER"/>'
@@ -990,19 +987,49 @@ def patch_manifest(text: str) -> str:
         '\n                <category android:name="com.oculus.intent.category.VR"/>'
         "\n            </intent-filter>"
     )
-    text, count = re.subn(
-        rf'(<activity[^>]*android:name="{re.escape(GAME_ACTIVITY)}"[^>]*?)/>',
-        lambda found: f'{found.group(1)} android:exported="true">{body}\n        </activity>',
-        text,
-        count=1,
-    )
-    if count != 1:
-        raise KitError(f"game activity {GAME_ACTIVITY} not found in the expected layout")
+    if match is None and steam_frame:
+        game_pattern = (
+            rf'<activity\b[^>]*android:name="{re.escape(GAME_ACTIVITY)}"[^>]*?>'
+            r'(?P<inner>.*?)</activity>'
+        )
+        game = re.search(game_pattern, text, re.DOTALL)
+        if game is None:
+            raise KitError(f"neither {LAUNCHER_ACTIVITY} nor a self-launching {GAME_ACTIVITY} found")
+        inner = re.sub(
+            r"\s*<intent-filter>.*?</intent-filter>", "", game.group("inner"), flags=re.DOTALL
+        )
+        block = game.group(0)
+        patched = block.replace(game.group("inner"), inner + body + "\n        ", 1)
+        text = text.replace(block, patched, 1)
+    else:
+        if match is None:
+            raise KitError(f"launcher activity {LAUNCHER_ACTIVITY} not found")
+        block = match.group(0)
+        stripped = re.sub(
+            r"\s*<intent-filter>(?:(?!</intent-filter>).)*?LAUNCHER.*?</intent-filter>",
+            "",
+            block,
+            flags=re.DOTALL,
+        )
+        if stripped == block:
+            raise KitError(f"no launcher intent-filter on {LAUNCHER_ACTIVITY}")
+        text = text.replace(block, stripped, 1)
+        text, count = re.subn(
+            rf'(<activity[^>]*android:name="{re.escape(GAME_ACTIVITY)}"[^>]*?)/>',
+            lambda found: f'{found.group(1)} android:exported="true">{body}\n        </activity>',
+            text,
+            count=1,
+        )
+        if count != 1:
+            raise KitError(f"game activity {GAME_ACTIVITY} not found in the expected layout")
 
+    # Lepton does not advertise headtracking, so the Frame variant must not
+    # require it or the package manager refuses to install the APK.
+    headtracking_required = "false" if steam_frame else "true"
     text = text.replace(
         "    <application",
         '    <uses-feature android:name="android.hardware.vr.headtracking" '
-        'android:required="true" android:version="1"/>\n    <application',
+        f'android:required="{headtracking_required}" android:version="1"/>\n    <application',
         1,
     )
     return text
@@ -1016,7 +1043,7 @@ def create_manifest_stub(base: Path, destination: Path) -> None:
                 copy_zip_stream(source, info, output)
 
 
-def build_manifest(base: Path, build: Path, tools: Toolchain) -> bytes:
+def build_manifest(base: Path, build: Path, tools: Toolchain, steam_frame: bool = False) -> bytes:
     decoded = build / "manifest-decoded"
     framework = build / "apktool-framework"
     stub = build / "manifest-source.apk"
@@ -1053,7 +1080,9 @@ def build_manifest(base: Path, build: Path, tools: Toolchain) -> bytes:
         failure="apktool manifest decode failed",
     )
     manifest = decoded / "AndroidManifest.xml"
-    manifest.write_text(patch_manifest(manifest.read_text(encoding="utf-8")), encoding="utf-8")
+    manifest.write_text(
+        patch_manifest(manifest.read_text(encoding="utf-8"), steam_frame), encoding="utf-8"
+    )
     run(
         [tools.java, "-jar", tools.apktool, "b", "-p", framework, decoded, "-o", rebuilt],
         failure="apktool manifest rebuild failed",
@@ -1079,6 +1108,7 @@ def rewrite_apk(
     destination: Path,
     replacements: dict[str, bytes],
     additions: dict[str, tuple[bytes, int]],
+    drop_prefixes: tuple[str, ...] = (),
 ) -> None:
     pending = dict(replacements)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1091,6 +1121,8 @@ def rewrite_apk(
             raise KitError(f"refusing to overwrite existing APK entries: {collision}")
         for info in input_apk.infolist():
             if is_signature_entry(info.filename):
+                continue
+            if drop_prefixes and info.filename.lower().startswith(drop_prefixes):
                 continue
             if info.filename in pending:
                 replacement_info = clone_zip_info(info)
@@ -1221,6 +1253,7 @@ def audit_rewrite(
     output: Path,
     replaced: set[str],
     added: set[str],
+    drop_prefixes: tuple[str, ...] = (),
 ) -> None:
     before = apk_info_map(source)
     after = apk_info_map(output)
@@ -1228,6 +1261,10 @@ def audit_rewrite(
         if is_signature_entry(name) or name in replaced:
             continue
         new = after.get(name)
+        if drop_prefixes and name.lower().startswith(drop_prefixes):
+            if new is not None:
+                raise KitError(f"APK audit: {output.name} kept dropped entry {name}")
+            continue
         if new is None:
             raise KitError(f"APK audit: {output.name} lost {name}")
         if (old.CRC, old.file_size, old.compress_type) != (new.CRC, new.file_size, new.compress_type):
@@ -1251,6 +1288,8 @@ def assemble_apks(
     loader_dex: Path,
     openxr_loader: Path,
     personal_update_source: bool = False,
+    steam_frame: bool = False,
+    drop_prefixes: tuple[str, ...] = (),
 ) -> tuple[list[dict], str]:
     for required in (native_lib, loader_dex, openxr_loader, tools.apktool):
         if not required.is_file():
@@ -1260,7 +1299,10 @@ def assemble_apks(
     if sha256_file(openxr_loader) != OPENXR_LOADER_SHA256:
         raise KitError("OpenXR loader hash mismatch; required Khronos 1.1.43 arm64 binary")
 
-    manifest = None if personal_update_source else build_manifest(package.base.path, build, tools)
+    manifest = (
+        None if personal_update_source
+        else build_manifest(package.base.path, build, tools, steam_frame)
+    )
     dex_name = (
         existing_savr_loader_dex(package.base.path)
         if personal_update_source
@@ -1308,7 +1350,7 @@ def assemble_apks(
                 "lib/arm64-v8a/libopenxr_loader.so", loader_bytes, zipfile.ZIP_DEFLATED
             )
         destination = output / output_name(apk)
-        rewrite_apk(apk.path, destination, replacements, additions)
+        rewrite_apk(apk.path, destination, replacements, additions, drop_prefixes)
         patches[destination] = (set(replacements), set(additions))
 
     ensure_keystore(keystore, tools)
@@ -1319,7 +1361,7 @@ def assemble_apks(
         signer = align_sign_verify(destination, keystore, tools)
         output_signers.add(signer)
         replaced, added = patches[destination]
-        audit_rewrite(apk.path, destination, replaced, added)
+        audit_rewrite(apk.path, destination, replaced, added, drop_prefixes)
         output_records.append(
             {
                 "file": destination.name,
@@ -1375,9 +1417,10 @@ def extract_hashed(source, destination: Path) -> tuple[int, str]:
 
 def stage_payload(
     package: GamePackage,
-    audio: AudioTree,
+    audio: AudioTree | None,
     payload: Path,
     build: Path,
+    steam_frame: bool = False,
 ) -> dict:
     staging = payload.with_name(payload.name + ".staging")
     clean_directory(staging, build)
@@ -1407,16 +1450,29 @@ def stage_payload(
     if missing_data:
         raise KitError(f"staged data_main is incomplete: {missing_data}")
 
-    say("==> staging verified audio subset")
-    audio_root = staging / "audio"
-    audio_entries: list[dict] = []
-    for entry in audio.entries:
-        source = audio.root.joinpath(*PurePosixPath(entry["sourcePath"]).parts)
-        destination = audio_root.joinpath(*PurePosixPath(entry["path"]).parts)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-        audio_entries.append({key: value for key, value in entry.items() if key != "sourcePath"})
-    audio_manifest = write_tree_metadata(audio_root, audio_entries, "GTA SA PS2-style audio subset")
+    audio_manifest: dict | None = None
+    if audio is not None:
+        say("==> staging verified audio subset")
+        audio_root = staging / "audio"
+        audio_entries: list[dict] = []
+        for entry in audio.entries:
+            source = audio.root.joinpath(*PurePosixPath(entry["sourcePath"]).parts)
+            # The engine lowercases every data-area path before its relative
+            # fopen (OS_NormalizeFilename), and the Steam Frame's
+            # /sdcard/Documents may be a case-sensitive host filesystem, so the
+            # Frame payload is staged with the case the game actually asks for.
+            staged_path = entry["path"].lower() if steam_frame else entry["path"]
+            destination = audio_root.joinpath(*PurePosixPath(staged_path).parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            record = {key: value for key, value in entry.items() if key != "sourcePath"}
+            record["path"] = staged_path
+            audio_entries.append(record)
+        audio_manifest = write_tree_metadata(
+            audio_root, audio_entries, "GTA SA PS2-style audio subset"
+        )
+    else:
+        say("==> no supplementary audio pack; the payload carries no audio tree")
 
     say("==> staging MIT-licensed VR hand assets")
     hands_source = ROOT / "assets" / "vrhands"
@@ -1439,14 +1495,15 @@ def stage_payload(
     staging.replace(payload)
     result = {
         "data_main": data_manifest,
-        "audio": audio_manifest,
         "vrhands": hands_manifest,
         "totalBytes": (
             data_manifest["totalBytes"]
-            + audio_manifest["totalBytes"]
+            + (audio_manifest["totalBytes"] if audio_manifest else 0)
             + hands_manifest["totalBytes"]
         ),
     }
+    if audio_manifest is not None:
+        result["audio"] = audio_manifest
     (payload / "payload-manifest.json").write_text(
         json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
@@ -1492,7 +1549,16 @@ def resolve_tools(args) -> Toolchain:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--game-package", required=True, help="original APK, split folder, or archive")
-    parser.add_argument("--audio-source", required=True, help="supported sound-mod folder or archive")
+    parser.add_argument(
+        "--audio-source",
+        help="supported sound-mod folder or archive (required unless --steam-frame)",
+    )
+    parser.add_argument(
+        "--steam-frame",
+        action="store_true",
+        help="build the Valve Steam Frame (Lepton) variant: Frame manifest, "
+        "single-APK output, lowercase audio staging, optional audio pack",
+    )
     parser.add_argument("--build-dir", default=str(DEFAULT_BUILD))
     parser.add_argument("--output-dir")
     parser.add_argument("--payload-dir")
@@ -1522,8 +1588,13 @@ def main() -> int:
         raise KitError(f"build directory must not be the source root or its parent: {build}")
 
     game_source = Path(args.game_package).expanduser().resolve()
-    audio_source = Path(args.audio_source).expanduser().resolve()
-    for label, source in (("game package", game_source), ("audio source", audio_source)):
+    if not args.audio_source and not args.steam_frame:
+        raise KitError("--audio-source is required (it is optional only with --steam-frame)")
+    audio_source = Path(args.audio_source).expanduser().resolve() if args.audio_source else None
+    sources = [("game package", game_source)]
+    if audio_source is not None:
+        sources.append(("audio source", audio_source))
+    for label, source in sources:
         if not source.exists():
             raise KitError(f"{label} path does not exist: {source}")
         if trees_overlap(source, build):
@@ -1601,12 +1672,21 @@ def main() -> int:
         tools,
         args.allow_unofficial_source or args.personal_update_source,
     )
-    say("==> validating separate audio mod")
-    audio = validate_audio(
-        audio_source,
-        build / "input-audio",
-        build,
-    )
+    if args.steam_frame and not package.monolithic:
+        raise KitError(
+            "--steam-frame needs a monolithic single APK (Lepton devkit titles take one "
+            "APK); the selected package is a Play split set"
+        )
+    audio: AudioTree | None = None
+    if audio_source is not None:
+        say("==> validating separate audio mod")
+        audio = validate_audio(
+            audio_source,
+            build / "input-audio",
+            build,
+        )
+    else:
+        say("==> no audio pack supplied; the game will use the APK's own audio or run silent")
     if args.validate_only:
         prepare_aircraft_hlod(package.data.path, build)
         say("validation complete; no APK or device was modified")
@@ -1622,15 +1702,24 @@ def main() -> int:
         loader_dex,
         openxr_loader,
         args.personal_update_source,
+        args.steam_frame,
+        # With a PS2 pack the engine would otherwise open the APK's retail
+        # banks first (AAssetManager precedes the cwd fopen fallback), so the
+        # retail sfx/streams are left out of the Frame APK. Config files stay.
+        ("assets/audio/sfx/", "assets/audio/streams/")
+        if (args.steam_frame and audio is not None)
+        else (),
     )
     if args.personal_update_source and output_signer != package.signer_sha256:
         raise KitError(
             "the supplied update keystore does not match the existing personal APK set. "
             f"Input signer: {package.signer_sha256}; output signer: {output_signer}"
         )
-    payload_result = stage_payload(package, audio, payload, build)
+    payload_result = stage_payload(package, audio, payload, build, args.steam_frame)
     result = {
         "formatVersion": 1,
+        "steamFrame": bool(args.steam_frame),
+        "audioSupplied": audio is not None,
         "package": PACKAGE_NAME,
         "versionCode": VERSION_CODE,
         "versionName": VERSION_NAME,
@@ -1645,7 +1734,7 @@ def main() -> int:
         json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     say(f"\nAPK output: {output}")
-    say(f"Quest payload: {payload}")
+    say(f"{'Steam Frame' if args.steam_frame else 'Quest'} payload: {payload}")
     say(f"Build manifest: {build / 'build-manifest.json'}")
     return 0
 

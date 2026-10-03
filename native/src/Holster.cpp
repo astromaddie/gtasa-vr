@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <mutex>
+#include "StoragePaths.h"
 
 namespace savr::holster {
 namespace {
@@ -27,8 +28,7 @@ constexpr int kWeaponStride = 0x20;
 constexpr int kWeaponSlotCount = 13;
 constexpr int kOffActiveWeaponSlot = 0x8DC;
 
-const char* kSettingsPath =
-    "/sdcard/Android/data/com.rockstargames.gtasa/files/vr_holsters.ini";
+const char* kSettingsPath = savr::storage::FilesPath("vr_holsters.ini");
 
 const PointMetadata kMetadata[POINT_COUNT] = {
     {"WAIST LEFT",              -0.27f, -0.58f,  0.07f, false},

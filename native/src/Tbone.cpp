@@ -4,6 +4,7 @@
 #include "Log.h"
 #include <cstdint>
 #include <cstdio>
+#include "StoragePaths.h"
 namespace savr::tbone {
 namespace {
 bool enabled{},previousA{},pressed{},consumed{},claimHeld{},hasPoll{},pending{};
@@ -11,7 +12,7 @@ std::uint32_t readyUntil{},pressUntil{};
 std::uint32_t Now(){return g.CTimer_m_snTimeInMilliseconds?*g.CTimer_m_snTimeInMilliseconds:0;}
 void Trace(const char* text) {
     LOGI("[tbone] %s",text);
-    if(FILE* f=std::fopen("/sdcard/Android/data/com.rockstargames.gtasa/files/vr_snatch.log","a")) {
+    if(FILE* f=std::fopen(savr::storage::Files("vr_snatch.log").c_str(),"a")) {
         std::fprintf(f,"%u %s\n",Now(),text);std::fclose(f);
     }
 }

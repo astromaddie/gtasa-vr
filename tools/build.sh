@@ -8,6 +8,7 @@ umask 077
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 CONFIGURATION="RelWithDebInfo"
 SAVR_DEV=OFF
+SAVR_STEAM_FRAME=OFF
 ANDROID_SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
 JAVA_HOME_ARG="${JAVA_HOME:-}"
 OPENXR_LOADER="${SAVR_OPENXR_LOADER_SO:-}"
@@ -28,6 +29,8 @@ Usage: tools/build.sh [options]
 Build options:
   --configuration NAME       Debug, RelWithDebInfo (default), or Release
   --developer                Enable developer profiler/menu and capture logs
+  --steam-frame              Valve Steam Frame (Lepton) variant: Frame manifest and
+                             controller profiles, relocated storage root, logging on
   --android-sdk DIR          Android SDK root (or ANDROID_SDK_ROOT/ANDROID_HOME)
   --java-home DIR            JDK 21 root (or JAVA_HOME)
   --openxr-loader FILE       Verified Khronos 1.1.43 arm64 libopenxr_loader.so
@@ -36,7 +39,8 @@ Build options:
 Personal package options:
   --package                  Build and verify the personal APK set and payload
   --game-package PATH        Original APK, split folder, or APK archive
-  --audio-source PATH        Supported sound-mod folder or archive
+  --audio-source PATH        Supported sound-mod folder or archive (optional with
+                             --steam-frame: without it the APK's own audio is used)
   --python EXE               Python 3 executable (default: python3/python)
   --apktool FILE             apktool 3.0.3 jar
   --keystore FILE            Personal signing key (default: build/signing)
@@ -173,6 +177,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --configuration|-Configuration) CONFIGURATION="${2:?missing configuration}"; shift 2 ;;
     --developer|-Developer) SAVR_DEV=ON; shift ;;
+    --steam-frame|-SteamFrame) SAVR_STEAM_FRAME=ON; shift ;;
     --android-sdk|-AndroidSdk) ANDROID_SDK="${2:?missing Android SDK}"; shift 2 ;;
     --java-home|-JavaHome) JAVA_HOME_ARG="${2:?missing Java home}"; shift 2 ;;
     --openxr-loader|-OpenXrLoader) OPENXR_LOADER="${2:?missing OpenXR loader}"; shift 2 ;;
@@ -234,13 +239,17 @@ done
 
 if [ "$PACKAGE" -eq 1 ]; then
   [ -n "$GAME_PACKAGE" ] || die "--game-package is required with --package"
-  [ -n "$AUDIO_SOURCE" ] || die "--audio-source is required with --package"
+  if [ -z "$AUDIO_SOURCE" ] && [ "$SAVR_STEAM_FRAME" != "ON" ]; then
+    die "--audio-source is required with --package (optional only with --steam-frame)"
+  fi
   GAME_PACKAGE="$(canonical_existing_path "$GAME_PACKAGE")"
-  AUDIO_SOURCE="$(canonical_existing_path "$AUDIO_SOURCE")"
+  if [ -n "$AUDIO_SOURCE" ]; then
+    AUDIO_SOURCE="$(canonical_existing_path "$AUDIO_SOURCE")"
+  fi
   if paths_overlap "$GAME_PACKAGE" "$BUILD_ROOT"; then
     die "game package must stay outside the disposable build directory: $GAME_PACKAGE"
   fi
-  if paths_overlap "$AUDIO_SOURCE" "$BUILD_ROOT"; then
+  if [ -n "$AUDIO_SOURCE" ] && paths_overlap "$AUDIO_SOURCE" "$BUILD_ROOT"; then
     die "audio source must stay outside the disposable build directory: $AUDIO_SOURCE"
   fi
   PYTHON_EXE="$(find_python)" || die "Python 3.10+ is required for APK assembly"
@@ -289,9 +298,14 @@ echo "==> libsavr.so ($CONFIGURATION, arm64-v8a)"
   -DANDROID_ABI=arm64-v8a \
   -DANDROID_PLATFORM=android-28 \
   "-DSAVR_DEV=$SAVR_DEV" \
+  "-DSAVR_STEAM_FRAME=$SAVR_STEAM_FRAME" \
   "-DCMAKE_BUILD_TYPE=$CONFIGURATION"
 grep -q "^SAVR_DEV:BOOL=$SAVR_DEV$" "$NATIVE_BUILD/CMakeCache.txt" || {
   echo "CMake cache did not retain the requested SAVR_DEV=$SAVR_DEV" >&2
+  exit 1
+}
+grep -q "^SAVR_STEAM_FRAME:BOOL=$SAVR_STEAM_FRAME$" "$NATIVE_BUILD/CMakeCache.txt" || {
+  echo "CMake cache did not retain the requested SAVR_STEAM_FRAME=$SAVR_STEAM_FRAME" >&2
   exit 1
 }
 "$CMAKE" --build "$NATIVE_BUILD"
@@ -328,7 +342,6 @@ fi
 ASSEMBLE_ARGS=(
   "$ROOT/tools/assemble.py"
   --game-package "$GAME_PACKAGE"
-  --audio-source "$AUDIO_SOURCE"
   --build-dir "$BUILD_ROOT"
   --sdk "$ANDROID_SDK"
   --java-home "$JAVA_HOME_ARG"
@@ -338,6 +351,12 @@ ASSEMBLE_ARGS=(
   --openxr-loader "$OPENXR_LOADER"
   --keystore "$KEYSTORE"
 )
+if [ -n "$AUDIO_SOURCE" ]; then
+  ASSEMBLE_ARGS+=(--audio-source "$AUDIO_SOURCE")
+fi
+if [ "$SAVR_STEAM_FRAME" = "ON" ]; then
+  ASSEMBLE_ARGS+=(--steam-frame)
+fi
 if [ "$ALLOW_UNOFFICIAL_SOURCE" -eq 1 ]; then
   ASSEMBLE_ARGS+=(--allow-unofficial-source)
 fi

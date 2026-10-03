@@ -6,13 +6,13 @@
 #include <atomic>
 #include <cstdio>
 #include <mutex>
+#include "StoragePaths.h"
 
 namespace savr::appearance {
 namespace {
 
 constexpr int kDefaultHandSkin = HAND_SKIN_DARK;
-const char* const kPath =
-    "/sdcard/Android/data/com.rockstargames.gtasa/files/vr_appearance.ini";
+const char* const kPath = savr::storage::FilesPath("vr_appearance.ini");
 
 std::once_flag g_initOnce;
 std::mutex g_saveMutex;

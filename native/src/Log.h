@@ -9,7 +9,10 @@
 // Developer builds (-DSAVR_DEV=ON) log everything; player builds stay quiet
 // except for real errors, so a shipped headset does not spend time or storage
 // narrating internals.
-#ifdef SAVR_DEV
+//
+// Steam Frame builds (-DSAVR_STEAM_FRAME=ON) keep LOGI/LOGW on as well: the
+// platform bring-up depends on logcat output from a shipped-style package.
+#if defined(SAVR_DEV) || defined(SAVR_STEAM_FRAME)
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  SAVR_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  SAVR_TAG, __VA_ARGS__)
 #else

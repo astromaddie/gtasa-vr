@@ -15,6 +15,7 @@
 #include <dlfcn.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include "StoragePaths.h"
 
 namespace savr::catalyst {
 namespace {
@@ -48,7 +49,7 @@ void Trace(const char* format, ...) {
     va_list args; va_start(args,format);
     std::vsnprintf(line,sizeof(line),format,args); va_end(args);
     LOGI("[catalyst] %s",line);
-    if(FILE* f=std::fopen("/sdcard/Android/data/com.rockstargames.gtasa/files/vr_catalyst.log","a")) {
+    if(FILE* f=std::fopen(savr::storage::Files("vr_catalyst.log").c_str(),"a")) {
         const unsigned time=g.CTimer_m_snTimeInMilliseconds?*g.CTimer_m_snTimeInMilliseconds:0;
         std::fprintf(f,"%u %s\n",time,line);std::fclose(f);
     }

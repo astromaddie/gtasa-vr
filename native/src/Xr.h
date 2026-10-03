@@ -34,6 +34,9 @@ struct InputState {
     float triggers[2]{};   // left, right
     float grip[2]{};       // left, right squeeze [0,1]
     bool  a{}, b{}, x{}, y{}, menu{};
+    // Steam Frame View button (left controller; Index: left A). Held state;
+    // the system layer in main.cpp derives short press / long press from it.
+    bool  view{};
     bool  l3{}, r3{};      // thumbstick clicks (left, right)
 
     // Laser pointer hit on the theater screen, in [0,1] (u from left, v from top).
