@@ -80,6 +80,16 @@ struct GameSymbols {
     void  (*CCamera_CalculateDerivedValues)(void* self, bool a, bool b);
     void  (*CCamera_CopyCameraMatrixToRWCam)(void* self, bool alsoPlayerCam);
     int   (*CCamera_GetScreenFadeStatus)(void* self);
+    // The screen-fade overlay Render2dStuff/DoFade draws as one full-screen
+    // CSprite2d::DrawRect(CRGBA(red, green, blue, value)) (disasm-verified,
+    // DoFade @0x497ebc). Four consecutive bytes; value 0 = no fade.
+    unsigned char* CDraw_FadeRed;
+    unsigned char* CDraw_FadeGreen;
+    unsigned char* CDraw_FadeBlue;
+    unsigned char* CDraw_FadeValue;
+    // Nonzero: subtitles are drawn before the fade rectangle (so they fade with
+    // the picture), zero: after it.
+    unsigned char* CTheScripts_bDrawSubtitlesBeforeFade;
     void  (*CVisibilityPlugins_SetRenderWareCamera)(void* rwCamera);
     void  (*RwCameraBeginUpdate)(void* rwCamera);
     void  (*RwCameraEndUpdate)(void* rwCamera);

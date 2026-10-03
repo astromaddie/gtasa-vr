@@ -3181,6 +3181,45 @@ bool MobileMenuOpen() {
            *reinterpret_cast<void* const*>(menu + 0x30) != nullptr;
 }
 
+#ifdef SAVR_STEAM_FRAME
+// The 2D layer of a 3D cinema frame (see DrawCinemaOverlay in Xr.cpp). The eye
+// renders hold no 2D; the stock 2D pass lands on the flat surface that is not
+// shown while the cinema screen is up. Story cutscene subtitles reach the
+// player through CMessages::Display -> CHud::m_Message, which the HUD text
+// path already publishes as strings (CHud's CFont queue is deliberately never
+// flushed into a capture), and the fade is a plain global rectangle.
+std::atomic<bool> g_cinema3dOverlayLogged{false};
+void PublishCinemaOverlayState() {
+    // Same two stock calls the gameplay HUD pass makes: they only expand and
+    // copy the message text into CHud, they draw nothing themselves.
+    if (g.CMessages_Display) {
+        g.CMessages_Display(1);
+        g.CMessages_Display(0);
+    }
+    xr::PublishHudText(g.CHud_m_Message, 400, g.CHud_m_BigMessage, 8, 128,
+                       nullptr, 0);
+    xr::PublishMissionTimersText("");
+    unsigned int fade = 0;
+    if (g.CDraw_FadeValue && g.CDraw_FadeRed && g.CDraw_FadeGreen &&
+        g.CDraw_FadeBlue) {
+        fade = static_cast<unsigned int>(*g.CDraw_FadeRed) |
+               (static_cast<unsigned int>(*g.CDraw_FadeGreen) << 8) |
+               (static_cast<unsigned int>(*g.CDraw_FadeBlue) << 16) |
+               (static_cast<unsigned int>(*g.CDraw_FadeValue) << 24);
+    }
+    const bool subtitlesBeforeFade = g.CTheScripts_bDrawSubtitlesBeforeFade &&
+        *g.CTheScripts_bDrawSubtitlesBeforeFade != 0;
+    xr::SetCinema3DOverlay(fade, subtitlesBeforeFade);
+    if (!g_cinema3dOverlayLogged.exchange(true, std::memory_order_relaxed)) {
+        LOGI("[cinema3d] 2d overlay on (fade %s, subtitles %s the fade, "
+             "message source %p)",
+             fade ? "live" : (g.CDraw_FadeValue ? "idle" : "unavailable"),
+             subtitlesBeforeFade ? "under" : "over",
+             static_cast<void*>(g.CHud_m_Message));
+    }
+}
+#endif
+
 bool ShouldRunStereo() {
     if (missionscenes::Theater()) return false;
     // Retail deliberately skips ConstructRenderList/RenderScene at a fully
@@ -3558,7 +3597,10 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
 #ifdef SAVR_STEAM_FRAME
         cinema = stereo && Cinema3DWanted();
         g_cinema3dActive.store(cinema, std::memory_order_relaxed);
-        if (!cinema) g_cinema3dLogged.store(false, std::memory_order_relaxed);
+        if (!cinema) {
+            g_cinema3dLogged.store(false, std::memory_order_relaxed);
+            g_cinema3dOverlayLogged.store(false, std::memory_order_relaxed);
+        }
 #endif
         UpdateTrafficCarCap(stereo);
     }
@@ -22007,6 +22049,7 @@ void OnRenderScene(bool underwater) {
     xr::SetStereoRenderFov(tanX, tanY);
 #ifdef SAVR_STEAM_FRAME
     xr::SetCinema3DPending(cinema3d);
+    if (cinema3d) PublishCinemaOverlayState();
 #endif
     xr::SetStereoEyeTextures(&tex[0][0], &depth[0][0], hudTex,
                              renderedNear, renderedFar,

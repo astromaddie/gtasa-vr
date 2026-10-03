@@ -29,6 +29,10 @@ bool IsSessionFocused();
 void SetCinema3DPending(bool on);
 // The View-hold recentre re-anchors the cinema screen on the next frame.
 void NotifyCinemaRecenter();
+// The 2D layer for the NEXT cinema publication: the screen-fade colour/alpha
+// (CDraw::FadeRed/Green/Blue/FadeValue, packed r | g<<8 | b<<16 | a<<24) and
+// whether subtitles are drawn before the fade (so they fade with the picture).
+void SetCinema3DOverlay(unsigned int fadeRgba, bool subtitlesBeforeFade);
 // Distance between the runtime's two eye poses, false without a plausible one.
 bool GetIpdMeters(float* ipdOut);
 #endif

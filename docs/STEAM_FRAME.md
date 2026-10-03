@@ -44,8 +44,10 @@ builds come out the same as before.
   selectable in the VR menu under CUTSCENES. A settings file from before this
   default is moved to CINEMA 3D once. `Cinema3DDepth=` in vr_locomotion.ini
   (0.10 to 0.90, default 0.55) sets how far behind the screen the far
-  background sits. Subtitles are not drawn on the 3D screen yet; they only
-  exist on the flat surface, so CINEMA (flat) shows them.
+  background sits. The screen fade and the subtitles are put back on the 3D
+  screen at zero parallax: the fade from the game's own fade colour/alpha
+  bytes, the subtitles from the published message text in a band at the
+  bottom.
 - **Focus guard.** The game's pause menu asks Rockstar's SDK for an app-store
   review prompt, and under Lepton that window takes the Android focus away
   and the game stops drawing for good. The review request and external links

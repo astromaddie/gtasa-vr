@@ -658,6 +658,10 @@ constexpr float kCinemaScreenH = 1.44f;
 constexpr float kCinemaDistance = 2.0f;
 std::atomic<bool>     g_stereoCinema[kStereoSets]{};
 std::atomic<bool>     g_pendingCinema{false};
+std::atomic<unsigned> g_stereoCinemaFade[kStereoSets]{};
+std::atomic<bool>     g_stereoCinemaSubsBefore[kStereoSets]{};
+std::atomic<unsigned> g_pendingCinemaFade{0};
+std::atomic<bool>     g_pendingCinemaSubsBefore{false};
 std::atomic<unsigned> g_cinemaRecenterSerial{0};
 // Present-thread state: the screen stays where the cutscene started.
 struct CinemaAnchor {
@@ -5308,6 +5312,11 @@ void SetCinema3DPending(bool on) {
     g_pendingCinema.store(on, std::memory_order_relaxed);
 }
 
+void SetCinema3DOverlay(unsigned int fadeRgba, bool subtitlesBeforeFade) {
+    g_pendingCinemaFade.store(fadeRgba, std::memory_order_relaxed);
+    g_pendingCinemaSubsBefore.store(subtitlesBeforeFade, std::memory_order_relaxed);
+}
+
 void NotifyCinemaRecenter() {
     g_cinemaRecenterSerial.fetch_add(1, std::memory_order_relaxed);
 }
@@ -6274,6 +6283,11 @@ void SetStereoEyeTextures(const unsigned int* tex, const unsigned int* depth,
 #ifdef SAVR_STEAM_FRAME
     g_stereoCinema[ws].store(g_pendingCinema.load(std::memory_order_relaxed),
                              std::memory_order_relaxed);
+    g_stereoCinemaFade[ws].store(g_pendingCinemaFade.load(std::memory_order_relaxed),
+                                 std::memory_order_relaxed);
+    g_stereoCinemaSubsBefore[ws].store(
+        g_pendingCinemaSubsBefore.load(std::memory_order_relaxed),
+        std::memory_order_relaxed);
 #endif
 
     if (StereoProducerFenceRequested() &&
@@ -11528,6 +11542,138 @@ void CommitStereoRepeatProjectionCache(
 }
 
 #ifdef SAVR_STEAM_FRAME
+// The game's 2D layer for a cinema frame, composited into the finished eye
+// image at the same place in BOTH eyes (the eye image already is the cinema
+// window, so identical pixels = zero parallax = on the screen plane). The
+// eye render contains no 2D at all, so the two pieces that matter in a
+// story cutscene are rebuilt from what the game exposes:
+//  - the screen fade, from CDraw::FadeRed/Green/Blue/FadeValue (the exact
+//    rectangle DoFade draws), blended with SRC_ALPHA / ONE_MINUS_SRC_ALPHA on
+//    the straight colour, i.e. what the game's own DrawRect does;
+//  - subtitles, from the published CHud::m_Message string drawn with the APK
+//    font (outlined, straight-alpha RGBA), in a fixed band at the bottom.
+// Subtitle order against the fade follows CTheScripts::bDrawSubtitlesBeforeFade.
+const char* kCinemaOverlayFragmentShader = R"(#version 300 es
+precision highp float;
+in vec2 vUv;
+uniform sampler2D uTexture;
+uniform vec4 uDestinationRect;
+uniform vec4 uTint;
+uniform float uUseTexture;
+out vec4 outColor;
+void main() {
+    if (uUseTexture < 0.5) {
+        outColor = uTint;
+        return;
+    }
+    vec2 screenUv = vec2(vUv.x, 1.0 - vUv.y);
+    vec2 local = (screenUv - uDestinationRect.xy) / uDestinationRect.zw;
+    if (local.x < 0.0 || local.y < 0.0 || local.x > 1.0 || local.y > 1.0)
+        discard;
+    outColor = texture(uTexture, local);
+}
+)";
+
+GLuint g_cinemaOverlayProgram = 0;
+GLint  g_cinemaOverlayTextureUniform = -1;
+GLint  g_cinemaOverlayDestUniform = -1;
+GLint  g_cinemaOverlayTintUniform = -1;
+GLint  g_cinemaOverlayUseTextureUniform = -1;
+
+bool BuildCinemaOverlayProgram() {
+    if (g_cinemaOverlayProgram != 0) return true;
+    static bool failed = false;
+    if (failed || !BuildHudCompositeProgram()) return false;   // shares its VAO/sampler
+    GLuint vertex = CompileShader(GL_VERTEX_SHADER, kVertexShader);
+    GLuint fragment = CompileShader(GL_FRAGMENT_SHADER, kCinemaOverlayFragmentShader);
+    if (!vertex || !fragment) {
+        if (vertex) glDeleteShader(vertex);
+        if (fragment) glDeleteShader(fragment);
+        failed = true;
+        LOGE("[cinema3d] 2d overlay shader build failed");
+        return false;
+    }
+    GLuint program = glCreateProgram();
+    glAttachShader(program, vertex);
+    glAttachShader(program, fragment);
+    glLinkProgram(program);
+    glDeleteShader(vertex);
+    glDeleteShader(fragment);
+    GLint linked = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    if (linked != GL_TRUE) {
+        glDeleteProgram(program);
+        failed = true;
+        LOGE("[cinema3d] 2d overlay shader link failed");
+        return false;
+    }
+    g_cinemaOverlayTextureUniform = glGetUniformLocation(program, "uTexture");
+    g_cinemaOverlayDestUniform = glGetUniformLocation(program, "uDestinationRect");
+    g_cinemaOverlayTintUniform = glGetUniformLocation(program, "uTint");
+    g_cinemaOverlayUseTextureUniform = glGetUniformLocation(program, "uUseTexture");
+    g_cinemaOverlayProgram = program;
+    return true;
+}
+
+// Subtitle band, as fractions of the screen (top-left origin). The text raster
+// is 2048x512 (4:1); the eye image is stretched to the 16:9 screen, so the
+// height fraction is chosen to give the text a 4:1 box on the screen itself.
+constexpr float kCinemaSubtitleX = 0.14f;
+constexpr float kCinemaSubtitleW = 0.72f;
+constexpr float kCinemaSubtitleH = kCinemaSubtitleW * (16.0f / 9.0f) / 4.0f;
+constexpr float kCinemaSubtitleY = 0.97f - kCinemaSubtitleH;
+
+void DrawCinemaOverlay(int targetWidth, int targetHeight, unsigned fadeRgba,
+                       bool subtitlesBeforeFade) {
+    if (!BuildCinemaOverlayProgram()) return;
+    const HudTextState textState = SnapshotHudText();
+    std::u16string smallText = textState.help;
+    if (!textState.brief.empty()) {
+        if (!smallText.empty()) smallText.append(u"\n\n");
+        smallText.append(textState.brief);
+    }
+    UpdateHudTextTexture(g_briefTextTexture, smallText, 0, textState.revision << 4);
+
+    glViewport(0, 0, targetWidth, targetHeight);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_SCISSOR_TEST);
+    glEnable(GL_BLEND);
+    glBlendEquation(GL_FUNC_ADD);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(g_cinemaOverlayProgram);
+    glBindVertexArray(s.hudCompositeVertexArray);
+    glActiveTexture(GL_TEXTURE0);
+    glBindSampler(0, s.hudCompositeSampler);
+    glUniform1i(g_cinemaOverlayTextureUniform, 0);
+
+    const auto drawText = [&] {
+        if (!g_briefTextTexture.visible || !g_briefTextTexture.texture) return;
+        glBindTexture(GL_TEXTURE_2D, g_briefTextTexture.texture);
+        glUniform1f(g_cinemaOverlayUseTextureUniform, 1.0f);
+        glUniform4f(g_cinemaOverlayDestUniform, kCinemaSubtitleX, kCinemaSubtitleY,
+                    kCinemaSubtitleW, kCinemaSubtitleH);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+    };
+    const auto drawFade = [&] {
+        const unsigned alpha = (fadeRgba >> 24) & 0xffu;
+        if (alpha == 0) return;
+        glUniform1f(g_cinemaOverlayUseTextureUniform, 0.0f);
+        glUniform4f(g_cinemaOverlayTintUniform,
+                    static_cast<float>(fadeRgba & 0xffu) / 255.0f,
+                    static_cast<float>((fadeRgba >> 8) & 0xffu) / 255.0f,
+                    static_cast<float>((fadeRgba >> 16) & 0xffu) / 255.0f,
+                    static_cast<float>(alpha) / 255.0f);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+    };
+    if (subtitlesBeforeFade) { drawText(); drawFade(); }
+    else                     { drawFade(); drawText(); }
+
+    glDisable(GL_BLEND);
+    glBindSampler(0, 0);
+}
+
 // Describe the cinema screen to the compositor: per eye, the screen's
 // (yaw-only) orientation, that eye's own position this frame, and the field of
 // view the screen rectangle subtends from there. SteamVR showed per-eye quads
@@ -11838,6 +11984,10 @@ bool RenderStereoEyeProjection(XrCompositionLayerProjection& layer,
             (hudSource||g_signalPercent.load(std::memory_order_relaxed)>=0))
             DrawHudComposite(hudSource,chain.width,chain.height,
                              hud::ShouldRenderClassicHud(),e);
+        if (cinemaSlot)
+            DrawCinemaOverlay(chain.width, chain.height,
+                              g_stereoCinemaFade[set].load(std::memory_order_relaxed),
+                              g_stereoCinemaSubsBefore[set].load(std::memory_order_relaxed));
         if (!cinemaSlot) DrawHandsForEye(
             rp, e, chain.width, chain.height,
             g_stereoEyeDepth[set][e].load(std::memory_order_relaxed),
