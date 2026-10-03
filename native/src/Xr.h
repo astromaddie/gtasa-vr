@@ -23,6 +23,16 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs);
 bool IsSessionRunning();
 bool IsSessionFocused();
 
+#ifdef SAVR_STEAM_FRAME
+// 3D cinema (story cutscenes). Mark the NEXT SetStereoEyeTextures publication
+// as a cinema frame (two parallel off-axis eye renders of the director camera).
+void SetCinema3DPending(bool on);
+// The View-hold recentre re-anchors the cinema screen on the next frame.
+void NotifyCinemaRecenter();
+// Distance between the runtime's two eye poses, false without a plausible one.
+bool GetIpdMeters(float* ipdOut);
+#endif
+
 // Heartbeat of the present loop, for main.cpp's stall watchdog. `stage` is
 // 0 never run, 1 polling, 2 xrWaitFrame, 3 xrBeginFrame, 4 frame work,
 // 5 xrEndFrame, 6 frame done, 7 idle (session not running). `stageAgeMs` is how

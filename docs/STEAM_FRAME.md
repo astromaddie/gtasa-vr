@@ -35,9 +35,17 @@ builds come out the same as before.
   sticks no longer recentres.
 - **Pause and cutscenes.** Menu opens the game's pause menu in play. During a
   story cutscene, hold Menu for half a second to skip it (a tap does nothing).
-  Story cutscenes default to the framed CINEMA screen; CINEMATIC (head-tracked
-  director camera) and FIRST PERSON stay selectable in the VR menu under
-  CUTSCENES. A settings file from before this default is moved to CINEMA once.
+  Story cutscenes default to CINEMA 3D: a 2.56 x 1.44 m screen 2 m ahead,
+  fixed in the room where the cutscene starts (a View-hold recentre moves it),
+  showing the director camera in stereo from two parallel off-axis cameras
+  converged 1.5 m in front of the camera. It goes out as a projection layer
+  whose per-eye fov is the screen rectangle seen from that eye. CINEMA (flat
+  screen), CINEMATIC (head-tracked director camera) and FIRST PERSON stay
+  selectable in the VR menu under CUTSCENES. A settings file from before this
+  default is moved to CINEMA 3D once. `Cinema3DDepth=` in vr_locomotion.ini
+  (0.10 to 0.90, default 0.55) sets how far behind the screen the far
+  background sits. Subtitles are not drawn on the 3D screen yet; they only
+  exist on the flat surface, so CINEMA (flat) shows them.
 - **Focus guard.** The game's pause menu asks Rockstar's SDK for an app-store
   review prompt, and under Lepton that window takes the Android focus away
   and the game stops drawing for good. The review request and external links

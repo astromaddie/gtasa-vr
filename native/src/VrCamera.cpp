@@ -1496,6 +1496,18 @@ constexpr float kVrFovX    = 105.0f;
 constexpr float kVrHalfIpd = 0.032f;   // ~64 mm total; must match the present side
 
 std::atomic<bool> g_stereoActive{false};
+// Zero-parallax plane: the camera-space distance whose window maps exactly onto
+// the screen. Must agree with the screen width in Xr.cpp (kCinemaScreenW).
+// (Defined for every build; only the Steam Frame build ever activates it.)
+constexpr float kCinemaConvergenceM = 1.5f;
+constexpr float kCinemaScreenWidthM = 2.56f;
+constexpr float kCinemaScreenAspect = 16.0f / 9.0f;
+#ifdef SAVR_STEAM_FRAME
+// 3D cinema (story cutscene on the framed stereo screen). Set by the camera
+// hook each frame; OnRenderScene recomputes it from the same predicate.
+std::atomic<bool> g_cinema3dActive{false};
+std::atomic<bool> g_cinema3dLogged{false};
+#endif
 // True while the freefall head-down dive (right trigger) is held; the camera
 // pitches down with the body so the player looks along the dive. Declared
 // this early because the camera hook consumes it.
@@ -2572,6 +2584,19 @@ constexpr float kTrafficTerminalCleanupNearM = 15.0f;
 
 void UpdateStaticCullCone() {
     g_staticCullCone = {};
+#ifdef SAVR_STEAM_FRAME
+    if (g_cinema3dActive.load(std::memory_order_relaxed)) {
+        // 3D cinema: both eyes look along the director camera, so cull around
+        // the director's forward axis (the 70 degree half-angle cone is far
+        // wider than the screen). No head pose is involved.
+        if (!g_vrBaseValid) return;
+        const V3 forward = Normalized(g_vrBase.forward);
+        if (!Finite(forward) || Dot(forward, forward) < 0.99f) return;
+        g_staticCullCone.forward = forward;
+        g_staticCullCone.valid = true;
+        return;
+    }
+#endif
     if (!g_vrBaseValid || !g_origin.valid) return;
     // The aircraft render list must not rotate with the pilot's head.  A live
     // HMD cone made the same tree/building alternate between detail and HLOD
@@ -3316,10 +3341,23 @@ bool ScriptedCutsceneRunning() {
 
 bool CutsceneCameraControlsActiveInternal() {
     if (missionscenes::Theater()) return false;
-    if (FormalCutsceneRunning()) return locomotion::CutsceneMode() != 0;
+    if (FormalCutsceneRunning()) {
+        const int mode = locomotion::CutsceneMode();
+        // CINEMA 3D has one fixed camera: the director's.
+        return mode == 1 || mode == 2;
+    }
     if (ScriptedCutsceneRunning()) return locomotion::GameCutsceneMode() != 0;
     return false;
 }
+
+#ifdef SAVR_STEAM_FRAME
+// Story cutscene on the 3D cinema screen. ShouldRunStereo() already lets any
+// non-flat CutsceneMode through; this picks the framed stereo presentation.
+bool Cinema3DWanted() {
+    if (missionscenes::Theater()) return false;
+    return FormalCutsceneRunning() && locomotion::CutsceneMode() == 3;
+}
+#endif
 
 bool ActorHasPosedHead(void* actor) {
     if (!actor || !g.GetAnimHierarchyFromSkinClump || !g.RpHAnimIDGetIndex ||
@@ -3513,11 +3551,40 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
     static thread_local bool inHook = false;
 
     bool stereo = false;
+    bool cinema = false;
     if (!inHook) {
         stereo = ShouldRunStereo();
         g_stereoActive.store(stereo, std::memory_order_relaxed);
+#ifdef SAVR_STEAM_FRAME
+        cinema = stereo && Cinema3DWanted();
+        g_cinema3dActive.store(cinema, std::memory_order_relaxed);
+        if (!cinema) g_cinema3dLogged.store(false, std::memory_order_relaxed);
+#endif
         UpdateTrafficCarCap(stereo);
     }
+
+#ifdef SAVR_STEAM_FRAME
+    if (cinema && !inHook && self == g.TheCamera) {
+        // 3D cinema: the camera stays exactly where the director put it. No
+        // head pose, no FOV override; OnRenderScene splits it into the two
+        // off-axis eye cameras. Culling follows the director (g_vrBase).
+        inHook = true;
+        RefreshCutsceneCameraState();   // clears any staged actor: only the director is used
+        const CamBasis director = ReadCam(reinterpret_cast<std::uintptr_t>(self));
+        if (Finite(director.right) && Finite(director.forward) &&
+            Finite(director.up) && Finite(director.pos)) {
+            g_vrBase = director;
+            g_vrBaseValid = true;
+        }
+        // The present side needs a render pose for the ring slot to be usable;
+        // the screen geometry itself is rebuilt from live eye poses.
+        float hp[3], hq[4];
+        if (xr::GetHeadPose(hp, hq)) xr::SetRenderHeadPose(hp, hq);
+        inHook = false;
+        g_origCopy(self, alsoPlayerCam);
+        return;
+    }
+#endif
 
     if (stereo && !inHook && self == g.TheCamera) {
         inHook = true;
@@ -21154,6 +21221,11 @@ void OnRenderScene(bool underwater) {
     inHook = true;
     const std::uintptr_t camU = reinterpret_cast<std::uintptr_t>(g.TheCamera);
     CamBasis base = ReadCam(camU);
+#ifdef SAVR_STEAM_FRAME
+    const bool cinema3d = Cinema3DWanted();
+#else
+    constexpr bool cinema3d = false;
+#endif
     // A late native camera copy may contain the ped's heading. Rebuild the
     // photographic eye basis from the actual head pose before narrowing it.
     // Zoom affects only the frustum; it never moves or rotates this anchor.
@@ -21168,12 +21240,12 @@ void OnRenderScene(bool underwater) {
     const bool scopedFrame = scopeaim::IsActive();
     const bool hideChuteWeapons =
         g_hideWeaponsForChuteDeploy.load(std::memory_order_relaxed);
-    auto queueWeapon = [scopedFrame,hideChuteWeapons](void* clump,
+    auto queueWeapon = [scopedFrame,hideChuteWeapons,cinema3d](void* clump,
                                                       const RwMat& matrix) {
         // reference Quest build lets the optic own the complete view. Keep all tracked weapon
         // poses current for firing/ownership, but do not bake held, flying or
         // holstered models into a zoomed eye texture.
-        if (scopedFrame || hideChuteWeapons || !clump ||
+        if (cinema3d || scopedFrame || hideChuteWeapons || !clump ||
             g_pendingWeaponCount >= kMaxPendingWeapons) return;
         g_pendingWeapons[g_pendingWeaponCount++] = PendingWeaponDraw{clump, matrix};
     };
@@ -21486,6 +21558,39 @@ void OnRenderScene(bool underwater) {
     const float savedViewWindowY=*reinterpret_cast<float*>(scc+0x94);
     const float savedRecipViewWindowX=*reinterpret_cast<float*>(scc+0x98);
     const float savedRecipViewWindowY=*reinterpret_cast<float*>(scc+0x9c);
+    // RwCamera viewOffset (+0xA0/+0xA4): _rwOpenGLCameraBeginUpdate feeds it to
+    // glFrustum as left/right = -offset*near -/+ viewWindow*near (disasm-verified
+    // @0x774798), i.e. it slides the window centre by -offset in tangent units.
+    const float savedViewOffsetX=*reinterpret_cast<float*>(scc+0xA0);
+    const float savedViewOffsetY=*reinterpret_cast<float*>(scc+0xA4);
+    // 3D cinema parameters. The window keeps the horizontal extent of the game's
+    // own cutscene view (so the stock culling frustum, built from that same FOV,
+    // still covers everything visible) and crops to 16:9, which is what the
+    // widescreen letterbox did on the phone. Baseline b solves "far field is
+    // depth*IPD apart on the screen": b = depth*ipd*2*C/(sx*W), sx = 1/tanX.
+    float cinemaTanX = 0.0f, cinemaTanY = 0.0f, cinemaHalfBaseline = 0.0f;
+#ifdef SAVR_STEAM_FRAME
+    if (cinema3d) {
+        cinemaTanX = savedViewWindowX;
+        if (!std::isfinite(cinemaTanX) || cinemaTanX < 0.2f || cinemaTanX > 3.0f)
+            cinemaTanX = std::tan(35.0f * 3.14159265f / 180.0f);
+        cinemaTanY = cinemaTanX / kCinemaScreenAspect;
+        float ipd = 0.063f;
+        const bool haveIpd = xr::GetIpdMeters(&ipd);
+        const float depth = locomotion::Cinema3DDepth();
+        const float sx = 1.0f / cinemaTanX;
+        const float baseline = depth * ipd * 2.0f * kCinemaConvergenceM /
+                               (sx * kCinemaScreenWidthM);
+        cinemaHalfBaseline = 0.5f * baseline;
+        if (!g_cinema3dLogged.exchange(true, std::memory_order_relaxed)) {
+            LOGI("[cinema3d] depth %.2f ipd %.1f mm%s baseline %.1f mm C %.2f m "
+                 "window tan %.3fx%.3f (fovX %.1f deg) screen %.2f m",
+                 depth, ipd * 1000.0f, haveIpd ? "" : " (fallback)",
+                 baseline * 1000.0f, kCinemaConvergenceM, cinemaTanX, cinemaTanY,
+                 2.0f * std::atan(cinemaTanX) * 57.2957795f, kCinemaScreenWidthM);
+        }
+    }
+#endif
     const float requestedFarClip = StaticVisibilityFarFloorM();
     // GameplayRwCamera and SceneRwCamera normally alias, but do not rely on
     // that undocumented relationship. CopyCameraMatrixToRWCam can restore the
@@ -21611,7 +21716,8 @@ void OnRenderScene(bool underwater) {
         // render must land each eye texture at the matching physical position, or
         // near objects (the weapon) double badly while far scenery only shimmers.
         const float sign = (e == 0) ? 1.0f : -1.0f;          // 0 = left, 1 = right
-        eye.pos = base.pos + base.right * (sign * kVrHalfIpd);
+        eye.pos = base.pos + base.right *
+            (sign * (cinema3d ? cinemaHalfBaseline : kVrHalfIpd));
         const float renderFovX = g.CDraw_ms_fFOV &&
                 std::isfinite(*g.CDraw_ms_fFOV) &&
                 *g.CDraw_ms_fFOV >= 5.0f && *g.CDraw_ms_fFOV < 160.0f
@@ -21625,6 +21731,9 @@ void OnRenderScene(bool underwater) {
         // Stay safely beyond the clip plane while remaining in front of every
         // world/weapon fragment that could otherwise consume hidden pixels.
         g_hiddenAreaMaskDepth = std::max(0.075f, eyeNearClip * 1.5f);
+        // The hidden-area mask models the HMD lens; the cinema window is not
+        // head-locked, so it must not stamp the lens shape into the picture.
+        if (cinema3d) g_hiddenAreaMaskTanX = g_hiddenAreaMaskTanY = 0.0f;
         WriteCam(camU, eye);
         if (g.CCamera_CalculateDerivedValues)
             g.CCamera_CalculateDerivedValues(g.TheCamera, false, true);
@@ -21636,9 +21745,10 @@ void OnRenderScene(bool underwater) {
         // so the world cannot inherit the landscape squeeze. These are the
         // stock RwCamera viewWindow/recipViewWindow fields immediately before
         // near/far/fog at +A8/+AC/+B0.
-        const float eyeViewX=std::tan(
+        const float eyeViewX=cinema3d ? cinemaTanX : std::tan(
             renderFovX*0.5f*3.14159265f/180.0f);
-        const float eyeViewY=eyeViewX*static_cast<float>(g_eyeRasterH)/
+        const float eyeViewY=cinema3d ? cinemaTanY : eyeViewX*
+            static_cast<float>(g_eyeRasterH)/
             static_cast<float>(std::max(1,g_eyeRasterW));
         if (std::isfinite(eyeViewX) && std::isfinite(eyeViewY) &&
             eyeViewX>0.01f && eyeViewY>0.01f) {
@@ -21646,6 +21756,15 @@ void OnRenderScene(bool underwater) {
             *reinterpret_cast<float*>(scc+0x94)=eyeViewY;
             *reinterpret_cast<float*>(scc+0x98)=1.0f/eyeViewX;
             *reinterpret_cast<float*>(scc+0x9c)=1.0f/eyeViewY;
+        }
+        if (cinema3d) {
+            // Off-axis frustum: the eye sits ex to the image-right of the
+            // director camera (left eye: negative) and its window must still
+            // pass through the same rectangle on the plane C, so the window
+            // centre moves by -ex/C; the RwCamera offset is minus that.
+            const float ex = (e == 0 ? -1.0f : 1.0f) * cinemaHalfBaseline;
+            *reinterpret_cast<float*>(scc+0xA0) = ex / kCinemaConvergenceM;
+            *reinterpret_cast<float*>(scc+0xA4) = 0.0f;
         }
 
         // RenderScene slightly biases the camera near plane internally. Reset the
@@ -21867,6 +21986,8 @@ void OnRenderScene(bool underwater) {
     *reinterpret_cast<float*>(scc+0x94)=savedViewWindowY;
     *reinterpret_cast<float*>(scc+0x98)=savedRecipViewWindowX;
     *reinterpret_cast<float*>(scc+0x9c)=savedRecipViewWindowY;
+    *reinterpret_cast<float*>(scc+0xA0)=savedViewOffsetX;
+    *reinterpret_cast<float*>(scc+0xA4)=savedViewOffsetY;
     if (mobileFog.valid)
         ApplyMobileDistanceFog(mobileFog, mobileFog.start, mobileFog.end);
 
@@ -21884,6 +22005,9 @@ void OnRenderScene(bool underwater) {
     const float tanX = std::tan(kVrFovX * 0.5f * 3.14159265f / 180.0f);
     const float tanY = tanX * static_cast<float>(g_eyeRasterH) / static_cast<float>(g_eyeRasterW);
     xr::SetStereoRenderFov(tanX, tanY);
+#ifdef SAVR_STEAM_FRAME
+    xr::SetCinema3DPending(cinema3d);
+#endif
     xr::SetStereoEyeTextures(&tex[0][0], &depth[0][0], hudTex,
                              renderedNear, renderedFar,
                              g_recordCounter, g_eyeRasterW, g_eyeRasterH);
@@ -29981,6 +30105,9 @@ void RequestRecenter() {
     g_origin.valid=false;
     g_vrBaseValid=false;
     g_staticCullCone = {};
+#ifdef SAVR_STEAM_FRAME
+    xr::NotifyCinemaRecenter();   // the 3D cinema screen re-anchors to the new heading
+#endif
     LOGI("[locomotion] recenter requested");
 }
 

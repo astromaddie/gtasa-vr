@@ -647,6 +647,28 @@ constexpr int         kPanelW = 512, kPanelH = 512;   // FPS/profiler + cheat-me
 // is the actual cure for the rotation ghosting. Guarded by g_headPoseMutex.
 XrPosef g_stereoRenderPose[kStereoSets]{};
 bool    g_stereoRenderPoseValid[kStereoSets] = {};
+#ifdef SAVR_STEAM_FRAME
+// 3D cinema (story cutscenes, Steam Frame). A ring slot flagged here holds two
+// parallel off-axis eye renders of the director camera whose image rectangle IS
+// the cinema screen; RenderFrame submits them as a projection layer whose
+// per-eye pose/fov describe that screen as seen from the real eyes, and never
+// draws head-locked content (hands, HUD, scope) over them.
+constexpr float kCinemaScreenW = 2.56f;
+constexpr float kCinemaScreenH = 1.44f;
+constexpr float kCinemaDistance = 2.0f;
+std::atomic<bool>     g_stereoCinema[kStereoSets]{};
+std::atomic<bool>     g_pendingCinema{false};
+std::atomic<unsigned> g_cinemaRecenterSerial{0};
+// Present-thread state: the screen stays where the cutscene started.
+struct CinemaAnchor {
+    bool valid{false};
+    unsigned serial{0};
+    float yaw{0.0f};
+    XrQuaternionf orientation{0.0f, 0.0f, 0.0f, 1.0f};
+    XrVector3f centre{0.0f, 0.0f, 0.0f};
+};
+CinemaAnchor g_cinemaAnchor;
+#endif
 MobileColorState g_pendingMobileColor{};
 MobileColorState g_stereoMobileColor[kStereoSets]{};
 // Hand poses baked into each set, captured when that set's eye textures were
@@ -5281,6 +5303,28 @@ void GetHandPoses(HandPose out[2]) {
     out[1] = g_headPoseValid?g_handPose[1]:HandPose{};
 }
 
+#ifdef SAVR_STEAM_FRAME
+void SetCinema3DPending(bool on) {
+    g_pendingCinema.store(on, std::memory_order_relaxed);
+}
+
+void NotifyCinemaRecenter() {
+    g_cinemaRecenterSerial.fetch_add(1, std::memory_order_relaxed);
+}
+
+bool GetIpdMeters(float* ipdOut) {
+    std::lock_guard<std::mutex> lock(g_headPoseMutex);
+    if (!g_headPoseValid || !ipdOut) return false;
+    const float dx = g_eyePose[1].position.x - g_eyePose[0].position.x;
+    const float dy = g_eyePose[1].position.y - g_eyePose[0].position.y;
+    const float dz = g_eyePose[1].position.z - g_eyePose[0].position.z;
+    const float ipd = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (!(ipd > 0.045f && ipd < 0.085f)) return false;
+    *ipdOut = ipd;
+    return true;
+}
+#endif
+
 bool GetHeadPose(float positionOut[3], float orientationOut[4]) {
     return GetHeadPose(positionOut,orientationOut,nullptr);
 }
@@ -6227,6 +6271,10 @@ void SetStereoEyeTextures(const unsigned int* tex, const unsigned int* depth,
     g_stereoWaterDepth[ws].store(
         g_pendingWaterDepth.load(std::memory_order_relaxed),
         std::memory_order_relaxed);
+#ifdef SAVR_STEAM_FRAME
+    g_stereoCinema[ws].store(g_pendingCinema.load(std::memory_order_relaxed),
+                             std::memory_order_relaxed);
+#endif
 
     if (StereoProducerFenceRequested() &&
         !g_stereoProducerSyncPoisoned.load(std::memory_order_acquire)) {
@@ -11479,6 +11527,71 @@ void CommitStereoRepeatProjectionCache(
     g_stereoRepeatProjectionCache = next;
 }
 
+#ifdef SAVR_STEAM_FRAME
+// Describe the cinema screen to the compositor: per eye, the screen's
+// (yaw-only) orientation, that eye's own position this frame, and the field of
+// view the screen rectangle subtends from there. SteamVR showed per-eye quads
+// (eyeVisibility) flat on the Frame, so the screen goes out as a projection
+// layer; the eye images were rendered through windows that map exactly onto
+// the rectangle, so image and room agree for any head position. Only the
+// pose and fov of `views` are written. Returns false when there is no valid
+// head, or an eye is not in front of the screen.
+bool ApplyCinemaViewGeometry(XrCompositionLayerProjectionView views[2]) {
+    XrPosef head{}, eyes[2]{};
+    {
+        std::lock_guard<std::mutex> lock(g_headPoseMutex);
+        if (!g_headPoseValid) return false;
+        head = g_headPose;
+        eyes[0] = g_eyePose[0];
+        eyes[1] = g_eyePose[1];
+    }
+    const unsigned serial = g_cinemaRecenterSerial.load(std::memory_order_relaxed);
+    if (!g_cinemaAnchor.valid || g_cinemaAnchor.serial != serial) {
+        // Forward of the head, flattened onto the floor plane: rotate -Z by q.
+        const XrQuaternionf& q = head.orientation;
+        const float fx = -2.0f * (q.x * q.z + q.w * q.y);
+        const float fz = -(1.0f - 2.0f * (q.x * q.x + q.y * q.y));
+        float yaw = g_cinemaAnchor.valid ? g_cinemaAnchor.yaw : 0.0f;
+        if (fx * fx + fz * fz > 0.01f) yaw = std::atan2(-fx, -fz);
+        g_cinemaAnchor.valid = true;
+        g_cinemaAnchor.serial = serial;
+        g_cinemaAnchor.yaw = yaw;
+        g_cinemaAnchor.orientation = {0.0f, std::sin(yaw * 0.5f), 0.0f,
+                                      std::cos(yaw * 0.5f)};
+        g_cinemaAnchor.centre = {head.position.x - std::sin(yaw) * kCinemaDistance,
+                                 head.position.y,
+                                 head.position.z - std::cos(yaw) * kCinemaDistance};
+        LOGI("[cinema3d] anchor yaw %.1f deg, screen %.2fx%.2f m centre (%.2f %.2f %.2f) "
+             "%.1f m ahead (recenter serial %u)",
+             yaw * 57.2957795f, kCinemaScreenW, kCinemaScreenH,
+             g_cinemaAnchor.centre.x, g_cinemaAnchor.centre.y,
+             g_cinemaAnchor.centre.z, kCinemaDistance, serial);
+    }
+    const XrQuaternionf& q = g_cinemaAnchor.orientation;
+    const float c = q.w * q.w - q.y * q.y;   // cos(yaw)
+    const float sn = 2.0f * q.w * q.y;       // sin(yaw)
+    for (int e = 0; e < 2; ++e) {
+        const float dx = eyes[e].position.x - g_cinemaAnchor.centre.x;
+        const float dy = eyes[e].position.y - g_cinemaAnchor.centre.y;
+        const float dz = eyes[e].position.z - g_cinemaAnchor.centre.z;
+        // The eye in the screen's frame (screen faces +Z, toward the viewer).
+        const float ex = c * dx - sn * dz;
+        const float ey = dy;
+        const float ez = sn * dx + c * dz;
+        if (!(ez > 0.1f)) return false;
+        const float halfW = 0.5f * kCinemaScreenW;
+        const float halfH = 0.5f * kCinemaScreenH;
+        views[e].pose.orientation = q;
+        views[e].pose.position = eyes[e].position;
+        views[e].fov.angleLeft  = std::atan2(-halfW - ex, ez);
+        views[e].fov.angleRight = std::atan2( halfW - ex, ez);
+        views[e].fov.angleDown  = std::atan2(-halfH - ey, ez);
+        views[e].fov.angleUp    = std::atan2( halfH - ey, ez);
+    }
+    return true;
+}
+#endif
+
 // True per-eye stereo present: blit each eye's game-rendered texture into that
 // eye's swapchain and describe it as a world-locked PROJECTION view carrying the
 // exact pose+frustum the eye was rendered at. Because it is a projection layer in
@@ -11578,6 +11691,11 @@ bool RenderStereoEyeProjection(XrCompositionLayerProjection& layer,
         throwableTrajectory[1] = g_stereoThrowableTrajectory[set][1];
         bakedWeaponHandMask = g_stereoWeaponHandMask[set];
     }
+#ifdef SAVR_STEAM_FRAME
+    const bool cinemaSlot = g_stereoCinema[set].load(std::memory_order_relaxed);
+#else
+    constexpr bool cinemaSlot = false;
+#endif
     const bool shaderCopyMayRun = fxaaStats.requested ||
         underWaterness > 0.001f || mobileColor.mode != 0;
     // Submit projection layers with their recorded render pose; use theater until that pose is available.
@@ -11586,7 +11704,7 @@ bool RenderStereoEyeProjection(XrCompositionLayerProjection& layer,
         return false;
     }
 
-    if (!bakedScope.active) {
+    if (!bakedScope.active && !cinemaSlot) {
         BuildHandMeshes(bakedHands, bakedTwoHand, drivingWheel,
                         ballHandLock); // same ring pose + cockpit/support correction
         BuildWeaponMesh(bakedHands);   // (weapon-mesh path; dead until Approach-B geometry exists)
@@ -11670,7 +11788,7 @@ bool RenderStereoEyeProjection(XrCompositionLayerProjection& layer,
         if (g_swapchainSrgb) glDisable(GL_FRAMEBUFFER_SRGB_EXT);  // raw copy + display-referred late overlays
         const GLuint sourceTexture =
             g_stereoEyeTex[set][e].load(std::memory_order_relaxed);
-        ConfigureRenderWareEyeFoveation(set, e, sourceTexture);
+        if (!cinemaSlot) ConfigureRenderWareEyeFoveation(set, e, sourceTexture);
         // Every path below may queue reads from the colour, depth or HUD texture
         // belonging to this slot. The scope guard transfers the CPU lease to a
         // GPU fence on every return path after this point.
@@ -11716,10 +11834,11 @@ bool RenderStereoEyeProjection(XrCompositionLayerProjection& layer,
             e == 0 ? XrGpuStage::OverlayLeft : XrGpuStage::OverlayRight);
         // Mission/tutorial text is an independent immersive layer. Disabling
         // CLASSIC hides phone-HUD crops, not text or calibration samples.
-        if (hudSource||g_signalPercent.load(std::memory_order_relaxed)>=0)
+        if (!cinemaSlot &&
+            (hudSource||g_signalPercent.load(std::memory_order_relaxed)>=0))
             DrawHudComposite(hudSource,chain.width,chain.height,
                              hud::ShouldRenderClassicHud(),e);
-        DrawHandsForEye(
+        if (!cinemaSlot) DrawHandsForEye(
             rp, e, chain.width, chain.height,
             g_stereoEyeDepth[set][e].load(std::memory_order_relaxed),
             ew, eh,
@@ -11763,7 +11882,7 @@ bool RenderStereoEyeProjection(XrCompositionLayerProjection& layer,
                 }
             }
         }
-        DrawScopeOverlay(chain.width, chain.height, bakedScope);
+        if (!cinemaSlot) DrawScopeOverlay(chain.width, chain.height, bakedScope);
         EndXrGpuStage(overlayGpuTimer);
         RecordXrCpuStage(e, XrCpuStage::OverlaySubmit, overlayWallStartMs,
                          overlayCpuStartMs);
@@ -12306,6 +12425,28 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs) {
                 projectionFullCopy = projectionReady;
             }
 
+#ifdef SAVR_STEAM_FRAME
+            // 3D cinema frame: whatever path produced the views (fresh copy or
+            // zero-copy repeat), their pose and fov must come from THIS frame's
+            // eye positions, not from the render pose or a cached copy.
+            bool cinemaFrame = false;
+            if (projectionReady && haveCandidate && candidate.set >= 0 &&
+                candidate.set < kStereoSets &&
+                g_stereoCinema[candidate.set].load(std::memory_order_relaxed)) {
+                cinemaFrame = true;
+                if (!ApplyCinemaViewGeometry(eyeViews)) {
+                    projectionReady = false;
+                    stereoProjectionOutcome =
+                        perf::StereoProjectionOutcome::MissingPose;
+                }
+            }
+            static bool sWasCinemaFrame = false;
+            if (cinemaFrame != sWasCinemaFrame) {
+                sWasCinemaFrame = cinemaFrame;
+                if (!cinemaFrame) g_cinemaAnchor.valid = false;
+                LOGI("[cinema3d] projection screen %s", cinemaFrame ? "ON" : "OFF");
+            }
+#endif
             if (projectionReady) {
                 g_directStereoProjectionHealthy.store(true,
                                                        std::memory_order_release);

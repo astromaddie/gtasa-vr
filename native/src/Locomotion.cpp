@@ -48,7 +48,14 @@ std::atomic<bool> g_flightCameraTilt{false};
 // comfort default.
 // 0 = CINEMA (theater), 1 = CINEMATIC (head-tracked director camera),
 // 2 = FIRST PERSON (anchored on cutscene-CJ's head bone).
+#ifdef SAVR_STEAM_FRAME
+// 3 = CINEMA 3D (Steam Frame only): the director camera rendered from two
+// parallel off-axis cameras onto a framed 16:9 stereo screen.
+std::atomic<int> g_cutsceneMode{3};
+std::atomic<float> g_cinema3dDepth{0.55f};
+#else
 std::atomic<int> g_cutsceneMode{1};
+#endif
 // GAMEPLAY cutscenes: scripted mission cameras that run mid-gameplay
 // (player controls disabled + widescreen borders, CCutsceneMgr NOT running).
 // Separate knob from story cutscenes because players commonly want
@@ -98,7 +105,8 @@ void Save() {
     std::fprintf(file,"FlightCameraTilt=%d\n",g_flightCameraTilt.load()?1:0);
     std::fprintf(file,"CutsceneMode=%d\n",g_cutsceneMode.load());
 #ifdef SAVR_STEAM_FRAME
-    std::fprintf(file,"FrameCutsceneCinema=1\n");
+    std::fprintf(file,"FrameCutsceneCinema3D=1\n");
+    std::fprintf(file,"Cinema3DDepth=%.2f\n",g_cinema3dDepth.load());
 #endif
     std::fprintf(file,"GameCutsceneMode=%d\n",g_gameCutsceneMode.load());
     for (const auto& [scene, camera] : g_cutsceneCameras)
@@ -123,13 +131,15 @@ void Load() {
     int chuteFollow=1,autoChute=0,chuteImmersive=0,flightTilt=0;
     int gestureRun=1,gestureSwim=1;
 #ifdef SAVR_STEAM_FRAME
-    // Steam Frame: story cutscenes default to the framed CINEMA screen. The
-    // head-tracked director camera (CINEMATIC) lets you look past the set the
-    // cutscene was authored for, where the world is not streamed in. A file
-    // written before this default existed has no marker, so it is moved to
-    // CINEMA once; any later choice is saved with the marker and kept.
-    int cutsceneMode=0;
+    // Steam Frame: story cutscenes default to CINEMA 3D, the framed stereo
+    // screen. The head-tracked director camera (CINEMATIC) lets you look past
+    // the set the cutscene was authored for, where the world is not streamed
+    // in. A file written before this default existed has no marker, so it is
+    // moved to CINEMA 3D once; any later choice is saved with the marker and
+    // kept.
+    int cutsceneMode=3;
     bool frameCutsceneMarker=false;
+    float cinemaDepth=0.55f;
 #else
     int cutsceneMode=1;
 #endif
@@ -163,8 +173,11 @@ void Load() {
             else if (std::sscanf(line,"CutsceneMode=%d",&value)==1)
                 cutsceneMode=value;
 #ifdef SAVR_STEAM_FRAME
-            else if (std::sscanf(line,"FrameCutsceneCinema=%d",&value)==1)
+            else if (std::sscanf(line,"FrameCutsceneCinema3D=%d",&value)==1)
                 frameCutsceneMarker=value!=0;
+            else if (float depthValue=0.0f;
+                     std::sscanf(line,"Cinema3DDepth=%f",&depthValue)==1)
+                cinemaDepth=depthValue;
 #endif
             else if (std::sscanf(line,"GameCutsceneMode=%d",&value)==1)
                 gameCutsceneMode=value;
@@ -194,7 +207,8 @@ void Load() {
     }
 #ifdef SAVR_STEAM_FRAME
     const bool migrateFrameCutscene=!frameCutsceneMarker;
-    if (migrateFrameCutscene) cutsceneMode=0;
+    if (migrateFrameCutscene) cutsceneMode=3;
+    g_cinema3dDepth.store(std::clamp(cinemaDepth,0.10f,0.90f));
 #endif
     // Migrate recognized presets while preserving custom mappings.
     if(std::equal(bind,bind+BIND_SRC_COUNT,kBindingVehicle))
@@ -212,7 +226,11 @@ void Load() {
     g_autoParachute.store(autoChute!=0);
     g_parachuteImmersiveControl.store(chuteImmersive!=0);
     g_flightCameraTilt.store(flightTilt!=0);
+#ifdef SAVR_STEAM_FRAME
+    g_cutsceneMode.store(std::clamp(cutsceneMode,0,3));
+#else
     g_cutsceneMode.store(cutsceneMode<0?0:(cutsceneMode>2?2:cutsceneMode));
+#endif
     g_gameCutsceneMode.store(
         gameCutsceneMode<0?0:(gameCutsceneMode>2?2:gameCutsceneMode));
     g_welcomeSeen.store(welcomeSeen!=0);
@@ -229,8 +247,9 @@ void Load() {
          g_snapAngle.load(),g_headBob.load());
 #ifdef SAVR_STEAM_FRAME
     LOGI("[cutscene.mode] story cutscenes: %s%s",
-         g_cutsceneMode.load()==0?"CINEMA (framed screen)":
-         (g_cutsceneMode.load()==1?"CINEMATIC (head-tracked)":"FIRST PERSON"),
+         g_cutsceneMode.load()==0?"CINEMA (flat framed screen)":
+         (g_cutsceneMode.load()==1?"CINEMATIC (head-tracked)":
+          (g_cutsceneMode.load()==2?"FIRST PERSON":"CINEMA 3D (framed stereo screen)")),
          migrateFrameCutscene?" (Frame default applied)":"");
     if (migrateFrameCutscene) Save();
 #endif
@@ -428,16 +447,27 @@ void MarkWelcomeSeen() {
 int CutsceneMode() { EnsureInit(); return g_cutsceneMode.load(); }
 void CycleCutsceneMode(int direction) {
     EnsureInit();
-    g_cutsceneMode.store((g_cutsceneMode.load()+direction+3)%3);
+#ifdef SAVR_STEAM_FRAME
+    constexpr int kModes=4;
+#else
+    constexpr int kModes=3;
+#endif
+    g_cutsceneMode.store((g_cutsceneMode.load()+direction+kModes)%kModes);
     Save();
 }
 const char* CutsceneModeName() {
     switch (CutsceneMode()) {
         case 1:  return "CINEMATIC";
         case 2:  return "FIRST PERSON + R3";
+#ifdef SAVR_STEAM_FRAME
+        case 3:  return "CINEMA 3D";
+#endif
         default: return "CINEMA";
     }
 }
+#ifdef SAVR_STEAM_FRAME
+float Cinema3DDepth() { EnsureInit(); return g_cinema3dDepth.load(); }
+#endif
 int GameCutsceneMode() { EnsureInit(); return g_gameCutsceneMode.load(); }
 void CycleGameCutsceneMode(int direction) {
     EnsureInit();

@@ -68,7 +68,10 @@ bool FlightCameraTilt();
 // the first-run ABOUT panel.
 bool WelcomeSeen();
 void MarkWelcomeSeen();
-int  CutsceneMode();          // 0 cinema, 1 cinematic vr, 2 first person
+int  CutsceneMode();          // 0 cinema, 1 cinematic vr, 2 first person, 3 cinema 3D (Frame)
+#ifdef SAVR_STEAM_FRAME
+float Cinema3DDepth();        // 0.10..0.90, fraction of IPD at infinity (default 0.55)
+#endif
 void CycleCutsceneMode(int direction);
 const char* CutsceneModeName();
 // Same three modes for GAMEPLAY cutscenes (mid-mission scripted cameras:
