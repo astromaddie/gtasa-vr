@@ -386,6 +386,30 @@ void OnRockstarShowInitial() {
     g_pendingInitialComplete = true;
 }
 
+#ifdef SAVR_STEAM_FRAME
+// Opening the pause menu hung the Steam Frame build. MobileMenu::InitForPause
+// runs Menu_SwitchOnFromGame, which ends in OS_RockstarRequestReview (and
+// MobileMenu::Exit calls it again on the way out). That is a JNI call into
+// RockstarServices.rockstarRequestReview, which runs
+// Rockstar.requestReviewPotentially() on the UI thread: Rockstar's SDK puts
+// a window of its own over the game (the same SDK whose sign-in UI the gate
+// hooks above exist to avoid). Under Lepton nobody can see or dismiss that
+// window, GameView.onWindowFocusChanged(false) fires, and the Java GameThread
+// then never calls implOnDrawFrame again (it only draws while hasFocus), so the
+// game stops for good. There is nothing to rate on a headset: make it a no-op.
+void OnRockstarRequestReview() {
+    static int count = 0;
+    if (++count <= 3)
+        LOGW("[focus.guard] OS_RockstarRequestReview suppressed (x%d)", count);
+}
+
+// Same hazard: an external link starts an Android intent, which takes the
+// window focus away from the game under Lepton.
+void OnOpenLink(const char* url) {
+    LOGW("[focus.guard] OS_OpenLink suppressed: %s", url ? url : "(null)");
+}
+#endif
+
 // The SFX and stream asset packs (data_sfx*, data_streams) ship separately from
 // Play and are absent from a sideload, so the track loader hits a null ZIPFile
 // and crashes (ZIPFile::Find, this=0) the instant a game starts. Returning "no
@@ -824,6 +848,194 @@ void OnSurfaceChanged(JNIEnv* env, jclass clazz, jobject surface, jint width, ji
         TakeOverFrameLoop();     // starts the present-only consumer thread
     }
 }
+
+#ifdef SAVR_STEAM_FRAME
+// ---------------------------------------------------------------------------
+// Android window-focus watchdog (Steam Frame)
+//
+// The game's Java GameThread only calls implOnDrawFrame while
+// GameView.hasFocus is true (GameThread$ExecutorThread.guardedRun, dex-verified),
+// and GameView.onWindowFocusChanged(false) clears it and queues implOnPause,
+// which runs OS_ApplicationEvent(pause): autosave, StartUserPause, suspend flag.
+// On the Quest the Meta menu hands focus back; under Lepton a window that
+// something else opened can keep it forever, and the engine then never draws
+// or resumes again. This thread (never the present thread, never blocking it)
+// watches for that exact state: the OpenXR session is FOCUSED, so the headset
+// is plainly in use, yet the Android window has had no focus for a while. It
+// sets hasFocus back and queues GameThread.onResume, which is what the focus
+// callback would have done. It also logs why the loops are quiet, so a stall
+// leaves evidence instead of silence. Backstop only: the known trigger (the
+// Rockstar review prompt) is suppressed at its source above.
+// ---------------------------------------------------------------------------
+std::atomic<long long> g_lastEngineFrameNs{0};   // GameThread heartbeat
+
+class FocusJni {
+public:
+    // -1 unknown, 0 no focus, 1 focus.
+    int ReadHasFocus(JNIEnv* env) {
+        if (!Ensure(env)) return -1;
+        const jboolean v = env->CallBooleanMethod(view_, getHasFocus_);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); return -1; }
+        return v ? 1 : 0;
+    }
+    bool Heal(JNIEnv* env) {
+        if (!Ensure(env)) return false;
+        env->CallVoidMethod(view_, setHasFocus_, JNI_TRUE);
+        bool ok = !env->ExceptionCheck();
+        if (!ok) env->ExceptionClear();
+        env->CallVoidMethod(thread_, threadOnResume_);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); ok = false; }
+        return ok;
+    }
+
+private:
+    bool Ensure(JNIEnv* env) {
+        if (ready_) return true;
+        if (g_activity == nullptr || g_classLoader == nullptr) return false;
+        jclass activityClass = env->GetObjectClass(g_activity);
+        jmethodID getView = env->GetMethodID(activityClass, "getView",
+            "()Lcom/rockstargames/oswrapper/GameView;");
+        if (env->ExceptionCheck() || getView == nullptr) {
+            env->ExceptionClear();
+            return Fail("GameActivityBase.getView");
+        }
+        jobject view = env->CallObjectMethod(g_activity, getView);
+        if (env->ExceptionCheck() || view == nullptr) {
+            env->ExceptionClear();   // view not created yet
+            return false;
+        }
+        jclass viewClass = env->GetObjectClass(view);
+        getHasFocus_ = env->GetMethodID(viewClass, "getHasFocus", "()Z");
+        setHasFocus_ = env->GetMethodID(viewClass, "setHasFocus", "(Z)V");
+        if (env->ExceptionCheck() || !getHasFocus_ || !setHasFocus_) {
+            env->ExceptionClear();
+            return Fail("GameView.get/setHasFocus");
+        }
+
+        jclass loaderClass = env->GetObjectClass(g_classLoader);
+        jmethodID loadClass = env->GetMethodID(loaderClass, "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;");
+        jstring name = env->NewStringUTF("com.rockstargames.oswrapper.GameThread");
+        auto threadClass = static_cast<jclass>(
+            env->CallObjectMethod(g_classLoader, loadClass, name));
+        env->DeleteLocalRef(name);
+        if (env->ExceptionCheck() || threadClass == nullptr) {
+            env->ExceptionClear();
+            return Fail("GameThread class");
+        }
+        jfieldID instance = env->GetStaticFieldID(threadClass, "INSTANCE",
+            "Lcom/rockstargames/oswrapper/GameThread;");
+        threadOnResume_ = env->GetMethodID(threadClass, "onResume", "()V");
+        if (env->ExceptionCheck() || !instance || !threadOnResume_) {
+            env->ExceptionClear();
+            return Fail("GameThread.INSTANCE/onResume");
+        }
+        jobject thread = env->GetStaticObjectField(threadClass, instance);
+        if (env->ExceptionCheck() || thread == nullptr) {
+            env->ExceptionClear();
+            return Fail("GameThread.INSTANCE value");
+        }
+        view_ = env->NewGlobalRef(view);
+        thread_ = env->NewGlobalRef(thread);
+        ready_ = true;
+        LOGI("[focus.watch] GameView/GameThread bound");
+        return true;
+    }
+    bool Fail(const char* what) {
+        if (!failLogged_) {
+            failLogged_ = true;
+            LOGW("[focus.watch] cannot bind %s; focus healing disabled", what);
+        }
+        return false;
+    }
+    bool ready_{false};
+    bool failLogged_{false};
+    jobject view_{};
+    jobject thread_{};
+    jmethodID getHasFocus_{};
+    jmethodID setHasFocus_{};
+    jmethodID threadOnResume_{};
+};
+
+long long MonoNs() {
+    timespec t{};
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return static_cast<long long>(t.tv_sec) * 1000000000LL + t.tv_nsec;
+}
+
+void* WatchdogLoop(void*) {
+    JNIEnv* env = nullptr;
+    if (g_vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return nullptr;
+    pthread_setname_np(pthread_self(), "savr-watchdog");
+    FocusJni focus;
+    long long noFocusSinceNs = 0;
+    long long lastHealNs = 0;
+    long long lastStallLogNs = 0;
+    int heals = 0;
+    constexpr long long kHealAfterNs = 1500LL * 1000000LL;
+    constexpr long long kHealCooldownNs = 4000LL * 1000000LL;
+    constexpr long long kStallNs = 2500LL * 1000000LL;
+    constexpr long long kStallLogEveryNs = 10000LL * 1000000LL;
+
+    while (g_ownFrameLoop) {
+        timespec nap{0, 250 * 1000 * 1000};
+        nanosleep(&nap, nullptr);
+        const long long now = MonoNs();
+        const int hasFocus = focus.ReadHasFocus(env);
+        const bool xrFocused = xr::IsSessionFocused();
+        const auto loop = xr::GetPresentLoopStatus();
+        const long long engineAt = g_lastEngineFrameNs.load(std::memory_order_relaxed);
+        const long long engineAgeMs = engineAt ? (now - engineAt) / 1000000LL : -1;
+
+        if (hasFocus == 0) {
+            if (noFocusSinceNs == 0) {
+                noFocusSinceNs = now;
+                LOGW("[focus.watch] Android window lost focus (xrFocused=%d state=%d running=%d "
+                     "engineAge=%lldms loopStage=%d)",
+                     xrFocused, loop.sessionState, loop.running,
+                     engineAgeMs, loop.stage);
+            }
+            if (xrFocused && loop.running && now - noFocusSinceNs >= kHealAfterNs &&
+                now - lastHealNs >= kHealCooldownNs) {
+                lastHealNs = now;
+                ++heals;
+                const bool ok = focus.Heal(env);
+                LOGW("[focus.watch] window focus still missing %.1fs after loss while OpenXR "
+                     "is FOCUSED: forced hasFocus=true + GameThread.onResume (ok=%d, heal #%d)",
+                     (now - noFocusSinceNs) / 1e9, ok, heals);
+            }
+        } else if (hasFocus == 1 && noFocusSinceNs != 0) {
+            LOGI("[focus.watch] Android window focus is back after %.1fs",
+                 (now - noFocusSinceNs) / 1e9);
+            noFocusSinceNs = 0;
+        }
+
+        const bool engineStale = engineAgeMs >= 0 && engineAgeMs * 1000000LL >= kStallNs;
+        const bool loopStale = loop.running && loop.stage != 7 && loop.stageAgeMs >= 0 &&
+            loop.stageAgeMs * 1000000LL >= kStallNs;
+        if ((engineStale || loopStale) && now - lastStallLogNs >= kStallLogEveryNs) {
+            lastStallLogNs = now;
+            LOGW("[watchdog] quiet loops: engine frame %lldms ago, present loop stage=%d for %dms "
+                 "(1 poll,2 xrWaitFrame,3 xrBeginFrame,4 work,5 xrEndFrame,6 done,7 idle) "
+                 "frames=%llu xrState=%d running=%d xrFocused=%d androidFocus=%d",
+                 engineAgeMs, loop.stage, loop.stageAgeMs, loop.frames,
+                 loop.sessionState, loop.running, xrFocused, hasFocus);
+        }
+    }
+    g_vm->DetachCurrentThread();
+    return nullptr;
+}
+
+void StartWatchdog() {
+    pthread_t thread{};
+    if (pthread_create(&thread, nullptr, WatchdogLoop, nullptr) == 0) {
+        pthread_detach(thread);
+        LOGI("[focus.watch] watchdog started");
+    } else {
+        LOGW("[focus.watch] could not start the watchdog thread");
+    }
+}
+#endif
 
 void OnPause(JNIEnv* env, jclass clazz) {
     // Passed through. The engine runs on its own GameThread with its own context,
@@ -2025,6 +2237,40 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
     static bool providerA = false, providerB = false, providerX = false;
     static bool providerUp = false, providerDown = false;
     static bool providerLeft = false, providerRight = false;
+
+    // Skip a story cutscene: hold Menu for about half a second. The mobile
+    // game skips by touching its on-screen arrow, and its own test
+    // (CCutsceneMgr::IsCutsceneSkipButtonBeingPressed) also accepts a fresh
+    // Cross press, so a short virtual A press (provider code 0 = Cross) makes
+    // the engine run its normal skip path, including its list of scenes that
+    // may not be skipped. A tap does nothing, so a stray press cannot throw
+    // away a scene. Menu belongs to this only while a cutscene is running; the
+    // pause-menu request below refuses to run then.
+    static int skipPulseFrames = 0;
+    static double menuHeldSinceMs = -1.0;
+    static bool skipFired = false;
+    {
+        const bool cutsceneRunning = g.CCutsceneMgr_ms_running &&
+            *g.CCutsceneMgr_ms_running;
+        const bool gripsDown = in.grip[0] >= 0.25f || in.grip[1] >= 0.25f;
+        if (cutsceneRunning && in.menu && !gripsDown && !menuWasOpen && !anyMenu) {
+            const double nowMs = perf::MonotonicMs();
+            if (menuHeldSinceMs < 0.0) menuHeldSinceMs = nowMs;
+            if (!skipFired && nowMs - menuHeldSinceMs >= 450.0) {
+                skipFired = true;
+                skipPulseFrames = 8;
+                LOGI("[cutscene.skip] Menu held: pressing Cross for the engine's skip path");
+                xr::TriggerHaptic(0, 0.6f, 160.0f, 80.0f);
+                xr::TriggerHaptic(1, 0.6f, 160.0f, 80.0f);
+            }
+        } else {
+            menuHeldSinceMs = -1.0;
+            skipFired = false;
+        }
+    }
+    const bool skipCross = skipPulseFrames > 0;
+    if (skipPulseFrames > 0) --skipPulseFrames;
+
     if (inGameplay && !anyMenu && !grips) {
         // The engine's stick Y runs the opposite way to OpenXR's, so it is flipped.
         const bool driving = (g.FindPlayerVehicle && g.FindPlayerVehicle(-1, false)) ||
@@ -2077,7 +2323,7 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
         const bool attackHeld = savr::locomotion::ActionHeld(
             savr::locomotion::BIND_ACT_ATTACK,
             in.a,in.b,in.x,in.y,in.l3,in.r3,!driving);
-        edge(!scriptedWeapon && sprintHeld, providerA, 0);
+        edge((!scriptedWeapon && sprintHeld) || skipCross, providerA, 0);
         edge(driving || scriptedWeapon ? false : attackHeld, providerB, 1);
         // In a vehicle X is owned by Driving's exact NextStationJustUp hook;
         // keep Square released so it cannot compete with the L2 brake mapping.
@@ -2100,7 +2346,7 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
     } else {
         savr::beachdance::SetInput(false,0,0);
         g.implOnGamepadAxesChanged(env, clazz, 0, 0, 0, 0, 0, 0, 0);
-        edge(false, providerA, 0);
+        edge(skipCross, providerA, 0);
         edge(false, providerB, 1);
         edge(false, providerX, 2);
         edge(false, providerUp, 8);
@@ -2124,9 +2370,30 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
     const bool gameMenuDown=in.menu&&!menuGripActive&&!menuWasOpen&&!anyMenu;
     if (gameMenuDown&&!gameMenuWasDown&&inGameplay&&
         g.SkipIntroCutscene!=nullptr) {
-        LOGI("[input] left Menu -> engine pause-menu request flags");
-        g.SkipIntroCutscene[1]=1;   // resume-tick request
-        g.SkipIntroCutscene[2]=1;   // InitForPause request
+        // The phone only ever requests its pause menu when the player exists,
+        // controls are enabled, no cutscene is running and no frontend is open
+        // (OS_ApplicationEvent's pause handler, disasm-verified). The flags
+        // below bypass those tests, and InitForPause inside a cutscene (the
+        // default stereo CINEMATIC mode keeps inGameplay true there) is not
+        // something the engine was ever run through.
+        const void* pad = g.CPad_GetPad ? g.CPad_GetPad(0) : nullptr;
+        const bool controlsDisabled = pad != nullptr &&
+            *reinterpret_cast<const std::uint16_t*>(
+                static_cast<const char*>(pad) + 0x110) != 0;
+        const bool cutsceneRunning = g.CCutsceneMgr_ms_running &&
+            *g.CCutsceneMgr_ms_running;
+        const bool playerExists = g.FindPlayerPed && g.FindPlayerPed(-1);
+        if (cutsceneRunning || controlsDisabled || !playerExists ||
+            vrcam::IsMobileMenuOpen()) {
+            LOGI("[input] Menu: pause menu not requested (cutscene=%d controlsDisabled=%d player=%d menuOpen=%d); "
+                 "in a cutscene hold Menu to skip",
+                 cutsceneRunning, controlsDisabled, playerExists,
+                 vrcam::IsMobileMenuOpen());
+        } else {
+            LOGI("[input] Menu -> engine pause-menu request flags");
+            g.SkipIntroCutscene[1]=1;   // resume-tick request
+            g.SkipIntroCutscene[2]=1;   // InitForPause request
+        }
     }
     gameMenuWasDown=gameMenuDown;
 
@@ -2181,6 +2448,9 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
 }
 
 void OnDrawFrame(JNIEnv* env, jclass clazz, jfloat deltaTime) {
+#ifdef SAVR_STEAM_FRAME
+    g_lastEngineFrameNs.store(MonoNs(), std::memory_order_relaxed);
+#endif
     // Let the engine render its frame on its own thread, into our SurfaceTexture.
     // Time it: this is the WHOLE game-frame work (logic + render) minus our pacing
     // sleep, so the profiler can split our stereo cost from the game's own cost.
@@ -2426,6 +2696,9 @@ void TakeOverFrameLoop() {
         return;
     }
     pthread_detach(thread);
+#ifdef SAVR_STEAM_FRAME
+    StartWatchdog();
+#endif
 }
 
 bool InterceptGameNative(JNIEnv* env) {
@@ -2583,6 +2856,35 @@ void* WaitForGameLibrary(void*) {
                           reinterpret_cast<void*>(OnRockstarShowGate))) {
         LOGI("rockstar gate hook installed");
     }
+#ifdef SAVR_STEAM_FRAME
+    // Both functions are plain JNI trampolines in the exact 2.11 binary; match
+    // their first four instructions before overwriting them (never called back).
+    {
+        constexpr std::uint32_t kReview211[4] = {
+            0xa9be7bfdu, 0xa9014ff4u, 0x910003fdu, 0xd0002a28u
+        };
+        constexpr std::uint32_t kOpenLink211[4] = {
+            0xa9bd7bfdu, 0xa90157f6u, 0xa9024ff4u, 0x910003fdu
+        };
+        const struct { const char* name; void* fn; const std::uint32_t* want; void* hook; } blocked[] = {
+            {"OS_RockstarRequestReview", reinterpret_cast<void*>(g.OS_RockstarRequestReview),
+             kReview211, reinterpret_cast<void*>(OnRockstarRequestReview)},
+            {"OS_OpenLink", reinterpret_cast<void*>(g.OS_OpenLink),
+             kOpenLink211, reinterpret_cast<void*>(OnOpenLink)},
+        };
+        for (const auto& b : blocked) {
+            if (b.fn == nullptr) { LOGW("[focus.guard] %s not found", b.name); continue; }
+            std::uint32_t observed[4]{};
+            std::memcpy(observed, b.fn, sizeof(observed));
+            if (std::memcmp(observed, b.want, sizeof(observed)) == 0 &&
+                InstallInlineHook(b.fn, b.hook)) {
+                LOGI("[focus.guard] %s hook installed", b.name);
+            } else {
+                LOGE("[focus.guard] %s prologue mismatch; hook NOT installed", b.name);
+            }
+        }
+    }
+#endif
     // Audio: the game opens its .osw paks with fopen(RELATIVE, "rb"), resolved
     // against the process cwd (which is "/"), so the paks are looked for at
     // /AUDIO/STREAMS/... and never found -> null ZIPFile -> silence + a crash in

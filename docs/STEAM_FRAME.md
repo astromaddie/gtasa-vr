@@ -33,6 +33,17 @@ builds come out the same as before.
   controller, View is on the left. Hold View for a second to recentre (both
   hands buzz). A short View press is back in the VR menu. Clicking both
   sticks no longer recentres.
+- **Pause and cutscenes.** Menu opens the game's pause menu in play. During a
+  story cutscene, hold Menu for half a second to skip it (a tap does nothing).
+  Story cutscenes default to the framed CINEMA screen; CINEMATIC (head-tracked
+  director camera) and FIRST PERSON stay selectable in the VR menu under
+  CUTSCENES. A settings file from before this default is moved to CINEMA once.
+- **Focus guard.** The game's pause menu asks Rockstar's SDK for an app-store
+  review prompt, and under Lepton that window takes the Android focus away
+  and the game stops drawing for good. The review request and external links
+  are no-ops on this build, and a watchdog thread logs `[focus.watch]` /
+  `[watchdog]` lines and gives the focus back if the headset is in use but the
+  window has been unfocused for 1.5 s.
 - **OpenXR.** Only extensions SteamVR actually offers are switched on, and
   the swapchain format comes from SteamVR's own list. Everything is logged
   with a `[savr-frame]` prefix.

@@ -90,6 +90,8 @@ bool ResolveGameSymbols(void* handle) {
         {"_Z25OS_OnRockstarGateCompleteib",                                       reinterpret_cast<void**>(&g.OS_OnRockstarGateComplete), true },
         {"_Z22OS_RockstarShowInitialv",                                          reinterpret_cast<void**>(&g.OS_RockstarShowInitial),      true },
         {"_Z28OS_OnRockstarInitialCompletev",                                     reinterpret_cast<void**>(&g.OS_OnRockstarInitialComplete), true },
+        {"_Z24OS_RockstarRequestReviewv",                                         reinterpret_cast<void**>(&g.OS_RockstarRequestReview),   false},
+        {"_Z11OS_OpenLinkPKc",                                                    reinterpret_cast<void**>(&g.OS_OpenLink),                false},
         {"Java_com_rockstargames_oswrapper_GameNative_implOnTouchStart",         reinterpret_cast<void**>(&g.implOnTouchStart),        true },
         {"Java_com_rockstargames_oswrapper_GameNative_implOnTouchMove",          reinterpret_cast<void**>(&g.implOnTouchMove),         true },
         {"Java_com_rockstargames_oswrapper_GameNative_implOnTouchEnd",           reinterpret_cast<void**>(&g.implOnTouchEnd),          true },

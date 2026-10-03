@@ -23,6 +23,19 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs);
 bool IsSessionRunning();
 bool IsSessionFocused();
 
+// Heartbeat of the present loop, for main.cpp's stall watchdog. `stage` is
+// 0 never run, 1 polling, 2 xrWaitFrame, 3 xrBeginFrame, 4 frame work,
+// 5 xrEndFrame, 6 frame done, 7 idle (session not running). `stageAgeMs` is how
+// long the loop has been in that stage (-1 before the first frame).
+struct PresentLoopStatus {
+    int stage;
+    int stageAgeMs;
+    int sessionState;   // XrSessionState as last reported by xrPollEvent
+    bool running;
+    unsigned long long frames;
+};
+PresentLoopStatus GetPresentLoopStatus();
+
 // Latest controller state, mapped later onto the game's gamepad. Sticks are
 // [-1,1], triggers [0,1], buttons are momentary.
 struct InputState {

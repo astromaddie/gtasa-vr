@@ -471,6 +471,21 @@ std::atomic<uint32_t> g_gameTid{0};             // GameThread kernel TID (0 = un
 std::atomic<bool>     g_threadDirty{true};
 std::atomic<bool>     g_sessionFocused{false};
 
+// Present-loop heartbeat for the stall watchdog in main.cpp. Stage 0 = never
+// run, 1 = polling events, 2 = in xrWaitFrame, 3 = in xrBeginFrame, 4 = frame
+// work, 5 = in xrEndFrame, 6 = frame done, 7 = idle (session not running).
+std::atomic<int>                g_loopStage{0};
+std::atomic<long long>          g_loopStageNs{0};
+std::atomic<unsigned long long> g_loopFrames{0};
+std::atomic<int>                g_sessionStateValue{0};
+void MarkLoopStage(int stage) {
+    timespec t{};
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    g_loopStage.store(stage, std::memory_order_relaxed);
+    g_loopStageNs.store(static_cast<long long>(t.tv_sec) * 1000000000LL + t.tv_nsec,
+                        std::memory_order_relaxed);
+}
+
 uint32_t FindThreadTidByName(const char* wantedName) {
     if (!wantedName || !*wantedName) return 0;
     DIR* const tasks = opendir("/proc/self/task");
@@ -2989,6 +3004,8 @@ void PollEvents() {
         case XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED: {
             const auto& changed = *reinterpret_cast<XrEventDataSessionStateChanged*>(&event);
             s.sessionState = changed.state;
+            g_sessionStateValue.store(static_cast<int>(changed.state),
+                                      std::memory_order_relaxed);
             if(s.sessionState != XR_SESSION_STATE_FOCUSED) InvalidateTracking();
             g_sessionFocused.store(s.sessionState == XR_SESSION_STATE_FOCUSED,
                                    std::memory_order_release);
@@ -11839,8 +11856,10 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs) {
     }
     const double threadCpuT0 = perf::ThreadCpuMs();
 
+    MarkLoopStage(1);
     PollEvents();
     if (!s.running) {
+        MarkLoopStage(7);
         InvalidateStereoRepeatProjectionCache();
         // STOPPING/IDLE has no xrWaitFrame to pace the present thread. Without
         // an explicit wait this loop calls updateTexImage/JNI hundreds of
@@ -11906,6 +11925,7 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs) {
     XrFrameWaitInfo waitInfo{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState    frameState{XR_TYPE_FRAME_STATE};
     const long long tWaitStart = nowNs();
+    MarkLoopStage(2);
     if (!Check(xrWaitFrame(s.session, &waitInfo, &frameState), "xrWaitFrame")) {
         ResetStereoPhaseFeedback();
         return;
@@ -11920,10 +11940,12 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs) {
     RetireCompletedStereoReads();
 
     XrFrameBeginInfo beginInfo{XR_TYPE_FRAME_BEGIN_INFO};
+    MarkLoopStage(3);
     if (!Check(xrBeginFrame(s.session, &beginInfo), "xrBeginFrame")) {
         ResetStereoPhaseFeedback();
         return;
     }
+    MarkLoopStage(4);
 
     SyncInput(frameState.predictedDisplayTime);
 
@@ -12351,7 +12373,10 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs) {
     endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     endInfo.layerCount           = layerCount;
     endInfo.layers               = layerCount ? layers : nullptr;
+    MarkLoopStage(5);
     const XrResult ended = xrEndFrame(s.session, &endInfo);
+    MarkLoopStage(6);
+    g_loopFrames.fetch_add(1, std::memory_order_relaxed);
     Check(ended, "xrEndFrame");
     if (XR_FAILED(ended)) ResetStereoPhaseFeedback();
     const long long tEndDone = nowNs();
@@ -12631,6 +12656,20 @@ bool IsSessionRunning() {
 
 bool IsSessionFocused() {
     return g_sessionFocused.load(std::memory_order_acquire);
+}
+
+PresentLoopStatus GetPresentLoopStatus() {
+    timespec t{};
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    const long long now = static_cast<long long>(t.tv_sec) * 1000000000LL + t.tv_nsec;
+    PresentLoopStatus out{};
+    out.stage = g_loopStage.load(std::memory_order_relaxed);
+    const long long at = g_loopStageNs.load(std::memory_order_relaxed);
+    out.stageAgeMs = at ? static_cast<int>((now - at) / 1000000LL) : -1;
+    out.frames = g_loopFrames.load(std::memory_order_relaxed);
+    out.sessionState = g_sessionStateValue.load(std::memory_order_relaxed);
+    out.running = s.running;
+    return out;
 }
 
 void SetTheaterCrop(int width, int height) {

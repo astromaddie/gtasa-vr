@@ -97,6 +97,9 @@ void Save() {
                  g_parachuteImmersiveControl.load()?1:0);
     std::fprintf(file,"FlightCameraTilt=%d\n",g_flightCameraTilt.load()?1:0);
     std::fprintf(file,"CutsceneMode=%d\n",g_cutsceneMode.load());
+#ifdef SAVR_STEAM_FRAME
+    std::fprintf(file,"FrameCutsceneCinema=1\n");
+#endif
     std::fprintf(file,"GameCutsceneMode=%d\n",g_gameCutsceneMode.load());
     for (const auto& [scene, camera] : g_cutsceneCameras)
         std::fprintf(file,"CutsceneCamera.%s=%d\n",scene.c_str(),camera);
@@ -119,7 +122,17 @@ void Load() {
     int movement=MOVEMENT_HEAD,turn=TURN_SMOOTH,sensitivity=100,snap=30,bob=0;
     int chuteFollow=1,autoChute=0,chuteImmersive=0,flightTilt=0;
     int gestureRun=1,gestureSwim=1;
+#ifdef SAVR_STEAM_FRAME
+    // Steam Frame: story cutscenes default to the framed CINEMA screen. The
+    // head-tracked director camera (CINEMATIC) lets you look past the set the
+    // cutscene was authored for, where the world is not streamed in. A file
+    // written before this default existed has no marker, so it is moved to
+    // CINEMA once; any later choice is saved with the marker and kept.
+    int cutsceneMode=0;
+    bool frameCutsceneMarker=false;
+#else
     int cutsceneMode=1;
+#endif
     int gameCutsceneMode=1;
     int welcomeSeen=0;
     int bind[BIND_SRC_COUNT]={kBindingDefault[0],kBindingDefault[1],
@@ -149,6 +162,10 @@ void Load() {
                 cutsceneMode=value?2:0;   // legacy boolean key
             else if (std::sscanf(line,"CutsceneMode=%d",&value)==1)
                 cutsceneMode=value;
+#ifdef SAVR_STEAM_FRAME
+            else if (std::sscanf(line,"FrameCutsceneCinema=%d",&value)==1)
+                frameCutsceneMarker=value!=0;
+#endif
             else if (std::sscanf(line,"GameCutsceneMode=%d",&value)==1)
                 gameCutsceneMode=value;
             else {
@@ -175,6 +192,10 @@ void Load() {
         }
         std::fclose(file);
     }
+#ifdef SAVR_STEAM_FRAME
+    const bool migrateFrameCutscene=!frameCutsceneMarker;
+    if (migrateFrameCutscene) cutsceneMode=0;
+#endif
     // Migrate recognized presets while preserving custom mappings.
     if(std::equal(bind,bind+BIND_SRC_COUNT,kBindingVehicle))
         std::copy(kBindingDefault,kBindingDefault+BIND_SRC_COUNT,bind);
@@ -206,6 +227,13 @@ void Load() {
     LOGI("[locomotion] movement=%s turn=%s sensitivity=%d%% snap=%d bob=%d",
          movementName,turnName,g_turnSensitivity.load(),
          g_snapAngle.load(),g_headBob.load());
+#ifdef SAVR_STEAM_FRAME
+    LOGI("[cutscene.mode] story cutscenes: %s%s",
+         g_cutsceneMode.load()==0?"CINEMA (framed screen)":
+         (g_cutsceneMode.load()==1?"CINEMATIC (head-tracked)":"FIRST PERSON"),
+         migrateFrameCutscene?" (Frame default applied)":"");
+    if (migrateFrameCutscene) Save();
+#endif
 }
 
 void EnsureInit() { std::call_once(g_initOnce,Load); }

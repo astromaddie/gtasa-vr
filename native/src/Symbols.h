@@ -49,6 +49,11 @@ struct GameSymbols {
     void  (*OS_OnRockstarGateComplete)(int gateId, bool passed);
     void  (*OS_RockstarShowInitial)();
     void  (*OS_OnRockstarInitialComplete)();
+    // Java-bound UI entry points that steal the Android window focus under
+    // Lepton (Rockstar's "rate the game" prompt, external links). Hooked to
+    // no-ops on the Steam Frame build; see main.cpp OnRockstarRequestReview.
+    void  (*OS_RockstarRequestReview)();
+    void  (*OS_OpenLink)(const char* url);
     void  (*implOnTouchStart)(void* env, void* clazz, int id, float x, float y);
     void  (*implOnTouchMove)(void* env, void* clazz, int id, float x, float y);
     void  (*implOnTouchEnd)(void* env, void* clazz, int id, float x, float y);
