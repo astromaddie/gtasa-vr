@@ -6,7 +6,8 @@ runtime. The game itself is unchanged: it's the same Google Play build
 (2.11.311) with the same VR layer. What's different is how it's packaged,
 where its files live and how the controllers map.
 
-Status: built on the Mac, game data on the headset, not played yet.
+Status: it starts on the Frame and runs its menus at 72 fps. Nobody has
+played it in the headset yet.
 
 ## What's different from the Quest build
 
@@ -69,18 +70,32 @@ tools/steam_frame/deploy.sh --apk <build>/out/base.apk \
 
 That copies the game data into `~/Documents/GTASAVR` over SSH, then puts the
 APK in a persistent **GTASAVR** title in the Steam library. Launch that
-title to play. A game started over adb gets no controllers.
+title to play. A game started over adb gets no controllers. You can also launch the title
+from SSH by writing `steam://rungameid/<id>` into `~/.steam/steam.pipe`. The
+id is `(appid << 32) | 0x02000000`, and the appid is in Steam's
+`shortcuts.vdf`.
 
 `FRAME_HOST` picks the SSH target. The default is the Frame on Wi-Fi,
 `steamos@192.168.1.31`.
 
 ## Known gaps
 
-- The game's own saves still live in the app's storage
-  (`getExternalFilesDir`), so a Lepton reset wipes them.
+- The game's own saves go to its app storage. On the Frame that's a folder
+  in the title's compatdata, which a Lepton reset can take with it. Run
+  `deploy.sh --link-saves` once, after the first launch and with the game
+  closed, to point that folder at `~/Documents/GTASAVR/saves`. The game
+  sees the link fine. Whether it writes saves through it is still to be
+  confirmed with a real save.
 - The game data is in the APK and in `data_main`, so it takes up space
   twice.
 - Bumpers and the D-pad aren't bound yet.
-- None of this has been run on the Frame yet: the memory patching the hooks
-  do, the shared GL contexts under Zink, and whether the Documents folder is
-  case-sensitive are all open questions.
+- What's been checked on the Frame (no one in the headset, 2026-10-03):
+  - The title installs and launches from Steam.
+  - The hooks patch the game fine.
+  - OpenXR comes up on SteamVR's GLES path with an sRGB swapchain.
+  - All three controller profiles are accepted.
+  - Data, PS2 audio and settings load from `~/Documents/GTASAVR`.
+  - The menus present at 72 fps with no failed frames.
+- Still open: stereo gameplay. The game renders each eye with shared GL
+  contexts, and that hasn't run yet, because getting into a game needs
+  someone pressing buttons.

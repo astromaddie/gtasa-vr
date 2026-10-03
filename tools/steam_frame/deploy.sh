@@ -14,6 +14,12 @@
 #   --register-title   register ~/devkit-game/GTASAVR as a persistent Steam
 #                      library title (once). When the title exists, every
 #                      install also refreshes its copy of the APK.
+#   --link-saves       point the game's own save folder (Android app storage,
+#                      which lives in the title's compatdata and goes with a
+#                      Lepton reset) at ~/Documents/GTASAVR/saves. Needs one
+#                      launch of the title first so the folder exists; run it
+#                      with the game closed. Existing files are copied over and
+#                      the old folder is kept as files.orig-<time>.
 #   --no-install       skip adb install
 #   --no-launch        skip starting the game over adb
 #   --logcat SECONDS   after launching, capture SECONDS of log into
@@ -51,6 +57,7 @@ adb_bin="${ADB:-${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools/adb}"
 apk=""
 payload=""
 register=0
+link_saves=0
 install=1
 launch=1
 use_adb=1
@@ -63,6 +70,7 @@ while (($#)); do
 	--apk) apk="$2"; shift 2 ;;
 	--payload) payload="$2"; shift 2 ;;
 	--register-title) register=1; shift ;;
+	--link-saves) link_saves=1; shift ;;
 	--no-install) install=0; shift ;;
 	--no-launch) launch=0; shift ;;
 	--logcat) logcat_seconds="$2"; shift 2 ;;
@@ -111,6 +119,36 @@ if ((register)); then
 	parms="{\"gameid\": \"$title\", \"directory\": \"/home/steamos/devkit-game/$title\", \"force_appid\": \"\", \"argv\": [\"$title_apk\"], \"env\": {}, \"settings\": {\"steam_play\": \"1\", \"compat_tool\": \"lepton\"}, \"lepton_args\": \"\"}"
 	# needs the Steam client running on the Frame; it answers with success or an error
 	ssh_frame "cd ~/devkit-utils && python3 steam-client-create-shortcut --parms '$parms'"
+fi
+
+# ---- Saves into Documents ----------------------------------------------------
+# Inside Lepton the app's external files dir is a FUSE view of the title's
+# compatdata on the host, and the container mounts ~/Documents at the same
+# absolute path, so a host-side symlink is followed from inside the game.
+if ((link_saves)); then
+	appid="$(ssh_frame "python3 - <<'PY'
+import glob, re, struct
+for f in glob.glob('/home/steamos/.local/share/Steam/userdata/*/config/shortcuts.vdf'):
+    d = open(f, 'rb').read()
+    for m in re.finditer(rb'\\x02appid\\x00(....)', d, re.I | re.S):
+        n = re.search(rb'\\x01appname\\x00([^\\x00]*)\\x00', d[m.end():m.end() + 300], re.I)
+        if n and n.group(1).endswith(b'$title'):
+            print(struct.unpack('<I', m.group(1))[0])
+PY")"
+	[[ -n "$appid" ]] || die "no Steam shortcut for $title (register it with --register-title)"
+	ssh_frame "set -e
+		F=~/.local/share/Steam/steamapps/compatdata/$appid/external/Android/data/$package/files
+		S=~/$data/saves
+		[ -e \"\$F\" ] || { echo 'launch $title once first, so its save folder exists' >&2; exit 1; }
+		mkdir -p \"\$S\"
+		if [ ! -L \"\$F\" ]; then
+			cp -a \"\$F/.\" \"\$S/\"
+			mv \"\$F\" \"\$F.orig-\$(date +%s)\"
+			ln -s \"\$S\" \"\$F\"
+		fi
+		chmod 777 \"\$S\"; chmod 666 \"\$S\"/* 2>/dev/null || true
+		ls -la \"\$F\""
+	echo "saves now in ~/$data/saves"
 fi
 
 ((use_adb)) || exit 0
