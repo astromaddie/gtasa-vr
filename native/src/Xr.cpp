@@ -654,7 +654,19 @@ bool    g_stereoRenderPoseValid[kStereoSets] = {};
 // per-eye pose/fov describe that screen as seen from the real eyes, and never
 // draws head-locked content (hands, HUD, scope) over them.
 constexpr float kCinemaScreenW = 2.56f;
-constexpr float kCinemaScreenH = 1.44f;
+constexpr float kCinemaScreenH = 1.44f;        // the 16:9 picture
+// A black band under the picture, part of the same screen plane, where the
+// subtitles go (the GTA III / Vice City cinema does the same). Subtitles drawn
+// over the picture sit at the screen plane while the picture behind them has
+// depth, which reads as two depths at once; in the band there is no 3D image
+// for them to disagree with.
+constexpr float kCinemaBandH = 0.48f;
+constexpr float kCinemaTotalH = kCinemaScreenH + kCinemaBandH;
+// Fraction of the screen (and of the swapchain image) the picture occupies.
+constexpr float kCinemaPictureFrac = kCinemaScreenH / kCinemaTotalH;
+// The whole picture-plus-band rectangle sits this far above eye level, so the
+// band stays within an easy downward glance.
+constexpr float kCinemaRaiseM = 0.08f;
 constexpr float kCinemaDistance = 2.0f;
 std::atomic<bool>     g_stereoCinema[kStereoSets]{};
 std::atomic<bool>     g_pendingCinema{false};
@@ -673,6 +685,33 @@ struct CinemaAnchor {
 };
 CinemaAnchor g_cinemaAnchor;
 #endif
+// How old a published stereo pair may be, and how many presents in a row may
+// reuse it, before the compositor stops trusting it and falls back to black.
+// A head-locked world frame is only valid for a moment: the runtime re-projects
+// it to the live head pose, and past ~90 ms the rotation it has to undo is
+// large enough that the rendered area runs out (black bands at the edge of the
+// view, or the whole-view black fallback when the frame is rejected). A cinema
+// frame has no such limit: its pose and field of view are rebuilt from the live
+// eye positions on every present and its image is exactly the screen
+// rectangle, so a late or repeated frame is just a picture that has stopped
+// moving. Giving it a long leash means a scripted scene that hitches (new area
+// streaming in behind a camera cut) holds the last picture instead of
+// flashing black.
+inline bool StereoSetIsCinema(int set) {
+#ifdef SAVR_STEAM_FRAME
+    return set >= 0 && set < kStereoSets &&
+           g_stereoCinema[set].load(std::memory_order_relaxed);
+#else
+    (void)set;
+    return false;
+#endif
+}
+inline double StereoHardMaxAgeMs(int set) {
+    return StereoSetIsCinema(set) ? 2500.0 : kStereoHardMaxAgeMs;
+}
+inline int StereoRepeatGracePresents(int set) {
+    return StereoSetIsCinema(set) ? 240 : kStereoRepeatGracePresents;
+}
 MobileColorState g_pendingMobileColor{};
 MobileColorState g_stereoMobileColor[kStereoSets]{};
 // Hand poses baked into each set, captured when that set's eye textures were
@@ -4477,7 +4516,8 @@ bool DrawEyeFxaa(GLuint sourceTexture, int sourceWidth, int sourceHeight,
                  int targetWidth, int targetHeight,
                  float underWaterness, float waterDepth,
                  const MobileColorState& mobileColor,
-                 const FxaaGlState& restoreState, FxaaFrameStats& stats) {
+                 const FxaaGlState& restoreState, FxaaFrameStats& stats,
+                 int targetY = 0) {
     if (sourceTexture == 0 || sourceWidth <= 0 || sourceHeight <= 0 ||
         !BuildFxaaProgram() || g_fxaaRuntimeFailed) {
         stats.active = false;
@@ -4506,7 +4546,7 @@ bool DrawEyeFxaa(GLuint sourceTexture, int sourceWidth, int sourceHeight,
     }
 
     if (drawOk) {
-        glViewport(0, 0, targetWidth, targetHeight);
+        glViewport(0, targetY, targetWidth, targetHeight);
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glUseProgram(s.fxaaProgram);
         glBindVertexArray(s.fxaaVertexArray);
@@ -4572,7 +4612,8 @@ bool DrawEyeUnderwaterCopy(GLuint sourceTexture,
                            int targetWidth, int targetHeight,
                            float underWaterness, float waterDepth,
                            const MobileColorState& mobileColor,
-                           const FxaaGlState& restoreState) {
+                           const FxaaGlState& restoreState,
+                           int targetY = 0) {
     if (sourceTexture == 0 || targetWidth <= 0 || targetHeight <= 0 ||
         (underWaterness <= 0.001f && mobileColor.mode == 0) ||
         !BuildUnderwaterCopyProgram() ||
@@ -4598,7 +4639,7 @@ bool DrawEyeUnderwaterCopy(GLuint sourceTexture,
     }
 
     if (drawOk) {
-        glViewport(0, 0, targetWidth, targetHeight);
+        glViewport(0, targetY, targetWidth, targetHeight);
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glUseProgram(s.underwaterProgram);
         glBindVertexArray(s.underwaterVertexArray);
@@ -11615,13 +11656,18 @@ bool BuildCinemaOverlayProgram() {
     return true;
 }
 
-// Subtitle band, as fractions of the screen (top-left origin). The text raster
-// is 2048x512 (4:1); the eye image is stretched to the 16:9 screen, so the
-// height fraction is chosen to give the text a 4:1 box on the screen itself.
-constexpr float kCinemaSubtitleX = 0.14f;
-constexpr float kCinemaSubtitleW = 0.72f;
-constexpr float kCinemaSubtitleH = kCinemaSubtitleW * (16.0f / 9.0f) / 4.0f;
-constexpr float kCinemaSubtitleY = 0.97f - kCinemaSubtitleH;
+// Subtitle box inside the band, as fractions of the whole screen image
+// (top-left origin). The text raster is 2048x512 (4:1), so on the 2.56 m wide
+// screen a 1.76 m wide box is 0.44 m tall; the band is 0.48 m. The eye image
+// is stretched over the picture part only, so the fractions are of the full
+// swapchain image (picture on top, band under it).
+constexpr float kCinemaSubtitleWm = 1.76f;
+constexpr float kCinemaSubtitleHm = kCinemaSubtitleWm / 4.0f;
+constexpr float kCinemaSubtitleX = 0.5f - 0.5f * kCinemaSubtitleWm / kCinemaScreenW;
+constexpr float kCinemaSubtitleW = kCinemaSubtitleWm / kCinemaScreenW;
+constexpr float kCinemaSubtitleH = kCinemaSubtitleHm / kCinemaTotalH;
+constexpr float kCinemaSubtitleY = kCinemaPictureFrac +
+    0.5f * (1.0f - kCinemaPictureFrac - kCinemaSubtitleH);
 
 void DrawCinemaOverlay(int targetWidth, int targetHeight, unsigned fadeRgba,
                        bool subtitlesBeforeFade) {
@@ -11705,11 +11751,13 @@ bool ApplyCinemaViewGeometry(XrCompositionLayerProjectionView views[2]) {
         g_cinemaAnchor.orientation = {0.0f, std::sin(yaw * 0.5f), 0.0f,
                                       std::cos(yaw * 0.5f)};
         g_cinemaAnchor.centre = {head.position.x - std::sin(yaw) * kCinemaDistance,
-                                 head.position.y,
+                                 head.position.y + kCinemaRaiseM,
                                  head.position.z - std::cos(yaw) * kCinemaDistance};
-        LOGI("[cinema3d] anchor yaw %.1f deg, screen %.2fx%.2f m centre (%.2f %.2f %.2f) "
+        LOGI("[cinema3d] anchor yaw %.1f deg, screen %.2fx%.2f m (picture %.2f m + "
+             "subtitle band %.2f m) centre (%.2f %.2f %.2f) "
              "%.1f m ahead (recenter serial %u)",
-             yaw * 57.2957795f, kCinemaScreenW, kCinemaScreenH,
+             yaw * 57.2957795f, kCinemaScreenW, kCinemaTotalH, kCinemaScreenH,
+             kCinemaBandH,
              g_cinemaAnchor.centre.x, g_cinemaAnchor.centre.y,
              g_cinemaAnchor.centre.z, kCinemaDistance, serial);
     }
@@ -11726,7 +11774,7 @@ bool ApplyCinemaViewGeometry(XrCompositionLayerProjectionView views[2]) {
         const float ez = sn * dx + c * dz;
         if (!(ez > 0.1f)) return false;
         const float halfW = 0.5f * kCinemaScreenW;
-        const float halfH = 0.5f * kCinemaScreenH;
+        const float halfH = 0.5f * kCinemaTotalH;
         views[e].pose.orientation = q;
         views[e].pose.position = eyes[e].position;
         views[e].fov.angleLeft  = std::atan2(-halfW - ex, ez);
@@ -11790,7 +11838,7 @@ bool RenderStereoEyeProjection(XrCompositionLayerProjection& layer,
         outcome = perf::StereoProjectionOutcome::NoSafePair;
         return false;
     }
-    if (candidate.ageMs > kStereoHardMaxAgeMs) {
+    if (candidate.ageMs > StereoHardMaxAgeMs(set)) {
         outcome = perf::StereoProjectionOutcome::StaleRejected;
         return false;
     }
@@ -11939,14 +11987,29 @@ bool RenderStereoEyeProjection(XrCompositionLayerProjection& layer,
         // belonging to this slot. The scope guard transfers the CPU lease to a
         // GPU fence on every return path after this point.
         gpuRead.MarkIssued();
+        // A cinema frame puts the picture in the top part of the image and
+        // leaves a black band under it for the subtitles. GL rows run bottom
+        // to top, so the picture's rectangle starts bandPx up from row 0.
+        int picY = 0, picH = chain.height;
+#ifdef SAVR_STEAM_FRAME
+        if (cinemaSlot) {
+            picY = static_cast<int>(std::lround(
+                static_cast<float>(chain.height) * (1.0f - kCinemaPictureFrac)));
+            picH = chain.height - picY;
+            glDisable(GL_SCISSOR_TEST);
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+        }
+#endif
         const bool usedFxaa = fxaaStats.requested &&
-            DrawEyeFxaa(sourceTexture, ew, eh, chain.width, chain.height,
+            DrawEyeFxaa(sourceTexture, ew, eh, chain.width, picH,
                         underWaterness, waterDepth, mobileColor,
-                        fxaaGlState, fxaaStats);
+                        fxaaGlState, fxaaStats, picY);
         const bool usedUnderwaterCopy = !usedFxaa &&
-            DrawEyeUnderwaterCopy(sourceTexture, chain.width, chain.height,
+            DrawEyeUnderwaterCopy(sourceTexture, chain.width, picH,
                                   underWaterness, waterDepth, mobileColor,
-                                  fxaaGlState);
+                                  fxaaGlState, picY);
         // Bind the source only after FXAA has finished sampling it. This keeps
         // the shader path free of attached-texture ambiguity while preserving
         // the proven complete READ FBO required by the late-hand depth copy.
@@ -11957,7 +12020,7 @@ bool RenderStereoEyeProjection(XrCompositionLayerProjection& layer,
             if (fxaaStats.requested) ++fxaaStats.fallbacks;
             // Exact pre-FXAA path. Keep it byte-for-byte equivalent so property
             // OFF and every shader failure remain a trustworthy A/B baseline.
-            glBlitFramebuffer(0, 0, ew, eh, 0, 0, chain.width, chain.height,
+            glBlitFramebuffer(0, 0, ew, eh, 0, picY, chain.width, chain.height,
                               GL_COLOR_BUFFER_BIT, GL_LINEAR);
         }
         if (render_diag::Enabled()) {
@@ -12018,7 +12081,8 @@ bool RenderStereoEyeProjection(XrCompositionLayerProjection& layer,
                     ? perf::StereoProjectionOutcome::GenerationPost
                     : completedFailure;
                 ok = false;
-            } else if (completedCandidate.ageMs > kStereoHardMaxAgeMs) {
+            } else if (completedCandidate.ageMs >
+                       StereoHardMaxAgeMs(completedCandidate.set)) {
                 outcome = perf::StereoProjectionOutcome::StaleRejected;
                 ok = false;
             } else {
@@ -12507,7 +12571,8 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs) {
             bool submitProjection = false;
             if (sStereoLiveness == perf::StereoLivenessState::Stale ||
                 sStereoLiveness == perf::StereoLivenessState::Recovering) {
-                if (haveCandidate && candidate.ageMs <= kStereoHardMaxAgeMs &&
+                if (haveCandidate &&
+                    candidate.ageMs <= StereoHardMaxAgeMs(candidate.set) &&
                     candidate.sequence > sStaleBaselineSequence) {
                     if (candidate.sequence > sRecoveryLastSequence) {
                         const int base = std::max(sStaleBaselineSequence,
@@ -12538,8 +12603,9 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs) {
                 selectedStereoRepeat = repeated;
                 projectedRepeatCount = repeated
                     ? sConsecutiveStereoRepeats + 1 : 0;
-                if (candidate.ageMs > kStereoHardMaxAgeMs ||
-                    projectedRepeatCount > kStereoRepeatGracePresents) {
+                if (candidate.ageMs > StereoHardMaxAgeMs(candidate.set) ||
+                    projectedRepeatCount >
+                        StereoRepeatGracePresents(candidate.set)) {
                     sStereoLiveness = perf::StereoLivenessState::Stale;
                     sStaleBaselineSequence = candidate.sequence;
                     sRecoveryLastSequence = candidate.sequence;

@@ -76,9 +76,20 @@ void CycleCutsceneMode(int direction);
 const char* CutsceneModeName();
 // Same three modes for GAMEPLAY cutscenes (mid-mission scripted cameras:
 // controls disabled + widescreen, no CCutsceneMgr). Default FIRST PERSON.
+// 0 cinema (flat), 1 cinematic, 2 first person, 3 cinema 3D (Frame; its default).
 int  GameCutsceneMode();
 void CycleGameCutsceneMode(int direction);
 const char* GameCutsceneModeName();
+
+// Gameplay view. FIRST PERSON is the kit's normal immersive view; OVER
+// SHOULDER is stereo from behind the player (level horizon, hands hidden,
+// the game's own pad-style controls). A short press of the left View button
+// in gameplay toggles it; the VR menu has a row for it too.
+enum ViewModeKind { VIEW_FIRST_PERSON=0, VIEW_OVER_SHOULDER, VIEW_COUNT };
+int  ViewMode();
+bool ThirdPersonView();               // ViewMode()==VIEW_OVER_SHOULDER
+void CycleViewMode(int direction);    // persists
+const char* ViewModeName();
 
 // Vice City parity: a stereo cutscene remembers which staged camera the
 // player kept for that named scene. -1 means the scene has no saved choice.

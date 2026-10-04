@@ -3220,6 +3220,8 @@ void PublishCinemaOverlayState() {
 }
 #endif
 
+bool ScriptedCutsceneRunning();
+
 bool ShouldRunStereo() {
     if (missionscenes::Theater()) return false;
     // Retail deliberately skips ConstructRenderList/RenderScene at a fully
@@ -3245,32 +3247,28 @@ bool ShouldRunStereo() {
     if (MobileMenuOpen()) return false;
     // DANCE locks locomotion throughout play; its verified beach phase has a VR HUD.
     if (beachdance::Active()) return true;
+    // In-engine scene (mid-mission scripted camera). The letterbox is the
+    // marker; ScriptedCutsceneRunning holds it through short gaps, so this
+    // gate does not flap between the stereo and flat paths (every flip is a
+    // visible black frame). Flat CINEMA keeps the retail 2D frame on the
+    // theater screen; the three stereo modes keep stereo running (CINEMA 3D
+    // draws the script's camera on the framed screen, CINEMATIC and FIRST
+    // PERSON are head-tracked).
+    if (ScriptedCutsceneRunning()) return locomotion::GameCutsceneMode() != 0;
     // Scripted shop interfaces (barber chair, clothes stores, tattoo, food
     // menus...) disable player controls and run a scripted 2D camera with
     // touch widgets. In stereo we stomp that camera with the live head pose
     // and the widgets are unreachable — the shop soft-locks. Whenever
-    // gameplay controls are script-disabled, fall back to the theater screen:
-    // the flat frame shows the scripted view and the laser pointer can drive
-    // the shop menu. (CPad+0x110 is the DisablePlayerControls halfword every
-    // CPad accessor gates on — disasm-verified across GetJump/CarGun/etc.)
+    // gameplay controls are script-disabled (and there is no letterbox, which
+    // is what marks a cutscene), fall back to the theater screen: the flat
+    // frame shows the scripted view and the laser pointer can drive the shop
+    // menu. (CPad+0x110 is the DisablePlayerControls halfword every CPad
+    // accessor gates on — disasm-verified across GetJump/CarGun/etc.)
     if (g.CPad_GetPad != nullptr) {
         if (const void* pad = g.CPad_GetPad(0)) {
             if (*reinterpret_cast<const std::uint16_t*>(
                     static_cast<const char*>(pad) + 0x110) != 0) {
-                // GAMEPLAY cutscene vs shop UI: mid-mission scripted cameras
-                // also disable controls, but they raise the widescreen
-                // borders (CCamera+0x43 - SetWideScreenOn stores the 0x100
-                // halfword at +0x42, disasm-verified) while shop menus stay
-                // full-frame. Widescreen + a non-CINEMA game-cutscene mode
-                // keeps stereo running: FIRST PERSON stays in CJ's head,
-                // CINEMATIC rides the script camera. Everything else keeps
-                // the theater (shops need the laser pointer).
-                const bool widescreen = g.TheCamera &&
-                    *(reinterpret_cast<const std::uint8_t*>(g.TheCamera) +
-                      0x43) != 0;
-                if (!(widescreen && locomotion::GameCutsceneMode() != 0)) {
-                    return false;
-                }
+                return false;
             }
         }
     }
@@ -3357,25 +3355,53 @@ bool FormalCutsceneRunning() {
     return g.CCutsceneMgr_ms_running && *g.CCutsceneMgr_ms_running;
 }
 
+// In-engine (scripted) scene detection with hysteresis. The authoritative
+// marker is the letterbox (CCamera m_WideScreenOn at +0x43), the same one the
+// phone build keys its cinematic bars on; Vice City parity. The raw flag
+// flickers: mission scripts drop it for a frame or two between shots, and
+// some raise it for a fraction of a second. If the presentation followed the
+// raw value the view would hop between the cinema screen, the head-tracked
+// view and the HUD. So the scene starts the moment the letterbox is up, and
+// ends only after the letterbox has stayed down for kScriptedExitHoldMs and
+// the scene has been up for at least kScriptedMinDwellMs. Every consumer
+// (stereo gate, cinema gate, HUD/body hiding, camera controls) reads this one
+// latch, so none of them can disagree about whether a scene is running.
+constexpr double kScriptedExitHoldMs = 800.0;
+constexpr double kScriptedMinDwellMs = 1500.0;
+std::atomic<bool> g_scriptedSceneActive{false};
+std::atomic<double> g_scriptedSceneEnteredMs{0.0};
+
 bool ScriptedCutsceneRunning() {
     if (FormalCutsceneRunning() || !g.TheCamera || beachdance::Active()) {
         g_scriptedCutsceneLastWideMs = -1.0;
+        g_scriptedSceneActive.store(false, std::memory_order_relaxed);
         return false;
     }
-    // Vice City parity: the letterbox is the authoritative marker for an
-    // in-world scripted scene. Some SA mission scripts leave player controls
-    // enabled, so requiring CPad+0x110 made the R3/L3 camera UI appear to work
-    // only in a subset of gameplay cutscenes.
     const bool widescreen = *(
         reinterpret_cast<const std::uint8_t*>(g.TheCamera) + 0x43) != 0;
     const double nowMs = NowMs();
     if (widescreen) g_scriptedCutsceneLastWideMs = nowMs;
-    // Several mission cameras clear the letterbox for one or two frames while
-    // blending between shots. Treat that as the same scene: dropping to normal
-    // gameplay for those frames made the remembered actor camera visibly flash
-    // back to the director and also briefly restored the HUD.
-    return widescreen || (g_scriptedCutsceneLastWideMs >= 0.0 &&
-                          nowMs - g_scriptedCutsceneLastWideMs <= 250.0);
+    const bool active = g_scriptedSceneActive.load(std::memory_order_relaxed);
+    if (!active) {
+        if (widescreen) {
+            g_scriptedSceneActive.store(true, std::memory_order_relaxed);
+            g_scriptedSceneEnteredMs.store(nowMs, std::memory_order_relaxed);
+            LOGI("[cutscene.scripted] scene on (letterbox up, game cutscene mode %s)",
+                 locomotion::GameCutsceneModeName());
+            return true;
+        }
+        return false;
+    }
+    if (!widescreen &&
+        nowMs - g_scriptedCutsceneLastWideMs >= kScriptedExitHoldMs &&
+        nowMs - g_scriptedSceneEnteredMs.load(std::memory_order_relaxed) >=
+            kScriptedMinDwellMs) {
+        g_scriptedSceneActive.store(false, std::memory_order_relaxed);
+        LOGI("[cutscene.scripted] scene off (letterbox down %.0f ms)",
+             nowMs - g_scriptedCutsceneLastWideMs);
+        return false;
+    }
+    return true;
 }
 
 bool CutsceneCameraControlsActiveInternal() {
@@ -3385,7 +3411,12 @@ bool CutsceneCameraControlsActiveInternal() {
         // CINEMA 3D has one fixed camera: the director's.
         return mode == 1 || mode == 2;
     }
-    if (ScriptedCutsceneRunning()) return locomotion::GameCutsceneMode() != 0;
+    if (ScriptedCutsceneRunning()) {
+        const int mode = locomotion::GameCutsceneMode();
+        // Flat CINEMA has no stereo camera at all, and CINEMA 3D (Frame) has
+        // one fixed camera: the script's own.
+        return mode == 1 || mode == 2;
+    }
     return false;
 }
 
@@ -3394,7 +3425,10 @@ bool CutsceneCameraControlsActiveInternal() {
 // non-flat CutsceneMode through; this picks the framed stereo presentation.
 bool Cinema3DWanted() {
     if (missionscenes::Theater()) return false;
-    return FormalCutsceneRunning() && locomotion::CutsceneMode() == 3;
+    if (FormalCutsceneRunning()) return locomotion::CutsceneMode() == 3;
+    // In-engine scenes use the same screen. ScriptedCutsceneRunning is the
+    // hysteresis latch, so this does not flap with the raw letterbox flag.
+    return ScriptedCutsceneRunning() && locomotion::GameCutsceneMode() == 3;
 }
 #endif
 
