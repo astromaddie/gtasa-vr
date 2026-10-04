@@ -73,6 +73,27 @@ struct InputState {
     bool  pointerPressed{};
     float pointerU{};
     float pointerV{};
+
+    // Steam Frame: the same ray can land on the VR menu panel instead (nearest
+    // surface wins). pointerMenu is true while it does; menuU/menuV are [0,1]
+    // across the panel (v from the top) and menuRow is the absolute row index of
+    // the page whose layout is identified by menuRowsId (a MenuRowsId), or -1
+    // between rows. pointerPressed carries the trigger (hysteresis 0.6/0.45) for
+    // either surface.
+    bool  pointerMenu{};
+    float menuU{};
+    float menuV{};
+    int   menuRowsId{};
+    int   menuRow{-1};
+};
+
+// Identifies which VR menu page produced InputState::menuRow, so a hover that
+// was computed against the previous page's layout is never applied to a new one.
+enum MenuRowsId {
+    MR_NONE = 0, MR_MAIN, MR_CALIB, MR_HOLSTER_CALIB, MR_HOLSTERS, MR_DRIVING,
+    MR_DRIVING_CALIB, MR_LOCOMOTION, MR_JETPACK, MR_VEHICLE_CAMERA,
+    MR_BASKETBALL, MR_BASKETBALL_CALIB, MR_HUD, MR_CHEATS, MR_GRAPHICS,
+    MR_MODEL_SETS, MR_CONTROLS, MR_GFX_DISTANCES,
 };
 
 // Copy out the most recent controller state. Cheap; safe to call every frame.

@@ -142,6 +142,56 @@ the Frame default: at midday in Los Angeles the gain works out to about
 game has, so if it turns out too strong, switch it back in the menu. The flat
 screen (menus, flat CINEMA) is not filtered.
 
+## Laser pointer, menu pointing and upright sprites
+
+Host build, not worn. Three rules shared with the other Steam Frame ports.
+
+**The pointer is always on top.** In the flat screen (frontend, pause, the
+barber chair and similar) and in the VR menu, the right controller's aim pose
+casts a ray. It is tested against the flat game screen and the VR menu panel,
+using the quads exactly as they were last submitted (their real pose and size,
+no hard-coded numbers), and the nearest hit wins. The pointer is drawn as two
+alpha-blended quad layers, a thin beam from the controller to the hit point and a
+cursor dot (cyan, amber while the trigger is down), submitted last. Layer order
+each frame is now: world projection or flat screen, VR menu panel (when open),
+beam, dot. SteamVR composites later layers over earlier ones, so the beam can no
+longer disappear behind the VR menu or the cinema. If the ray hits nothing the
+beam still shows (1.5 m long, no dot) so you can find the screen. In gameplay
+there is nothing to point at and no pointer layers are submitted. The old arrow
+baked into the flat screen is kept only as a fallback if the pointer swapchain
+cannot be created. The trigger uses hysteresis (down at 0.6, up at 0.45), with a
+10 ms 0.2 hover pulse on the right hand when the hovered menu row changes and a
+30 ms 0.5 click pulse (`ui_hover` / `ui_click`; the kit has no haptics-scale
+setting yet, so these are unscaled). The dot and beam face the head about world
+up, so they do not roll.
+
+**The VR menu is pointer-operable.** Hovering a row selects it (only when the
+hovered row changes, so the left stick keeps working while the ray rests
+elsewhere). Trigger click on the middle of a row does what A does; a click on
+the outer 16% at either side steps that row's value down (left) or up (right),
+like L2/R2. While the ray is on the panel the right trigger is the click and
+no longer R2 "plus" (L2 still steps down), which is the one behaviour change.
+The row layout of each page is registered by its builder (`PanelRowsSet`, one
+line per page), including the scrolling pages, and a page change is ignored for
+three frames so a hover from the old page cannot land on the new one. About and
+Control Tips close on any click. Log line: `[ui.pointer]`.
+
+**Sprites never roll with the head.** Coronas and wet-road reflections used the
+per-eye camera basis, roll included. They now build their axes from world up
+(right = normalize(cross(up, toCentre)), up = cross(toCentre, right), like the
+sky quads), with the signs taken from the camera's own left/up so the textures
+keep their orientation; straight above or below the eye the camera basis is
+used. Centres are unchanged, so they still sit on their light sources in both
+eyes. The scope reticle stays centred on the aim, but the cross is drawn in a
+frame whose vertical follows world up (the head roll at the eye image's render
+pose is counter-rotated); the circular mask is rotation-invariant. The front HUD
+and the sky sun/moon were already upright.
+
+What to look at on the headset: the beam above the VR menu, above the 3D cinema
+and above the flat pause menu; the dot landing on the right row; clicking rows,
+the side zones and the sliders; tilting your head while looking at a street
+lamp, a wet road or through a scope.
+
 ## Build (Mac or Linux)
 
 You need the merged game APK, the PS2 audio pack (extracted is fine), an

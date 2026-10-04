@@ -640,6 +640,44 @@ std::vector<float>          g_wpnObjVerts;         // xyz per vertex, object spa
 std::vector<unsigned short> g_wpnObjIdx;           // triangle indices into the above
 constexpr int         kPanelW = 512, kPanelH = 512;   // FPS/profiler + cheat-menu panel
 
+// Laser pointer surfaces. The submit code records the quad each pointer target
+// was last submitted with (pose and size as handed to the compositor); the
+// pointer ray-tests those, so it never carries its own copy of the numbers. A
+// surface is only a target while it was submitted within the last two frames.
+struct PointerSurface {
+    bool valid{false};
+    unsigned long long frame{0};
+    bool headLocked{false};              // pose is in view space, not LOCAL
+    XrPosef pose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+    XrExtent2Df size{0.0f, 0.0f};
+};
+PointerSurface g_ptrTheater;             // flat game screen (menus, frontend, pause)
+PointerSurface g_ptrMenu;                // VR settings panel
+bool g_debugPanelIsMenu = false;         // PresentDebugPanel drew a menu page, not the profiler
+
+// Row layout of the VR menu page that was drawn last, in panel pixels: row k
+// occupies [top - bandUp + k * pitch, top - bandUp + (k + 1) * pitch). Written by
+// the page builders, read by the pointer.
+struct PanelRowLayout {
+    int id{0};
+    int first{0}, count{0};
+    int top{0}, pitch{1}, bandUp{6};
+};
+PanelRowLayout g_panelRows;
+void PanelRowsSet(int id, int first, int count, int top, int pitch, int bandUp) {
+    g_panelRows = {id, first, count, top, pitch > 0 ? pitch : 1, bandUp};
+}
+
+// What the pointer worked out this frame; the pointer layers are built from it.
+struct PointerFrame {
+    bool active{false};
+    bool hit{false};
+    bool pressed{false};
+    XrVector3f origin{}, dir{}, hitPos{}, head{};
+    bool headValid{false};
+};
+PointerFrame g_pointer;
+
 // The exact head pose (LOCAL space) each ring set's PIXELS were rendered at,
 // carried alongside the textures. The compositor world-anchors the presented quad
 // at this pose so the runtime's TimeWarp reprojects the render->scan-out head
@@ -2164,6 +2202,10 @@ struct State {
     // the Vice City VR port's overlay.
     Swapchain debug;
 
+    // Steam Frame laser pointer: beam strip + cursor dots, in their own
+    // alpha-blended quad layers that are submitted last.
+    Swapchain pointer;
+
     // Original mobile HUD rendered into a transparent shared texture and
     // submitted as a head-locked quad, independently of the world projection.
     Swapchain hud;
@@ -3380,6 +3422,42 @@ bool CreateSwapchains() {
                                    reinterpret_cast<XrSwapchainImageBaseHeader*>(s.debug.images.data()));
         LOGI("debug swapchain %dx%d, %u images", s.debug.width, s.debug.height, imageCount);
     }
+
+#ifdef SAVR_STEAM_FRAME
+    // Laser pointer atlas (kPointerTexW x kPointerTexH, uploaded from CPU pixels).
+    // If this fails the baked arrow in the theater swapchain stays as fallback.
+    {
+        XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+        info.usageFlags  = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+        info.format      = g_swapchainFormat;
+        info.sampleCount = 1;
+        info.width       = 192;
+        info.height      = 64;
+        info.faceCount   = 1;
+        info.arraySize   = 1;
+        info.mipCount    = 1;
+        s.pointer.width  = info.width;
+        s.pointer.height = info.height;
+        s.pointer.poisoned = false;
+        XrSwapchain handle = XR_NULL_HANDLE;
+        if (XR_SUCCEEDED(xrCreateSwapchain(s.session, &info, &handle))) {
+            uint32_t imageCount = 0;
+            xrEnumerateSwapchainImages(handle, 0, &imageCount, nullptr);
+            s.pointer.images.assign(imageCount, {XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR});
+            if (imageCount > 0 &&
+                XR_SUCCEEDED(xrEnumerateSwapchainImages(handle, imageCount, &imageCount,
+                    reinterpret_cast<XrSwapchainImageBaseHeader*>(s.pointer.images.data())))) {
+                s.pointer.handle = handle;
+                LOGI("[savr-frame] pointer swapchain %dx%d, %u images",
+                     s.pointer.width, s.pointer.height, imageCount);
+            } else {
+                LOGE("[savr-frame] pointer swapchain images unavailable; baked arrow stays");
+            }
+        } else {
+            LOGE("[savr-frame] pointer swapchain create failed; baked arrow stays");
+        }
+    }
+#endif
 
     // Dedicated gameplay HUD quad. Unlike the settings/debug pixels, its source
     // is a shared RenderWare camera-texture produced by the game thread.
@@ -4909,7 +4987,14 @@ bool RenderTheaterQuad(XrSpace space, XrCompositionLayerQuad& quad,
     const int cropHi = g_theaterCropH.load(std::memory_order_relaxed);
     const bool cropped = cropWi > 0 && cropHi > 0;
     const int cropOffY = 0;
-    if (source == TheaterFrameSource::GameSurface &&
+#ifdef SAVR_STEAM_FRAME
+    // The pointer has its own top layer now; the arrow is only the fallback.
+    const bool bakedArrowWanted =
+        s.pointer.handle == XR_NULL_HANDLE || s.pointer.poisoned;
+#else
+    constexpr bool bakedArrowWanted = true;
+#endif
+    if (bakedArrowWanted && source == TheaterFrameSource::GameSurface &&
         s.input.pointerValid && BuildCursorResources()) {
         const float cw = static_cast<float>(s.theater.width);
         const float ch = static_cast<float>(s.theater.height);
@@ -5134,6 +5219,190 @@ bool CreateInput() {
     return true;
 }
 
+#ifdef SAVR_STEAM_FRAME
+// ---------------------------------------------------------------------------
+// Laser pointer (Steam Frame): ray from the right controller's aim pose against
+// the flat game screen and the VR menu panel, nearest hit wins. The beam and dot
+// are separate alpha-blended quad layers submitted after everything else
+// (PresentPointerLayers), so they sit above menus, panels, the cinema, the HUD
+// and the world.
+// ---------------------------------------------------------------------------
+inline XrVector3f PtAdd(XrVector3f a, XrVector3f b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
+inline XrVector3f PtSub(XrVector3f a, XrVector3f b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+inline XrVector3f PtScale(XrVector3f a, float k) { return {a.x * k, a.y * k, a.z * k}; }
+inline float PtDot(XrVector3f a, XrVector3f b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+inline XrVector3f PtCross(XrVector3f a, XrVector3f b) {
+    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+inline XrVector3f PtNorm(XrVector3f a, XrVector3f fallback) {
+    const float l = std::sqrt(PtDot(a, a));
+    return (std::isfinite(l) && l > 1e-6f) ? PtScale(a, 1.0f / l) : fallback;
+}
+inline XrVector3f PtRotate(const XrQuaternionf& q, XrVector3f v) {
+    const XrVector3f u{q.x, q.y, q.z};
+    const XrVector3f t2 = PtScale(PtCross(u, v), 2.0f);
+    return PtAdd(PtAdd(v, PtScale(t2, q.w)), PtCross(u, t2));
+}
+inline XrQuaternionf PtConj(const XrQuaternionf& q) { return {-q.x, -q.y, -q.z, q.w}; }
+inline XrQuaternionf PtMul(const XrQuaternionf& a, const XrQuaternionf& b) {
+    return {a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+            a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+            a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+            a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
+}
+// Rotation with the given axes as columns -> quaternion.
+XrQuaternionf PtFromAxes(XrVector3f x, XrVector3f y, XrVector3f z) {
+    const float m00 = x.x, m10 = x.y, m20 = x.z;
+    const float m01 = y.x, m11 = y.y, m21 = y.z;
+    const float m02 = z.x, m12 = z.y, m22 = z.z;
+    XrQuaternionf q{0.0f, 0.0f, 0.0f, 1.0f};
+    const float trace = m00 + m11 + m22;
+    if (trace > 0.0f) {
+        const float k = 0.5f / std::sqrt(trace + 1.0f);
+        q = {(m21 - m12) * k, (m02 - m20) * k, (m10 - m01) * k, 0.25f / k};
+    } else if (m00 > m11 && m00 > m22) {
+        const float k = 2.0f * std::sqrt(1.0f + m00 - m11 - m22);
+        q = {0.25f * k, (m01 + m10) / k, (m02 + m20) / k, (m21 - m12) / k};
+    } else if (m11 > m22) {
+        const float k = 2.0f * std::sqrt(1.0f + m11 - m00 - m22);
+        q = {(m01 + m10) / k, 0.25f * k, (m12 + m21) / k, (m02 - m20) / k};
+    } else {
+        const float k = 2.0f * std::sqrt(1.0f + m22 - m00 - m11);
+        q = {(m02 + m20) / k, (m12 + m21) / k, 0.25f * k, (m10 - m01) / k};
+    }
+    const float n = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    if (n > 1e-6f) q = {q.x / n, q.y / n, q.z / n, q.w / n};
+    return q;
+}
+
+// The pose a registered surface was submitted with, as LOCAL space.
+bool PtSurfaceWorldPose(const PointerSurface& sf, const XrPosef* head, XrPosef* out) {
+    if (!sf.valid || g_loopFrames.load(std::memory_order_relaxed) - sf.frame > 2) return false;
+    if (!sf.headLocked) {
+        *out = sf.pose;
+        return true;
+    }
+    if (!head) return false;
+    out->orientation = PtMul(head->orientation, sf.pose.orientation);
+    out->position = PtAdd(head->position, PtRotate(head->orientation, sf.pose.position));
+    return true;
+}
+
+// Ray against a quad (its +Z faces the viewer, X right, Y up). u from the left,
+// v from the top, both in [0,1] on a hit.
+bool PtRayQuad(const XrPosef& pose, const XrExtent2Df& size, XrVector3f o, XrVector3f d,
+               float* tOut, float* uOut, float* vOut) {
+    if (size.width <= 0.0f || size.height <= 0.0f) return false;
+    const XrQuaternionf inv = PtConj(pose.orientation);
+    const XrVector3f lo = PtRotate(inv, PtSub(o, pose.position));
+    const XrVector3f ld = PtRotate(inv, d);
+    if (ld.z >= -1e-4f) return false;            // pointing away from the face
+    const float t = -lo.z / ld.z;
+    if (!(t > 0.0f)) return false;
+    const float hx = lo.x + t * ld.x;
+    const float hy = lo.y + t * ld.y;
+    if (std::abs(hx) > size.width * 0.5f || std::abs(hy) > size.height * 0.5f) return false;
+    *tOut = t;
+    *uOut = hx / size.width + 0.5f;
+    *vOut = 0.5f - hy / size.height;
+    return true;
+}
+
+void UpdatePointer(InputState& in, XrTime displayTime) {
+    in.pointerValid = false;
+    in.pointerPressed = false;
+    in.pointerMenu = false;
+    in.menuU = in.menuV = 0.0f;
+    in.menuRowsId = MR_NONE;
+    in.menuRow = -1;
+    g_pointer = PointerFrame{};
+
+    // Trigger with hysteresis (press at 0.6, release below 0.45).
+    static bool sDown = false, sPrevDown = false;
+    static int sPrevRow = -1;
+    sDown = sDown ? in.triggers[1] > 0.45f : in.triggers[1] > 0.6f;
+    const bool clickEdge = sDown && !sPrevDown;
+    sPrevDown = sDown;
+
+    if (s.aimSpace == XR_NULL_HANDLE) {
+        sPrevRow = -1;
+        return;
+    }
+    XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+    if (!XR_SUCCEEDED(xrLocateSpace(s.aimSpace, s.space, displayTime, &loc)) ||
+        (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) == 0 ||
+        (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) == 0) {
+        sPrevRow = -1;
+        return;
+    }
+    const XrVector3f origin = loc.pose.position;
+    const XrVector3f dir = PtNorm(PtRotate(loc.pose.orientation, {0.0f, 0.0f, -1.0f}),
+                                  {0.0f, 0.0f, -1.0f});
+
+    XrPosef head{};
+    bool headValid = false;
+    if (s.viewSpace != XR_NULL_HANDLE) {
+        XrSpaceLocation hl{XR_TYPE_SPACE_LOCATION};
+        headValid = XR_SUCCEEDED(xrLocateSpace(s.viewSpace, s.space, displayTime, &hl)) &&
+            (hl.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0 &&
+            (hl.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0;
+        if (headValid) head = hl.pose;
+    }
+
+    XrPosef theaterPose{}, menuPose{};
+    const bool haveTheater = PtSurfaceWorldPose(g_ptrTheater, headValid ? &head : nullptr, &theaterPose);
+    const bool haveMenu = PtSurfaceWorldPose(g_ptrMenu, headValid ? &head : nullptr, &menuPose);
+    if (!haveTheater && !haveMenu) {   // gameplay: nothing to point at
+        sPrevRow = -1;
+        return;
+    }
+
+    float tT = 0, uT = 0, vT = 0, tM = 0, uM = 0, vM = 0;
+    const bool hitTheater = haveTheater &&
+        PtRayQuad(theaterPose, g_ptrTheater.size, origin, dir, &tT, &uT, &vT);
+    const bool hitMenu = haveMenu &&
+        PtRayQuad(menuPose, g_ptrMenu.size, origin, dir, &tM, &uM, &vM);
+
+    g_pointer.active = true;
+    g_pointer.pressed = sDown;
+    g_pointer.origin = origin;
+    g_pointer.dir = dir;
+    g_pointer.head = head.position;
+    g_pointer.headValid = headValid;
+
+    int row = -1;
+    if (hitMenu && (!hitTheater || tM <= tT)) {
+        g_pointer.hit = true;
+        g_pointer.hitPos = PtAdd(origin, PtScale(dir, tM));
+        in.pointerMenu = true;
+        in.menuU = uM;
+        in.menuV = vM;
+        in.pointerPressed = sDown;
+        const PanelRowLayout& rl = g_panelRows;
+        if (rl.id != MR_NONE && uM > 0.03f && uM < 0.97f) {
+            const int k = static_cast<int>(std::floor(
+                (vM * static_cast<float>(kPanelH) - static_cast<float>(rl.top - rl.bandUp)) /
+                static_cast<float>(rl.pitch)));
+            if (k >= 0 && k < rl.count) {
+                row = rl.first + k;
+                in.menuRowsId = rl.id;
+                in.menuRow = row;
+            }
+        }
+        if (row >= 0 && row != sPrevRow) TriggerHaptic(1, 0.2f, 0.0f, 10.0f);   // ui_hover
+        if (clickEdge) TriggerHaptic(1, 0.5f, 0.0f, 30.0f);                      // ui_click
+    } else if (hitTheater) {
+        g_pointer.hit = true;
+        g_pointer.hitPos = PtAdd(origin, PtScale(dir, tT));
+        in.pointerValid = true;
+        in.pointerU = uT;
+        in.pointerV = vT;
+        in.pointerPressed = sDown;
+        if (clickEdge) TriggerHaptic(1, 0.5f, 0.0f, 30.0f);                      // ui_click
+    }
+    sPrevRow = row;
+}
+#else
 // Cast the right controller's aim ray at the theater screen and store the hit as
 // [0,1] u,v. The screen matches RenderTheaterQuad: centred kTheaterDistance in
 // front, kTheaterWidth wide, facing the user.
@@ -5180,6 +5449,157 @@ void UpdatePointer(InputState& in, XrTime displayTime) {
     in.pointerV       = 0.5f - hy / height;          // 0 top,  1 bottom
     in.pointerPressed = in.triggers[1] > 0.5f;       // right trigger taps
 }
+#endif
+
+#ifdef SAVR_STEAM_FRAME
+// Pointer atlas, 192 x 64, straight (unpremultiplied) alpha, row 0 = bottom (GL):
+//   x   0..63   cursor dot, idle (cyan)
+//   x  64..127  cursor dot, trigger down (amber)
+//   x 128..191  beam strip, rows 28..35 (alpha ramps from the controller to the
+//               hit point; soft edge across)
+constexpr int kPointerTexW = 192, kPointerTexH = 64;
+constexpr int kPointerBeamRow = 28, kPointerBeamRows = 8;
+
+float PtSmooth(float a, float b, float x) {
+    const float k = std::clamp((x - a) / (b - a), 0.0f, 1.0f);
+    return k * k * (3.0f - 2.0f * k);
+}
+
+void BuildPointerAtlas(unsigned char* px) {
+    std::memset(px, 0, static_cast<std::size_t>(kPointerTexW) * kPointerTexH * 4);
+    auto put = [&](int x, int y, float r, float g, float b, float a) {
+        unsigned char* d = px + (static_cast<std::size_t>(y) * kPointerTexW + x) * 4;
+        d[0] = static_cast<unsigned char>(std::clamp(r, 0.0f, 1.0f) * 255.0f + 0.5f);
+        d[1] = static_cast<unsigned char>(std::clamp(g, 0.0f, 1.0f) * 255.0f + 0.5f);
+        d[2] = static_cast<unsigned char>(std::clamp(b, 0.0f, 1.0f) * 255.0f + 0.5f);
+        d[3] = static_cast<unsigned char>(std::clamp(a, 0.0f, 1.0f) * 255.0f + 0.5f);
+    };
+    for (int cell = 0; cell < 2; ++cell) {
+        const float cr = cell == 0 ? 0.62f : 1.00f;
+        const float cg = cell == 0 ? 0.93f : 0.78f;
+        const float cb = cell == 0 ? 1.00f : 0.35f;
+        for (int y = 0; y < 64; ++y) {
+            for (int x = 0; x < 64; ++x) {
+                const float dx = (x + 0.5f - 32.0f) / 32.0f, dy = (y + 0.5f - 32.0f) / 32.0f;
+                const float r = std::sqrt(dx * dx + dy * dy);
+                // dark halo for contrast on bright panels, bright disc on top
+                const float halo = 0.80f * (1.0f - PtSmooth(0.56f, 0.82f, r));
+                const float disc = 1.0f - PtSmooth(0.36f, 0.44f, r);
+                const float a = disc + halo * (1.0f - disc);
+                if (a <= 0.0f) continue;
+                const float k = disc / a;   // colour share of the disc
+                put(cell * 64 + x, y, cr * k + 0.03f * (1.0f - k), cg * k + 0.06f * (1.0f - k),
+                    cb * k + 0.12f * (1.0f - k), a);
+            }
+        }
+    }
+    for (int row = 0; row < kPointerBeamRows; ++row) {
+        const float dy = std::abs((row + 0.5f) - kPointerBeamRows * 0.5f) / (kPointerBeamRows * 0.5f);
+        const float edge = 1.0f - PtSmooth(0.25f, 1.0f, dy);
+        for (int x = 0; x < 64; ++x) {
+            const float ramp = 0.30f + 0.65f * (static_cast<float>(x) / 63.0f);
+            put(128 + x, kPointerBeamRow + row, 0.70f, 0.95f, 1.0f, ramp * edge);
+        }
+    }
+}
+
+// Build the two pointer quads (beam, dot) for this frame. The caller appends them
+// as the LAST layers: later layers composite over earlier ones, so this is what
+// keeps the pointer above the menu, panels, cinema, HUD and world.
+int PresentPointerLayers(XrCompositionLayerQuad quads[2]) {
+    if (!g_pointer.active || s.pointer.handle == XR_NULL_HANDLE || s.pointer.poisoned ||
+        s.space == XR_NULL_HANDLE)
+        return 0;
+
+    uint32_t idx = 0;
+    XrSwapchainImageAcquireInfo acq{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    if (!Check(xrAcquireSwapchainImage(s.pointer.handle, &acq, &idx), "acquire(pointer)")) return 0;
+    if (!WaitSwapchainImageReady(s.pointer, "pointer", "wait(pointer)")) return 0;
+    static std::vector<unsigned char> sAtlas;
+    static std::vector<char> sUploaded;
+    static XrSwapchain sUploadedFor = XR_NULL_HANDLE;
+    if (sAtlas.empty()) {
+        sAtlas.resize(static_cast<std::size_t>(kPointerTexW) * kPointerTexH * 4);
+        BuildPointerAtlas(sAtlas.data());
+    }
+    if (sUploadedFor != s.pointer.handle || sUploaded.size() != s.pointer.images.size()) {
+        sUploadedFor = s.pointer.handle;
+        sUploaded.assign(s.pointer.images.size(), 0);
+    }
+    if (idx < sUploaded.size() && !sUploaded[idx]) {
+        GLint prevTex = 0;
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
+        glBindTexture(GL_TEXTURE_2D, s.pointer.images[idx].image);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kPointerTexW, kPointerTexH,
+                        GL_RGBA, GL_UNSIGNED_BYTE, sAtlas.data());
+        glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(prevTex));
+        sUploaded[idx] = 1;
+    }
+    XrSwapchainImageReleaseInfo rel{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    if (!Check(xrReleaseSwapchainImage(s.pointer.handle, &rel), "release(pointer)")) {
+        PoisonSwapchain(s.pointer, "pointer", "release");
+        return 0;
+    }
+
+    const XrVector3f up{0.0f, 1.0f, 0.0f};
+    const XrVector3f o = g_pointer.origin, d = g_pointer.dir;
+    constexpr float kMissLength = 1.5f;
+    const XrVector3f end = g_pointer.hit ? g_pointer.hitPos : PtAdd(o, PtScale(d, kMissLength));
+    const float length = std::sqrt(PtDot(PtSub(end, o), PtSub(end, o)));
+    int count = 0;
+
+    auto baseQuad = [&](XrCompositionLayerQuad& q, int rx, int ry, int rw, int rh) {
+        q = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+        q.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
+                       XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+        q.space = s.space;
+        q.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+        q.subImage.swapchain = s.pointer.handle;
+        q.subImage.imageArrayIndex = 0;
+        q.subImage.imageRect.offset = {rx, ry};
+        q.subImage.imageRect.extent = {rw, rh};
+    };
+
+    if (length > 0.03f) {
+        // Strip along the ray, turned about the ray so its face looks at the head.
+        const XrVector3f mid = PtScale(PtAdd(o, end), 0.5f);
+        const XrVector3f x = PtNorm(PtSub(end, o), d);
+        XrVector3f toHead = g_pointer.headValid ? PtSub(g_pointer.head, mid) : up;
+        XrVector3f n = PtSub(toHead, PtScale(x, PtDot(toHead, x)));
+        if (PtDot(n, n) < 1e-8f) n = PtCross(x, std::abs(x.y) < 0.9f ? up : XrVector3f{1.0f, 0.0f, 0.0f});
+        n = PtNorm(n, up);
+        const XrVector3f y = PtCross(n, x);
+        const XrVector3f z = PtCross(x, y);
+        baseQuad(quads[count], 128, kPointerBeamRow, 64, kPointerBeamRows);
+        quads[count].pose.orientation = PtFromAxes(x, y, z);
+        quads[count].pose.position = mid;
+        quads[count].size = {length, 0.014f};
+        ++count;
+    }
+    if (g_pointer.hit) {
+        // Dot facing the head and upright (world up), so it never rolls with the head.
+        XrVector3f z = g_pointer.headValid ? PtSub(g_pointer.head, end) : PtScale(d, -1.0f);
+        const float dist = std::sqrt(PtDot(z, z));
+        z = PtNorm(z, PtScale(d, -1.0f));
+        XrVector3f x = PtCross(up, z);
+        x = PtNorm(x, XrVector3f{1.0f, 0.0f, 0.0f});
+        const XrVector3f y = PtCross(z, x);
+        const float size = std::clamp((g_pointer.headValid ? dist : length) * 0.05f, 0.04f, 0.14f);
+        baseQuad(quads[count], g_pointer.pressed ? 64 : 0, 0, 64, 64);
+        quads[count].pose.orientation = PtFromAxes(x, y, z);
+        quads[count].pose.position = end;
+        quads[count].size = {size, size};
+        ++count;
+    }
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        LOGI("[savr-frame] pointer layers active (beam + dot, submitted last)");
+    }
+    return count;
+}
+#endif
 
 float ReadFloat(XrAction action, XrPath hand) {
     XrActionStateGetInfo get{XR_TYPE_ACTION_STATE_GET_INFO};
@@ -7485,6 +7905,7 @@ void BuildControlsMenu() {
     const int first=std::clamp(sel-visibleRows/2,0,rowCount-visibleRows);
     const int last=std::min(rowCount,first+visibleRows);
     const int top = 86, rowH = 39;
+    PanelRowsSet(MR_CONTROLS, first, last - first, top, rowH, 6);
     for (int i = first; i < last; ++i) {
         const int y = top + (i-first) * rowH;
         if (i == sel) PanelFillRect(40, y - 6, kPanelW - 40, y + 30, 120, 40, 110, 235);
@@ -7528,6 +7949,7 @@ void BuildMainMenu() {
     static_assert(N == kMainMenuItemCount);
     const int sel = g_mainSel.load(std::memory_order_relaxed);
     const int top = 78, rowH = N > 14 ? 27 : 30;
+    PanelRowsSet(MR_MAIN, 0, N, top, rowH, 6);
     for (int i = 0; i < N; ++i) {
         const int y = top + i * rowH;
         if (i == sel) PanelFillRect(40, y - 6, kPanelW - 40, y + 30, 120, 40, 110, 235);
@@ -7558,6 +7980,7 @@ void BuildHolsterCalibMenu() {
 
     constexpr int kRows = 8;
     const int top = 82, rowH = 46;
+    PanelRowsSet(MR_HOLSTER_CALIB, 0, kRows, top, rowH, 4);
     for (int rowIndex = 0; rowIndex < kRows; ++rowIndex) {
         const int y = top + rowIndex * rowH;
         if (rowIndex == sel)
@@ -7596,6 +8019,7 @@ void BuildHolsterMenu() {
     const int sel = g_holsterMenuSel.load(std::memory_order_relaxed);
     const int rows = holster::PointCount() + 4;
     const int top = 74, rowH = 38;
+    PanelRowsSet(MR_HOLSTERS, 0, rows, top, rowH, 4);
     for (int i = 0; i < rows; ++i) {
         const int y = top + i * rowH;
         if (i == sel) PanelFillRect(18, y - 4, kPanelW - 18, y + 20, 120, 40, 110, 235);
@@ -7698,6 +8122,7 @@ void BuildGraphicsMenu() {
     std::snprintf(rows[14], sizeof(rows[14]), "BACK");
     // 15 rows now: tighten the pitch so the last one still clears the hint line.
     const int top = 54, rowH = 27;
+    PanelRowsSet(MR_GRAPHICS, 0, 15, top, rowH, 5);
     for (int i = 0; i < 15; ++i) {
         const int y = top + i * rowH;
         if (i == sel) PanelFillRect(40, y - 5, kPanelW - 40, y + 25, 120, 40, 110, 235);
@@ -7733,6 +8158,7 @@ void BuildModelSetMenu() {
     PanelText("OPTIONAL PLAYER-INSTALLED PACKS", cx, 65, 2, 150, 190, 210);
     const int sel = g_modelSetSel.load(std::memory_order_relaxed);
     constexpr const char* names[] = {"HD WEAPONS", "PROPER FIXES", "BACK"};
+    PanelRowsSet(MR_MODEL_SETS, 0, modelsets::COUNT + 1, 124, 75, 8);
     for (int i = 0; i <= modelsets::COUNT; ++i) {
         const int y = 124 + i * 75;
         if (i == sel) PanelFillRect(24, y-8, kPanelW-24, y+44, 120, 40, 110, 235);
@@ -7755,6 +8181,7 @@ void BuildGraphicsDistanceMenu() {
     const int rows = settings + 1;
     const int top = 72;
     const int rowH = 30;
+    PanelRowsSet(MR_GFX_DISTANCES, 0, rows, top, rowH, 4);
     for (int i = 0; i < rows; ++i) {
         char row[96]{};
         if (i == settings) {
@@ -7968,6 +8395,7 @@ void BuildDrivingMenu() {
     int start=std::clamp(sel-kWin/2,0,std::max(0,rowCount-kWin));
     if (start>0) PanelText("- MORE -",cx,84,2,120,150,120);
     const int top=100,rowH=36;
+    PanelRowsSet(MR_DRIVING, start, shown, top, rowH, 5);
     for (int w=0;w<shown;++w) {
         const int i = start + w;
         const int y = top + w * rowH;
@@ -8031,6 +8459,7 @@ void BuildDrivingCalibrationMenu() {
     std::snprintf(text[rows-1],sizeof(text[rows-1]),"BACK TO VEHICLE SETTINGS");
     const int top=94;
     const int rowH=hasWheel?40:46;
+    PanelRowsSet(MR_DRIVING_CALIB, 0, rows, top, rowH, 6);
     for (int row=0;row<rows;++row) {
         const int y=top+row*rowH;
         if (row==sel)
@@ -8076,6 +8505,7 @@ void BuildBasketballMenu() {
     const int start = std::clamp(sel - kWin / 2, 0,
                                  kRows > kWin ? kRows - kWin : 0);
     const int top = 64, rowH = 30;
+    PanelRowsSet(MR_BASKETBALL, start, shown, top, rowH, 4);
     if (start > 0) PanelText("- MORE -", cx, 44, 2, 120, 150, 120);
     for (int w = 0; w < shown; ++w) {
         const int i = start + w;
@@ -8101,6 +8531,7 @@ void BuildBasketballCalibMenu() {
     const int sel = g_basketballCalibSel.load(std::memory_order_relaxed);
     constexpr int kRows = basketball::HAND_CALIB_FIELD_COUNT + 2;
     const int top = 82, rowH = 42;
+    PanelRowsSet(MR_BASKETBALL_CALIB, 0, kRows, top, rowH, 4);
     for (int i = 0; i < kRows; ++i) {
         const int y = top + i * rowH;
         if (i == sel)
@@ -8162,6 +8593,7 @@ void BuildLocomotionMenu() {
     // 16 rows on the 512px panel: a 25px pitch from y=54 keeps the last row
     // and the hint line inside the panel.
     const int top=54,rowH=25;
+    PanelRowsSet(MR_LOCOMOTION, 0, 16, top, rowH, 4);
     for (int i=0;i<16;++i) {
         const int y=top+i*rowH;
         if (i==sel) PanelFillRect(26,y-4,kPanelW-26,y+22,120,40,110,235);
@@ -8197,6 +8629,7 @@ void BuildJetpackMenu() {
                   jetpack::TurbinePowerPercent());
     std::snprintf(rows[3],sizeof(rows[3]),"BACK");
     const int top=96,rowH=34;
+    PanelRowsSet(MR_JETPACK, 0, 4, top, rowH, 4);
     for (int i=0;i<4;++i) {
         const int y=top+i*rowH;
         if (i==sel) PanelFillRect(26,y-4,kPanelW-26,y+24,120,40,110,235);
@@ -8224,6 +8657,7 @@ void BuildVehicleCameraMenu() {
                   driving::BoatCameraTiltEnabled()?"WITH BOAT":"LEVEL");
     std::snprintf(rows[4],sizeof(rows[4]),"BACK");
     const int top=96,rowH=44;
+    PanelRowsSet(MR_VEHICLE_CAMERA, 0, 5, top, rowH, 5);
     for (int i=0;i<5;++i) {
         const int y=top+i*rowH;
         if (i==sel)
@@ -8370,6 +8804,7 @@ void BuildHudMenu() {
     int start=std::clamp(sel-kWin/2,0,std::max(0,rowCount-windowRows));
     if (start>0) PanelText("- MORE -",cx,70,2,120,150,120);
     const int top=86,rowH=40;
+    PanelRowsSet(MR_HUD, start, windowRows, top, rowH, 6);
     for (int window=0;window<windowRows;++window) {
         const int i=start+window;
         const int y=top+window*rowH;
@@ -8399,6 +8834,7 @@ void BuildCheatMenu() {
     const int shown = std::min(kWin, count);
     if (start > 0) PanelText("- MORE -", cx, 40, 2, 120, 150, 120);
     const int top = 58, rowH = 22;
+    PanelRowsSet(MR_CHEATS, start, shown, top, rowH, 2);
     for (int w = 0; w < shown; ++w) {
         const int i = start + w;
         const int y = top + w * rowH;
@@ -8451,6 +8887,7 @@ void BuildCalibMenu() {
 
     if (start > 0) PanelText("- MORE -", cx, 80, 2, 120, 150, 120);
     const int top = 96, rowH = 38;
+    PanelRowsSet(MR_CALIB, start, kWin, top, rowH, 3);
     for (int w = 0; w < kWin; ++w) {
         const int r = start + w;
         const int y = top + w * rowH;
@@ -8532,6 +8969,8 @@ bool PresentDebugPanel(XrCompositionLayerQuad& quad) {
         graphicsMenu || modelSetMenu || graphicsDistanceMenu || cheatMenu ||
         controlsMenuA || controlsTipsA || aboutMenuA);
 
+    g_debugPanelIsMenu = !profilerPanel;
+    g_panelRows.id = MR_NONE;   // page builders register their own row layout
     const bool packagePanel=profilerPanel&&g_packageHint.load(std::memory_order_relaxed);
     const int profilerMode=GetProfilerMode();
     const bool fpsPanel=profilerPanel&&!packagePanel&&profilerMode==PROFILER_FPS;
@@ -9765,6 +10204,7 @@ void DrawWristPanelsForEye(const float* mvp, const HandPose hands[2],
 // CHud hook while keeping the reticle in the same ring epoch as the zoomed world.
 GLuint g_scopeProg = 0, g_scopeVbo = 0;
 GLint g_scopeAspectLoc = -1;
+GLint g_scopeUpLoc = -1;
 
 void EnsureScopeProgram() {
     if (g_scopeProg) return;
@@ -9774,9 +10214,14 @@ void EnsureScopeProgram() {
                      "void main(){ vNdc=aPos; gl_Position=vec4(aPos,0.0,1.0); }\n";
     const char* fs = "#version 300 es\n"
                      "precision highp float;\n"
-                     "in vec2 vNdc; uniform float uAspect; out vec4 o;\n"
+                     "in vec2 vNdc; uniform float uAspect; uniform vec2 uUp; out vec4 o;\n"
                      "void main(){\n"
-                     "  vec2 p=vec2(vNdc.x*uAspect,vNdc.y);\n"
+                     // uUp is where world-up lies in the eye image. The rings are
+                     // round, so only the cross rotates: it is drawn in a frame
+                     // whose y axis follows world-up, which keeps the reticle
+                     // level while the head rolls.
+                     "  vec2 p0=vec2(vNdc.x*uAspect,vNdc.y);\n"
+                     "  vec2 p=vec2(dot(p0,vec2(uUp.y,-uUp.x)),dot(p0,uUp));\n"
                      "  float r=length(p); const float radius=0.82;\n"
                      "  if(r>radius){ o=vec4(0.0,0.0,0.0,1.0); return; }\n"
                      "  if(abs(r-radius)<0.010){ o=vec4(0.0,0.0,0.0,1.0); return; }\n"
@@ -9809,6 +10254,7 @@ void EnsureScopeProgram() {
         return;
     }
     g_scopeAspectLoc = glGetUniformLocation(g_scopeProg, "uAspect");
+    g_scopeUpLoc = glGetUniformLocation(g_scopeProg, "uUp");
     constexpr float vertices[] = {
         -1.0f, -1.0f,  1.0f, -1.0f, -1.0f,  1.0f,
         -1.0f,  1.0f,  1.0f, -1.0f,  1.0f,  1.0f,
@@ -9821,7 +10267,8 @@ void EnsureScopeProgram() {
 }
 
 void DrawScopeOverlay(int width, int height,
-                      const scopeaim::VisualState& scope) {
+                      const scopeaim::VisualState& scope,
+                      const XrPosef& renderPose) {
     if (!scope.active || width <= 0 || height <= 0)
         return;
     EnsureScopeProgram();
@@ -9836,6 +10283,27 @@ void DrawScopeOverlay(int width, int height,
     glUseProgram(g_scopeProg);
     glUniform1f(g_scopeAspectLoc,
                 static_cast<float>(width) / static_cast<float>(height));
+    {
+        // Head roll about the view axis: world-up (LOCAL +Y) expressed in the
+        // eye image is (dot(Y, eyeRight), dot(Y, eyeUp)).
+        const XrQuaternionf& q = renderPose.orientation;
+#ifdef SAVR_STEAM_FRAME
+        float upX = 2.0f * (q.x * q.y + q.w * q.z);
+        float upY = 1.0f - 2.0f * (q.x * q.x + q.z * q.z);
+#else
+        float upX = 0.0f, upY = 1.0f;   // Quest keeps the head-locked reticle
+        (void)q;
+#endif
+        const float len = std::sqrt(upX * upX + upY * upY);
+        if (!std::isfinite(len) || len < 0.2f) {   // looking (nearly) straight up/down
+            upX = 0.0f;
+            upY = 1.0f;
+        } else {
+            upX /= len;
+            upY /= len;
+        }
+        glUniform2f(g_scopeUpLoc, upX, upY);
+    }
     glBindBuffer(GL_ARRAY_BUFFER, g_scopeVbo);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float),
@@ -12398,7 +12866,7 @@ bool RenderStereoEyeProjection(XrCompositionLayerProjection& layer,
                 }
             }
         }
-        if (!cinemaSlot) DrawScopeOverlay(chain.width, chain.height, bakedScope);
+        if (!cinemaSlot) DrawScopeOverlay(chain.width, chain.height, bakedScope, rp);
         EndXrGpuStage(overlayGpuTimer);
         RecordXrCpuStage(e, XrCpuStage::OverlaySubmit, overlayWallStartMs,
                          overlayCpuStartMs);
@@ -12652,7 +13120,11 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs) {
     XrCompositionLayerProjection eyeProjection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     XrCompositionLayerProjectionView eyeViews[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
                                                  {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
-    const XrCompositionLayerBaseHeader* layers[6]{};
+    const XrCompositionLayerBaseHeader* layers[8]{};
+#ifdef SAVR_STEAM_FRAME
+    XrCompositionLayerQuad       pointerQuads[2]{{XR_TYPE_COMPOSITION_LAYER_QUAD},
+                                                 {XR_TYPE_COMPOSITION_LAYER_QUAD}};
+#endif
     uint32_t layerCount = 0;
     int submittedStereoSequence = -1;
     bool stereoGenerationRace = false;
@@ -12812,6 +13284,14 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs) {
                 layers[0] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(
                     &theaterQuad);
                 layerCount = 1;
+#ifdef SAVR_STEAM_FRAME
+                // The pointer ray-tests the quad exactly as submitted.
+                g_ptrTheater.valid = true;
+                g_ptrTheater.frame = g_loopFrames.load(std::memory_order_relaxed);
+                g_ptrTheater.headLocked = false;
+                g_ptrTheater.pose = theaterQuad.pose;
+                g_ptrTheater.size = theaterQuad.size;
+#endif
                 stereoFallbackSource = perf::StereoFallbackSource::GameSurface;
             } else {
                 stereoFallbackSource = perf::StereoFallbackSource::Failed;
@@ -13019,7 +13499,26 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs) {
              g_controlsTipsActive.load(std::memory_order_relaxed) ||
              g_aboutActive.load(std::memory_order_relaxed)) && PresentDebugPanel(debugQuad)) {
             layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&debugQuad);
+#ifdef SAVR_STEAM_FRAME
+            if (g_debugPanelIsMenu) {
+                g_ptrMenu.valid = true;
+                g_ptrMenu.frame = g_loopFrames.load(std::memory_order_relaxed);
+                g_ptrMenu.headLocked = true;   // debugQuad.space is the view space
+                g_ptrMenu.pose = debugQuad.pose;
+                g_ptrMenu.size = debugQuad.size;
+            }
+#endif
         }
+
+#ifdef SAVR_STEAM_FRAME
+        // The laser pointer goes last: later layers composite over earlier ones,
+        // so beam and dot stay above the menu, the cinema, panels and the world.
+        {
+            const int pointerLayers = PresentPointerLayers(pointerQuads);
+            for (int i = 0; i < pointerLayers; ++i)
+                layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&pointerQuads[i]);
+        }
+#endif
     }
 
     if (!projectionLayerSubmitted)

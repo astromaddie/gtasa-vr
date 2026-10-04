@@ -586,6 +586,34 @@ struct CoronaEyeBasis {
     float projectionFarDepth{300.0f};
 };
 
+// Billboard axes that never roll with the head: the horizontal axis is
+// perpendicular to world up and to the line of sight, the vertical axis is the
+// other leg of the sprite plane (same construction as AppendWorldUprightSkyQuad,
+// so coronas and the sky agree). The signs follow the camera's own left/up
+// vectors, so the texture keeps the orientation the stock sprite had. When the
+// source is straight above or below the eye the horizontal axis is undefined and
+// the camera basis is kept.
+void CoronaUprightAxes(const CoronaV3& eye, const CoronaV3& center,
+                       const CoronaV3& cameraLeft, const CoronaV3& cameraUp,
+                       CoronaV3* left, CoronaV3* up) {
+    *left = cameraLeft;
+    *up = cameraUp;
+#ifdef SAVR_STEAM_FRAME
+    const CoronaV3 toCenter = CoronaNormalized(center - eye);
+    CoronaV3 l = CoronaNormalized(CoronaCross({0.0f, 0.0f, 1.0f}, toCenter));
+    if (CoronaDot(l, l) < 0.9f) return;
+    if (CoronaDot(l, cameraLeft) < 0.0f) l = l * -1.0f;
+    CoronaV3 u = CoronaNormalized(CoronaCross(toCenter, l));
+    if (CoronaDot(u, u) < 0.9f) return;
+    if (CoronaDot(u, cameraUp) < 0.0f) u = u * -1.0f;
+    *left = l;
+    *up = u;
+#else
+    (void)eye;
+    (void)center;
+#endif
+}
+
 bool ReadCoronaEyeBasis(void* rwCamera, CoronaEyeBasis* out) {
     if (!rwCamera || !out || !g.TheCamera) return false;
 
@@ -932,8 +960,11 @@ bool RenderStereoCoronaBillboards(void* rwCamera, int eye) {
                 pull = std::clamp(pull, -20.0f, 20.0f);
                 const CoronaV3 center = world -
                     CoronaNormalized(toCorona) * pull;
-                const CoronaV3 left = basis.left * halfWidth;
-                const CoronaV3 up = basis.up * halfHeight;
+                CoronaV3 axisLeft{}, axisUp{};
+                CoronaUprightAxes(basis.position, center, basis.left,
+                                  basis.up, &axisLeft, &axisUp);
+                const CoronaV3 left = axisLeft * halfWidth;
+                const CoronaV3 up = axisUp * halfHeight;
                 const CoronaV3 topLeft = center + left + up;
                 const CoronaV3 topRight = center - left + up;
                 const CoronaV3 bottomLeft = center + left - up;
@@ -1673,8 +1704,11 @@ bool RenderStereoWetReflections(void* rwCamera) {
         const std::uint32_t color = 0xff000000u |
             (blue << 16) | (green << 8) | red;
 
-        const CoronaV3 left = basis.left * halfWidth;
-        const CoronaV3 up = basis.up * halfHeight;
+        CoronaV3 axisLeft{}, axisUp{};
+        CoronaUprightAxes(basis.position, center, basis.left, basis.up,
+                          &axisLeft, &axisUp);
+        const CoronaV3 left = axisLeft * halfWidth;
+        const CoronaV3 up = axisUp * halfHeight;
         const int baseVertex = vertexCount;
         vertices[vertexCount++] = MakeCoronaVertex(
             center + left + up, color, 0.0f, 0.0f);

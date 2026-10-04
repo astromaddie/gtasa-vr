@@ -1400,17 +1400,82 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
         }
 #endif
 
+        // Laser pointer on the VR menu panel (Steam Frame). Hovering a row
+        // selects it (only when the hovered row changes, so the stick keeps
+        // working while the ray rests somewhere else); a trigger click on the
+        // row's centre activates it like A, on the outer edge strips it steps the
+        // value down (left) or up (right). While the ray is on the panel the
+        // right trigger is the click and no longer R2 "plus".
+        static int ptrLastPage = -1, ptrSettle = 0, ptrPrevRow = -1;
+        static bool ptrPrevPressed = false;
+        const bool ptrOnMenu = menuPage != PG_NONE && in.pointerMenu;
+        const bool ptrClickEdge = ptrOnMenu && in.pointerPressed && !ptrPrevPressed && !grips;
+        ptrPrevPressed = in.pointerMenu && in.pointerPressed;
+        if (menuPage != ptrLastPage) {
+            // A hover computed against the previous page's layout must not land
+            // on the new page: ignore the pointer for a few frames after a change.
+            ptrLastPage = menuPage;
+            ptrSettle = 3;
+            ptrPrevRow = -1;
+        } else if (ptrSettle > 0) {
+            --ptrSettle;
+        }
+        bool ptrEnter = false;
+        int ptrMinus = 0, ptrPlus = 0;
+        {
+            int* selRef = nullptr;
+            int wantId = xr::MR_NONE;
+            switch (menuPage) {
+            case PG_MAIN:             selRef = &mainSel;           wantId = xr::MR_MAIN; break;
+            case PG_CALIB:            selRef = &calibSel;          wantId = xr::MR_CALIB; break;
+            case PG_HOLSTER_CALIB:    selRef = &holsterCalibSel;   wantId = xr::MR_HOLSTER_CALIB; break;
+            case PG_HOLSTERS:         selRef = &holsterSel;        wantId = xr::MR_HOLSTERS; break;
+            case PG_DRIVING:          selRef = &drivingSel;        wantId = xr::MR_DRIVING; break;
+            case PG_DRIVING_CALIB:    selRef = &drivingCalibSel;   wantId = xr::MR_DRIVING_CALIB; break;
+            case PG_LOCOMOTION:       selRef = &locomotionSel;     wantId = xr::MR_LOCOMOTION; break;
+            case PG_JETPACK:          selRef = &jetpackSel;        wantId = xr::MR_JETPACK; break;
+            case PG_VEHICLE_CAMERA:   selRef = &vehicleCameraSel;  wantId = xr::MR_VEHICLE_CAMERA; break;
+            case PG_BASKETBALL:       selRef = &basketballSel;     wantId = xr::MR_BASKETBALL; break;
+            case PG_BASKETBALL_CALIB: selRef = &basketballCalibSel; wantId = xr::MR_BASKETBALL_CALIB; break;
+            case PG_HUD:              selRef = &hudSel;            wantId = xr::MR_HUD; break;
+            case PG_HUD_CROP:         selRef = &hudCropSel;        wantId = xr::MR_HUD; break;
+            case PG_HUD_WRIST:        selRef = &hudWristSel;       wantId = xr::MR_HUD; break;
+            case PG_CHEATS:           selRef = &cheatSel;          wantId = xr::MR_CHEATS; break;
+            case PG_GRAPHICS:         selRef = &gfxSel;            wantId = xr::MR_GRAPHICS; break;
+            case PG_GRAPHICS_DISTANCES: selRef = &gfxDistanceSel;  wantId = xr::MR_GFX_DISTANCES; break;
+            case PG_MODEL_SETS:       selRef = &modelSetSel;       wantId = xr::MR_MODEL_SETS; break;
+            case PG_CONTROLS:         selRef = &controlsSel;       wantId = xr::MR_CONTROLS; break;
+            default: break;
+            }
+            const bool rowHit = ptrOnMenu && ptrSettle == 0 && selRef &&
+                in.menuRowsId == wantId && in.menuRow >= 0;
+            if (rowHit && (in.menuRow != ptrPrevRow || ptrClickEdge))
+                *selRef = in.menuRow;
+            ptrPrevRow = rowHit ? in.menuRow : -1;
+            if (ptrClickEdge && ptrSettle == 0) {
+                if (menuPage == PG_CONTROLS_TIPS) ptrEnter = true;   // click anywhere: back
+                else if (rowHit) {
+                    if (in.menuU < 0.16f) ptrMinus = 1;
+                    else if (in.menuU > 0.84f) ptrPlus = 1;
+                    else ptrEnter = true;
+                }
+                if (ptrEnter || ptrMinus || ptrPlus)
+                    LOGI("[ui.pointer] page=%d row=%d %s", menuPage, in.menuRow,
+                         ptrEnter ? "activate" : (ptrPlus ? "plus" : "minus"));
+            }
+        }
+
         const auto menuNav=savr::menu::Navigate(menuPage!=PG_NONE,
             in.leftStick[0],in.leftStick[1],grips);
         const bool navUp   = held(menuNav.up, tUp);
         const bool navDown = held(menuNav.down, tDown);
         // Ints carrying the acceleration magnitude; every existing boolean use
         // (`if (minus)`, `minus?-1:...`) keeps its meaning unchanged.
-        const int minus = heldValue(
-            !grips && in.triggers[0] >= 0.55f, tMinus);
-        const int plus = heldValue(
-            !grips && in.triggers[1] >= 0.55f, tPlus);
-        const bool enter   = in.a && !enterPrev && !grips;   // A: enter/activate/reset
+        const int minus = std::max(heldValue(
+            !grips && in.triggers[0] >= 0.55f, tMinus), ptrMinus);
+        const int plus = std::max(heldValue(
+            !grips && in.triggers[1] >= 0.55f && !ptrOnMenu, tPlus), ptrPlus);
+        const bool enter   = (in.a && !enterPrev && !grips) || ptrEnter;   // A: enter/activate/reset
         const bool back    = (in.b && !backPrev && !grips) || viewBack;   // B (or View on Frame): step back / close (grips = open chord)
         enterPrev = in.a; backPrev = in.b;
 
@@ -1516,8 +1581,8 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
             const int type = calibWeaponType;
 
             // Value adjust (accelerated): L2 / stick-left = -1, R2 / stick-right = +1.
-            const int dir = !grips && in.triggers[1] >= 0.55f ? +1
-                          : !grips && in.triggers[0] >= 0.55f ? -1 : 0;
+            const int dir = (!grips && in.triggers[1] >= 0.55f && !ptrOnMenu) || ptrPlus ? +1
+                          : (!grips && in.triggers[0] >= 0.55f) || ptrMinus ? -1 : 0;
             if (dir != calAdjDir) { calAdjDir = dir; calAdjHeld = 0; calAdjSince = 999; }
             bool fire = false;
             if (dir != 0) {
@@ -2043,7 +2108,8 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
             // VC behaviour: any button closes, but only after every button
             // has first been seen released (so the opening press or the
             // movement stick cannot instantly dismiss it).
-            const bool anyButton = in.a || in.b || in.x || in.y || in.menu;
+            const bool anyButton = in.a || in.b || in.x || in.y || in.menu ||
+                (in.pointerMenu && in.pointerPressed);
             if (!anyButton) aboutArmed = true;
             else if (aboutArmed) {
                 menuPage = PG_NONE;
