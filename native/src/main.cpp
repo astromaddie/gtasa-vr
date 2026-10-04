@@ -22,6 +22,7 @@
 #include "Catalyst.h"
 #include "MenuNavigation.h"
 #include "Swimming.h"
+#include "ThirdPersonMove.h"
 #include "BoatEntry.h"
 #include "PerfTelemetry.h"
 #include "Basketball.h"
@@ -1743,7 +1744,7 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
             break;
         }
         case PG_LOCOMOTION: {
-            constexpr int ROWS=15;
+            constexpr int ROWS=16;
             if (navUp) locomotionSel=(locomotionSel-1+ROWS)%ROWS;
             if (navDown) locomotionSel=(locomotionSel+1)%ROWS;
             const int step=minus?-1:(plus?1:0);
@@ -1752,33 +1753,35 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
             else if (locomotionSel==1&&(step||enter))
                 savr::locomotion::CycleMovementMode(step?step:+1);
             else if (locomotionSel==2&&(step||enter))
+                savr::locomotion::CycleThirdPersonMove(step?step:+1);
+            else if (locomotionSel==3&&(step||enter))
                 savr::locomotion::CycleTurnMode(step?step:+1);
-            else if (locomotionSel==3&&step)
-                savr::locomotion::AdjustTurnSensitivity(step);
             else if (locomotionSel==4&&step)
+                savr::locomotion::AdjustTurnSensitivity(step);
+            else if (locomotionSel==5&&step)
                 savr::locomotion::AdjustSnapAngle(step);
-            else if (locomotionSel==5&&enter)
+            else if (locomotionSel==6&&enter)
                 savr::locomotion::ToggleHeadBob();
-            else if (locomotionSel==6&&(step||enter))
-                savr::locomotion::ToggleGestureRun();
             else if (locomotionSel==7&&(step||enter))
-                savr::locomotion::ToggleGestureSwim();
+                savr::locomotion::ToggleGestureRun();
             else if (locomotionSel==8&&(step||enter))
-                savr::locomotion::ToggleParachuteCameraFollow();
+                savr::locomotion::ToggleGestureSwim();
             else if (locomotionSel==9&&(step||enter))
-                savr::locomotion::ToggleParachuteControl();
+                savr::locomotion::ToggleParachuteCameraFollow();
             else if (locomotionSel==10&&(step||enter))
+                savr::locomotion::ToggleParachuteControl();
+            else if (locomotionSel==11&&(step||enter))
                 savr::locomotion::ToggleAutoParachute();
-            else if (locomotionSel==11&&enter) {
+            else if (locomotionSel==12&&enter) {
                 menuPage=PG_VEHICLE_CAMERA;
                 vehicleCameraSel=0;
             }
-            else if (locomotionSel==12&&enter)
+            else if (locomotionSel==13&&enter)
                 vrcam::RequestRecenter();
-            else if (locomotionSel==13&&enter) {
+            else if (locomotionSel==14&&enter) {
                 menuPage=PG_JETPACK; jetpackSel=0;
             }
-            else if (locomotionSel==14&&enter)
+            else if (locomotionSel==15&&enter)
                 menuPage=PG_MAIN;
             if (back) menuPage=PG_MAIN;
             break;
@@ -2323,7 +2326,8 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
             float localHeadYaw=0.0f;
             if (savr::vrcam::GetLocalHeadYaw(&localHeadYaw))
                 savr::locomotion::TransformMoveStick(
-                    localHeadYaw,&gameMoveX,&gameMoveY);
+                    localHeadYaw,&gameMoveX,&gameMoveY,
+                    savr::vrcam::OverShoulderActive());
         }
         // Thumbrest D-pad mode: the provider must not see the raw right
         // stick while it acts as the D-pad.
@@ -2979,6 +2983,7 @@ void* WaitForGameLibrary(void*) {
     savr::tbone::Install(handle);
     savr::missionscenes::Install(handle);
     savr::swimming::Install(handle);
+    savr::thirdmove::Install(handle);  // third person: turn to the walk direction / face the view
     savr::boatentry::Install(handle);
     savr::braindiag::Install(handle);  // basketball brain-chain diagnostics
     savr::basketball::Install(handle);  // custom immersive basketball

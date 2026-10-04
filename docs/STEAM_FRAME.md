@@ -92,9 +92,19 @@ button in play:
   of the game's own chase camera, a little to the right of him, and a line
   test from his head pulls it in at walls. CJ's body is drawn, your hands and
   the tracked guns are not. Controls are pad-style: the left stick walks
-  relative to the camera (whatever MOVE DIRECTION says), the right trigger
-  fires the weapon CJ has equipped, the grips step through his weapons (left
-  previous, right next), and the A/B/X/Y bindings are the usual ones. In
+  relative to the view heading (whatever MOVE DIRECTION says), the right
+  trigger fires the weapon CJ has equipped, the grips step through his weapons
+  (left previous, right next), and the A/B/X/Y bindings are the usual ones.
+  LOCOMOTION, THIRD PERSON MOVE `< FACE MOVE | FACE CAMERA >` (saved as
+  `ThirdPersonMove=` in vr_locomotion.ini) says how CJ turns. FACE MOVE, the
+  default, is the classic third person: he turns to walk where the stick
+  points, at the game's own turn rate, and walks forward along it. While he
+  aims or fires a ranged weapon he faces the view heading instead and the
+  stick strafes him, so shots go where you look; fists and melee weapons turn
+  with the stick. FACE CAMERA keeps him facing the view heading all the time
+  and the stick strafes him, with no sideways walk animations: outside the
+  aim stance he slides sideways (or backwards) in his forward walk. First
+  person is not affected by it. In
   vehicles every vehicle is viewed from the stock chase camera, whatever its
   CAMERA VIEW row says. Getting in or out of a vehicle keeps the camera on the
   player (it blends between its own camera and the stock one over half a
@@ -229,6 +239,29 @@ What was done about them (all "host build, not worn"):
 3. THIRD: OVER SHOULDER (3D SCREEN is not in, see above).
 4. The black subtitle band under the cinema picture.
 5. COLOUR FILTER PS2.
+
+**Third person turning (after the second wear, host build, not worn).** The
+view heading is the user's own snap/smooth turn yaw, so "relative to the
+camera" means relative to that. What the stock mobile game does with it: the
+engine's `CTaskSimplePlayerOnFoot::PlayerControlZelda` already sets the ped's
+target heading to the stick direction minus `TheCamera.m_fOrientation` and
+walks him forward at the stock turn rate. The kit writes the camera matrix and
+calls `CalculateDerivedValues`, which sets that orientation from the view, and
+the stick is rotated into the body frame (`forceBody`, also on the Java
+provider path, which had skipped it), so CJ already turned to the stick
+direction in OVER SHOULDER. The mobile build has no camera-pinned mode (the
+`Process_FollowPedWithMouse` camera is never called), and while he aims the
+stock aim stance (`PlayerControlZeldaWeapon`, `ControlGunMove`) strafes but
+only turns toward a locked target, never to the view, so shots went along
+whichever way he last faced. `ThirdPersonMove.cpp` hooks `PlayerControlZelda`,
+`PlayerControlZeldaWeapon` and `CPed::CalculateNewVelocity` (prologue-checked;
+without a match the stock turning stays): when the view should be faced
+(aiming or firing a ranged weapon with the aim task up or the right trigger
+held, or FACE CAMERA, and `CanStrafeOrMouseControl` says the ped state allows
+it) it sets the ped's current and target heading to the view heading before
+`CalculateNewVelocity`, and on the walking path rotates the animation's
+desired move by the stick's heading minus the view heading. Log line:
+`[view.os] character faces the view`.
 
 Logs to look for: `[cutscene.scripted] scene on/off`, `[cinema3d] projection
 screen ON/OFF`, `[cinema3d] anchor ... subtitle band`, `[hud.front] panel`,

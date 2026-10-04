@@ -91,6 +91,18 @@ bool ThirdPersonView();               // ViewMode()==VIEW_OVER_SHOULDER
 void CycleViewMode(int direction);    // persists
 const char* ViewModeName();
 
+// How the character turns in the third person view, on foot. FACE MOVE (the
+// default) turns him to walk where the left stick points, relative to the
+// view heading, at the game's own turn rate; while he aims or fires a ranged
+// weapon he faces the view instead and strafes, so shots go where you look.
+// FACE CAMERA keeps him facing the view heading all the time and the stick
+// strafes him. First person is not affected.
+enum ThirdPersonMoveKind { THIRD_MOVE_FACE_MOVE=0, THIRD_MOVE_FACE_CAMERA };
+int  ThirdPersonMove();
+bool ThirdPersonFaceCamera();         // ThirdPersonMove()==THIRD_MOVE_FACE_CAMERA
+void CycleThirdPersonMove(int direction);   // persists
+const char* ThirdPersonMoveName();
+
 // Vice City parity: a stereo cutscene remembers which staged camera the
 // player kept for that named scene. -1 means the scene has no saved choice.
 int  RememberedCutsceneCamera(const char* scene);

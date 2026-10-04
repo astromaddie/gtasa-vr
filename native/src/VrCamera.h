@@ -128,6 +128,10 @@ bool IsColorGradingEnabled();
 // THIRD: OVER SHOULDER is selected and in charge of the view right now (not a
 // cutscene, jetpack, parachute, RC model, crane or the beach dance).
 bool OverShoulderActive();
+// OVER SHOULDER and the player is on foot: the view heading (radians, game
+// heading convention) the character control turns and aims against. False
+// when the view is not live this frame.
+bool OverShoulderFootHeading(float* yawOut);
 // PS2 colour filter (COLOUR FILTER < MOBILE | PS2 > in GRAPHICS): replaces the
 // mobile grade with the PS2 game's post-fx colours from the live timecycle.
 // Default PS2 on the Steam Frame build, MOBILE elsewhere.

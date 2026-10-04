@@ -75,6 +75,7 @@ add_library(savr SHARED
     src/Driving.cpp
     src/GestureMove.cpp
     src/Swimming.cpp
+    src/ThirdPersonMove.cpp
     src/BoatEntry.cpp
     src/GraphicsEffects.cpp
     src/Basketball.cpp

@@ -70,6 +70,7 @@ std::atomic<int> g_gameCutsceneMode{1};
 // Gameplay view: 0 = FIRST PERSON (the kit's normal view), 1 = THIRD: OVER
 // SHOULDER (stereo from behind CJ, level horizon, hands hidden).
 std::atomic<int> g_viewMode{0};
+std::atomic<int> g_thirdPersonMove{0};
 std::atomic<bool> g_welcomeSeen{false};
 std::map<std::string, int> g_cutsceneCameras;
 // Gameplay bindings. L3/R3 are included but raw stick-click chords used by
@@ -121,6 +122,7 @@ void Save() {
     std::fprintf(file,"FrameGameCutsceneCinema3D=1\n");
 #endif
     std::fprintf(file,"ViewMode=%d\n",g_viewMode.load());
+    std::fprintf(file,"ThirdPersonMove=%d\n",g_thirdPersonMove.load());
     for (const auto& [scene, camera] : g_cutsceneCameras)
         std::fprintf(file,"CutsceneCamera.%s=%d\n",scene.c_str(),camera);
     std::fprintf(file,"WelcomeShown=%d\n",g_welcomeSeen.load()?1:0);
@@ -159,6 +161,7 @@ void Load() {
     int gameCutsceneMode=1;
 #endif
     int viewMode=0;
+    int thirdPersonMove=0;
     int welcomeSeen=0;
     int bind[BIND_SRC_COUNT]={kBindingDefault[0],kBindingDefault[1],
                               kBindingDefault[2],kBindingDefault[3],
@@ -198,6 +201,8 @@ void Load() {
                 gameCutsceneMode=value;
             else if (std::sscanf(line,"ViewMode=%d",&value)==1)
                 viewMode=value;
+            else if (std::sscanf(line,"ThirdPersonMove=%d",&value)==1)
+                thirdPersonMove=value;
 #ifdef SAVR_STEAM_FRAME
             else if (std::sscanf(line,"FrameGameCutsceneCinema3D=%d",&value)==1)
                 frameGameCutsceneMarker=value!=0;
@@ -264,6 +269,7 @@ void Load() {
         gameCutsceneMode<0?0:(gameCutsceneMode>2?2:gameCutsceneMode));
 #endif
     g_viewMode.store(std::clamp(viewMode,0,VIEW_COUNT-1));
+    g_thirdPersonMove.store(thirdPersonMove!=0?1:0);
     g_welcomeSeen.store(welcomeSeen!=0);
     for (int i=0;i<BIND_SRC_COUNT;++i)
         g_binding[i].store(
@@ -536,6 +542,17 @@ void CycleViewMode(int direction) {
 }
 const char* ViewModeName() {
     return ViewMode()==VIEW_OVER_SHOULDER?"THIRD: OVER SHOULDER":"FIRST PERSON";
+}
+int ThirdPersonMove() { EnsureInit(); return g_thirdPersonMove.load(); }
+bool ThirdPersonFaceCamera() { return ThirdPersonMove()==THIRD_MOVE_FACE_CAMERA; }
+void CycleThirdPersonMove(int) {
+    EnsureInit();
+    g_thirdPersonMove.store(g_thirdPersonMove.load()?0:1);
+    Save();
+    LOGI("[view] third person move -> %s",ThirdPersonMoveName());
+}
+const char* ThirdPersonMoveName() {
+    return ThirdPersonMove()==THIRD_MOVE_FACE_CAMERA?"FACE CAMERA":"FACE MOVE";
 }
 int RememberedCutsceneCamera(const char* scene) {
     EnsureInit();

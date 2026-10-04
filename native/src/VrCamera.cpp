@@ -3463,6 +3463,12 @@ bool OverShoulderAvailable() {
     return true;
 }
 
+// The view heading OVER SHOULDER runs on (the user's own snap/smooth turns,
+// radians in the game's heading convention: forward = (-sin, cos)), published
+// by the camera hook each frame for the third person character control.
+std::atomic<float> g_osBodyYaw{0.0f};
+std::atomic<double> g_osBodyYawMs{-1.0e9};
+
 bool ActorHasPosedHead(void* actor) {
     if (!actor || !g.GetAnimHierarchyFromSkinClump || !g.RpHAnimIDGetIndex ||
         !g.RpHAnimHierarchyGetMatrixArray) return false;
@@ -4238,6 +4244,8 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                         g_wasDriving = useVehicleFrame;
                         g_wasBeachDance = beachdance::Active();
                         const float yaw = g_bodyYaw;
+                        g_osBodyYaw.store(yaw, std::memory_order_relaxed);
+                        g_osBodyYawMs.store(NowMs(), std::memory_order_relaxed);
                         const float sy = std::sin(yaw), cy = std::cos(yaw);
                         const V3 fwd { -sy, cy, 0.0f };
                         const V3 left{ -cy, -sy, 0.0f };
@@ -29956,6 +29964,20 @@ bool IsColorGradingEnabled() {
 }
 
 bool OverShoulderActive() { return OverShoulderAvailable(); }
+
+bool OverShoulderFootHeading(float* yawOut) {
+    if (!yawOut || !OverShoulderAvailable()) return false;
+    // On foot only: not in a vehicle and not walking to a door (those keep
+    // their own animation and heading).
+    if (g.FindPlayerVehicle && g.FindPlayerVehicle(-1, false)) return false;
+    if (g.PlayerIsEnteringCar && g.PlayerIsEnteringCar()) return false;
+    if (NowMs() - g_osBodyYawMs.load(std::memory_order_relaxed) > 250.0)
+        return false;
+    const float yaw = g_osBodyYaw.load(std::memory_order_relaxed);
+    if (!std::isfinite(yaw)) return false;
+    *yawOut = yaw;
+    return true;
+}
 
 bool IsPs2ColourFilter() {
     EnsureGraphicsSettingsLoaded();
