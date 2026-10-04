@@ -17,12 +17,21 @@ const char* const kPath = savr::storage::FilesPath("vr_hud.ini");
 
 // reference Quest build ships CLASSIC as the approachable default.  SA follows that behaviour
 // so a new test build immediately proves that the integration is active.
-std::atomic<int>  g_preset{CLASSIC};
+// The Steam Frame build defaults to the FRONT PANEL (FLOATING) instead.
+#ifdef SAVR_STEAM_FRAME
+constexpr int kDefaultPreset = FLOATING;
+#else
+constexpr int kDefaultPreset = CLASSIC;
+#endif
+std::atomic<int>  g_preset{kDefaultPreset};
 std::atomic<bool> g_enabled{true};
 std::atomic<bool> g_gazeAutoHide{true};
 std::atomic<int>  g_objectiveMarkerMode{OBJECTIVE_ORIGINAL};
 std::once_flag    g_initOnce;
 std::mutex        g_saveMutex;
+// Save() waits on g_initOnce, so Load() cannot call it; Init() writes the
+// migrated file once loading is done.
+std::atomic<bool> g_savePending{false};
 
 struct ElementDefaults {
     int enabled;
@@ -166,7 +175,9 @@ void LoadElementDefaults() {
     }
 }
 
-int ClampPreset(int value) { return value == IMMERSIVE ? IMMERSIVE : CLASSIC; }
+int ClampPreset(int value) {
+    return value == IMMERSIVE ? IMMERSIVE : (value == FLOATING ? FLOATING : CLASSIC);
+}
 int ClampObjectiveMarkerMode(int value) {
     return std::clamp(value, 0, OBJECTIVE_MODE_COUNT - 1);
 }
@@ -178,7 +189,14 @@ void Load() {
         std::lock_guard<std::mutex> lock(g_dashModelMutex);
         for (auto& map : g_dashModel) map.clear();
     }
-    int preset = CLASSIC;
+    int preset = kDefaultPreset;
+#ifdef SAVR_STEAM_FRAME
+    // A vr_hud.ini written before the FRONT PANEL existed carries the wrist
+    // (IMMERSIVE) preset the kit ships, which sits down by the hands and out
+    // of view. It has no marker, so it moves to the Frame default once; any
+    // later choice is saved with the marker and kept.
+    bool frameHudMarker = false;
+#endif
     int enabled = 1;
     int gazeAutoHide = 1;
     int objectiveMarkerMode = OBJECTIVE_ORIGINAL;
@@ -188,6 +206,10 @@ void Load() {
             int value = 0;
             if (std::sscanf(line, "HudPreset=%d", &value) == 1)
                 preset = ClampPreset(value);
+#ifdef SAVR_STEAM_FRAME
+            else if (std::sscanf(line, "FrameFrontPanelHud=%d", &value) == 1)
+                frameHudMarker = value != 0;
+#endif
             else if (std::sscanf(line, "GameplayHud=%d", &value) == 1)
                 enabled = value != 0;
             else if (std::sscanf(line, "HudGazeAutoHide=%d", &value) == 1)
@@ -256,13 +278,23 @@ void Load() {
     // Migrate obsolete crop-scale values while preserving the configured panel position and bounds.
     if (g_element[MESSAGES][ELEMENT_SCALE].load(std::memory_order_relaxed)<5)
         g_element[MESSAGES][ELEMENT_SCALE].store(10,std::memory_order_relaxed);
+#ifdef SAVR_STEAM_FRAME
+    const bool migrateFrameHud = !frameHudMarker;
+    if (migrateFrameHud) preset = FLOATING;
+#endif
     g_preset.store(preset, std::memory_order_release);
     g_enabled.store(enabled != 0, std::memory_order_release);
     g_gazeAutoHide.store(gazeAutoHide != 0, std::memory_order_release);
     g_objectiveMarkerMode.store(objectiveMarkerMode, std::memory_order_release);
     LOGI("hud settings: preset=%s enabled=%d objective=%d",
-         preset == CLASSIC ? "CLASSIC" : "IMMERSIVE",
+         preset == CLASSIC ? "CLASSIC" : (preset == FLOATING ? "FRONT PANEL" : "IMMERSIVE"),
          enabled != 0 ? 1 : 0, objectiveMarkerMode);
+#ifdef SAVR_STEAM_FRAME
+    if (migrateFrameHud) {
+        LOGI("hud settings: front panel applied as the Frame default");
+        g_savePending.store(true, std::memory_order_release);
+    }
+#endif
 }
 
 void EnsureLoaded() { std::call_once(g_initOnce, Load); }
@@ -284,6 +316,9 @@ void Save() {
     }
     if (file != nullptr) {
         std::fprintf(file, "HudPreset=%d\n", g_preset.load(std::memory_order_acquire));
+#ifdef SAVR_STEAM_FRAME
+        std::fprintf(file, "FrameFrontPanelHud=1\n");
+#endif
         std::fprintf(file, "GameplayHud=%d\n",
                      g_enabled.load(std::memory_order_acquire) ? 1 : 0);
         std::fprintf(file, "HudGazeAutoHide=%d\n",
@@ -318,14 +353,23 @@ void Save() {
 
 }  // namespace
 
-void Init() { EnsureLoaded(); }
+void Init() {
+    EnsureLoaded();
+    if (g_savePending.exchange(false, std::memory_order_acq_rel)) Save();
+}
 
 Preset CurrentPreset() {
     EnsureLoaded();
     return static_cast<Preset>(ClampPreset(g_preset.load(std::memory_order_acquire)));
 }
 
-const char* PresetName() { return CurrentPreset() == CLASSIC ? "CLASSIC" : "IMMERSIVE"; }
+const char* PresetName() {
+    switch (CurrentPreset()) {
+        case CLASSIC:  return "CLASSIC";
+        case FLOATING: return "FRONT PANEL";
+        default:       return "IMMERSIVE";
+    }
+}
 
 void SetPreset(Preset preset) {
     EnsureLoaded();
@@ -335,6 +379,13 @@ void SetPreset(Preset preset) {
 
 void TogglePreset() {
     SetPreset(CurrentPreset() == CLASSIC ? IMMERSIVE : CLASSIC);
+}
+
+void CyclePreset(int direction) {
+    constexpr int kCount = 3;
+    const int next = (static_cast<int>(CurrentPreset()) + kCount +
+                      (direction < 0 ? -1 : 1)) % kCount;
+    SetPreset(static_cast<Preset>(next));
 }
 
 bool GameplayHudEnabled() {
@@ -370,6 +421,10 @@ bool ShouldRenderClassicHud() {
 
 bool ShouldRenderWristHud() {
     return GameplayHudEnabled() && CurrentPreset() == IMMERSIVE;
+}
+
+bool ShouldRenderFloatingHud() {
+    return GameplayHudEnabled() && CurrentPreset() == FLOATING;
 }
 
 ObjectiveMarkerMode GetObjectiveMarkerMode() {

@@ -1798,9 +1798,8 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
             const int element=savr::hud::CalibrationElement();
             const bool directText=savr::hud::IsDirectTextElement(element);
             if (hudSel == 0) {
-                if (minus) savr::hud::SetPreset(savr::hud::IMMERSIVE);
-                if (plus)  savr::hud::SetPreset(savr::hud::CLASSIC);
-                if (enter) savr::hud::TogglePreset();
+                if (minus) savr::hud::CyclePreset(-1);
+                if (plus || enter) savr::hud::CyclePreset(+1);
             } else if (hudSel == 1) {
                 if (minus) savr::hud::SetGameplayHudEnabled(false);
                 if (plus)  savr::hud::SetGameplayHudEnabled(true);

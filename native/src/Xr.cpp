@@ -4263,10 +4263,11 @@ bool UpdateHudTextTexture(HudTextTexture& target,
 // horizontal shift per eye gives the overlay a real, comfortable depth.
 constexpr float kHudPlaneDistanceMetres = 1.8f;
 
-bool DrawHudComposite(GLuint sourceTexture,int targetWidth,int targetHeight,
-                      bool drawClassicElements,int eye) {
-    if ((!sourceTexture&&g_signalPercent.load(std::memory_order_relaxed)<0)||
-        !BuildHudCompositeProgram()) return false;
+// Rasterise this frame's HUD text channels (help, big message, timers, signal
+// and air labels) into their textures and report the air and signal gauges.
+// Shared by the in-eye composite and the front panel; each draws the textures
+// its own way. Present thread, inside the GL context.
+void PrepareHudTextTextures(int& breath,int& signal) {
     const HudTextState textState=SnapshotHudText();
     const int selected=hud::CalibrationElement();
     const bool calibrating=g_hudActive.load(std::memory_order_relaxed);
@@ -4300,14 +4301,24 @@ bool DrawHudComposite(GLuint sourceTexture,int targetWidth,int targetHeight,
     UpdateHudTextTexture(g_briefTextTexture,smallText,0,textureRevision);
     UpdateHudTextTexture(g_bigTextTexture,bigText,1,textureRevision);
     UpdateHudTextTexture(g_timerTextTexture,timerText,0,textureRevision);
-    const int breath=g_breathPercent.load(std::memory_order_relaxed);
-    const int signal=g_signalPercent.load(std::memory_order_relaxed);
+    breath=g_breathPercent.load(std::memory_order_relaxed);
+    signal=g_signalPercent.load(std::memory_order_relaxed);
     UpdateHudTextTexture(g_signalTextTexture,signal<0?u"":u"SIGNAL",0,
                          signal<0?0u:1u);
     const int breathLabel=breath<0?0:(breath<=20?1:2);
     const std::u16string breathText=breathLabel==0?u"":(breathLabel==1?u"LOW AIR":u"AIR");
     UpdateHudTextTexture(g_breathTextTexture,breathText,0,
                          static_cast<std::uint64_t>(breathLabel));
+}
+
+bool DrawHudComposite(GLuint sourceTexture,int targetWidth,int targetHeight,
+                      bool drawClassicElements,int eye) {
+    if ((!sourceTexture&&g_signalPercent.load(std::memory_order_relaxed)<0)||
+        !BuildHudCompositeProgram()) return false;
+    int breath=0,signal=0;
+    PrepareHudTextTextures(breath,signal);
+    const int selected=hud::CalibrationElement();
+    const bool calibrating=g_hudActive.load(std::memory_order_relaxed);
     // Per-eye convergence: shift every destination rect toward the nose by
     // the parallax of a plane kHudPlaneDistanceMetres away, so crops and
     // text fuse at that depth instead of at infinity behind the world.
@@ -9388,7 +9399,8 @@ void EnsureArrowProgram() {
 // hand can never slip against each other or sample different frames.
 
 GLuint g_wristProg = 0, g_wristVbo = 0, g_wristSampler = 0;
-GLint  g_wristMvpLoc = -1, g_wristTexLoc = -1, g_wristOpacityLoc = -1;
+GLint  g_wristMvpLoc = -1, g_wristTexLoc = -1, g_wristOpacityLoc = -1,
+       g_wristTintLoc = -1;
 
 void EnsureWristProgram() {
     if (g_wristProg) return;
@@ -9404,12 +9416,12 @@ void EnsureWristProgram() {
     const char* fs = "#version 300 es\n"
                      "precision mediump float;\n"
                      "in vec2 vUV;\n"
-                     "uniform sampler2D uTex; uniform float uOpacity; out vec4 o;\n"
+                     "uniform sampler2D uTex; uniform float uOpacity; uniform vec4 uTint; out vec4 o;\n"
                      "void main(){\n"
                      "  vec4 c = texture(uTex, vUV);\n"
                      "  float coverage = max(c.r, max(c.g, c.b));\n"
                      "  float keyed = smoothstep(0.008, 0.055, coverage);\n"
-                     "  o = vec4(c.rgb, c.a * keyed * uOpacity);\n"
+                     "  o = vec4(c.rgb * uTint.rgb, c.a * keyed * uOpacity * uTint.a);\n"
                      "}\n";
     const GLuint v = CompileHandShader(GL_VERTEX_SHADER, vs), f = CompileHandShader(GL_FRAGMENT_SHADER, fs);
     g_wristProg = glCreateProgram();
@@ -9428,6 +9440,7 @@ void EnsureWristProgram() {
     g_wristMvpLoc = glGetUniformLocation(g_wristProg, "uMVP");
     g_wristTexLoc = glGetUniformLocation(g_wristProg, "uTex");
     g_wristOpacityLoc = glGetUniformLocation(g_wristProg, "uOpacity");
+    g_wristTintLoc = glGetUniformLocation(g_wristProg, "uTint");
     glGenBuffers(1, &g_wristVbo);
     glGenSamplers(1, &g_wristSampler);
     glSamplerParameteri(g_wristSampler, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -9644,6 +9657,7 @@ void DrawWristPanelsForEye(const float* mvp, const HandPose hands[2],
     glBindTexture(GL_TEXTURE_2D, hudTex);
     glBindSampler(0, g_wristSampler);
     glUniform1i(g_wristTexLoc, 0);
+    glUniform4f(g_wristTintLoc, 1.0f, 1.0f, 1.0f, 1.0f);
     glUniformMatrix4fv(g_wristMvpLoc, 1, GL_FALSE, mvp);
     glEnable(GL_BLEND);
     glBlendEquation(GL_FUNC_ADD);
@@ -11243,6 +11257,278 @@ void DrawWeaponForEye(const float* mvp) {
 
 // Draw the built hand meshes into the currently-bound swapchain framebuffer for
 // one eye. rp = the presented set's render pose; e = 0 left / 1 right.
+// ===================== FRONT PANEL HUD (Steam Frame default) =================
+// One panel with everything the classic HUD shows, hung kFrontHudDistance in
+// front of you and fixed in the room (OpenXR LOCAL space). CLASSIC pastes the
+// HUD onto the finished eye image: that makes it head-locked inside an image
+// the runtime re-projects, so it trembles with every small head movement and
+// swings with yaw. Here the panel is real geometry with its own pose, drawn
+// into the eye image at the pose that image was rendered from, so the runtime
+// re-projects it exactly like the world: it cannot jitter. It only moves
+// when told to, and it is told to by a low-pass filter on the head:
+//  - yaw: nothing happens inside +-kFrontHudYawDeadDeg of the panel's
+//    heading; beyond that it eases toward the head with a kFrontHudYawTau time
+//    constant, so a glance sideways reads the panel's edge, a real turn drags
+//    it along;
+//  - position: the same, with a kFrontHudPosDeadM dead zone, so walking about
+//    the room carries it and sitting still leaves it alone;
+//  - height: eye level, same filter. The panel never rolls or pitches: it only
+//    yaws, so the horizon of its text stays level whatever the head does.
+constexpr float kFrontHudDistance = 1.7f;
+constexpr float kFrontHudHalfW = 0.55f;     // panel is 1.10 x 0.62 m, 16:9
+constexpr float kFrontHudHalfH = 0.31f;
+constexpr float kFrontHudYawDeadDeg = 12.0f;
+constexpr float kFrontHudYawTau = 0.32f;
+constexpr float kFrontHudPosDeadM = 0.10f;
+constexpr float kFrontHudPosTau = 0.45f;
+constexpr float kFrontHudHeightDeadM = 0.07f;
+
+struct FrontHudState {
+    bool valid{false};
+    float yaw{0.0f};                // heading of the panel's forward, radians
+    float anchorX{0.0f}, anchorZ{0.0f};
+    float height{0.0f};
+    std::uint64_t lastNs{0};
+    int lastFrame{-1};
+};
+FrontHudState g_frontHud;
+GLuint g_frontHudSolidTex = 0;
+
+float WrapPi(float a) {
+    const float twoPi = 6.28318530718f;
+    a = std::fmod(a + 3.14159265359f, twoPi);
+    if (a < 0.0f) a += twoPi;
+    return a - 3.14159265359f;
+}
+
+// Advance the filter once per present. `head` is the live head pose.
+void UpdateFrontHud(const XrPosef& head) {
+    const std::uint64_t now = MonotonicNowNs();
+    const XrQuaternionf& q = head.orientation;
+    const float fx = -2.0f * (q.x * q.z + q.w * q.y);
+    const float fz = -(1.0f - 2.0f * (q.x * q.x + q.y * q.y));
+    const bool haveYaw = fx * fx + fz * fz > 0.04f;   // not looking straight up/down
+    const float headYaw = haveYaw ? std::atan2(-fx, -fz) : g_frontHud.yaw;
+    const bool stale = !g_frontHud.valid || now < g_frontHud.lastNs ||
+                       now - g_frontHud.lastNs > 600000000ull;   // 0.6 s unseen
+    if (stale) {
+        g_frontHud.valid = true;
+        g_frontHud.yaw = headYaw;
+        g_frontHud.anchorX = head.position.x;
+        g_frontHud.anchorZ = head.position.z;
+        g_frontHud.height = head.position.y;
+        g_frontHud.lastNs = now;
+        return;
+    }
+    const float dt = std::clamp(
+        static_cast<float>(now - g_frontHud.lastNs) * 1e-9f, 0.001f, 0.1f);
+    g_frontHud.lastNs = now;
+    const float yawGain = 1.0f - std::exp(-dt / kFrontHudYawTau);
+    const float posGain = 1.0f - std::exp(-dt / kFrontHudPosTau);
+
+    // Beyond the dead zone the pull grows from zero (error minus the dead
+    // zone), so the panel starts and stops without a step.
+    const float dead = kFrontHudYawDeadDeg * 3.14159265f / 180.0f;
+    const float yawError = WrapPi(headYaw - g_frontHud.yaw);
+    const float yawPull = std::fabs(yawError) > dead
+        ? std::copysign(std::fabs(yawError) - dead, yawError) : 0.0f;
+    g_frontHud.yaw = WrapPi(g_frontHud.yaw + yawPull * yawGain);
+
+    const float dx = head.position.x - g_frontHud.anchorX;
+    const float dz = head.position.z - g_frontHud.anchorZ;
+    const float horizontal = std::sqrt(dx * dx + dz * dz);
+    if (horizontal > kFrontHudPosDeadM) {
+        const float pull = (horizontal - kFrontHudPosDeadM) / horizontal;
+        g_frontHud.anchorX += dx * pull * posGain;
+        g_frontHud.anchorZ += dz * pull * posGain;
+    }
+    const float dy = head.position.y - g_frontHud.height;
+    if (std::fabs(dy) > kFrontHudHeightDeadM)
+        g_frontHud.height += std::copysign(
+            std::fabs(dy) - kFrontHudHeightDeadM, dy) * posGain;
+}
+
+void EnsureFrontHudSolidTexture() {
+    if (g_frontHudSolidTex) return;
+    const unsigned char white[4] = {255, 255, 255, 255};
+    glGenTextures(1, &g_frontHudSolidTex);
+    glBindTexture(GL_TEXTURE_2D, g_frontHudSolidTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                 white);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+// Draw the panel for one eye, inside the hand pass (same mvp, same eye image).
+// frameId lets the filter advance once per present (the left eye) while the
+// right eye reuses the same pose.
+void DrawFrontHudForEye(const float* mvp, int e, unsigned int hudTex) {
+    EnsureWristProgram();
+    if (!g_wristProg) return;
+    int breath = 0, signal = 0;
+    if (e == 0) {
+        XrPosef head{};
+        bool ok = false;
+        {
+            std::lock_guard<std::mutex> lock(g_headPoseMutex);
+            ok = g_headPoseValid;
+            head = g_headPose;
+        }
+        if (!ok) return;
+        UpdateFrontHud(head);
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            LOGI("[hud.front] panel %.2fx%.2f m at %.1f m, yaw dead zone %.0f deg tau %.2f s, "
+                 "position dead zone %.2f m tau %.2f s",
+                 2 * kFrontHudHalfW, 2 * kFrontHudHalfH, kFrontHudDistance,
+                 kFrontHudYawDeadDeg, kFrontHudYawTau, kFrontHudPosDeadM,
+                 kFrontHudPosTau);
+        }
+    }
+    if (!g_frontHud.valid) return;
+    // The text textures are shared with the in-eye composite and only need
+    // rasterising once per present.
+    static int textRasterisedFor = -1;
+    static int cachedBreath = -1, cachedSignal = -1;
+    const int presentId = g_loopFrames.load(std::memory_order_relaxed);
+    if (e == 0 || textRasterisedFor != presentId) {
+        PrepareHudTextTextures(cachedBreath, cachedSignal);
+        textRasterisedFor = presentId;
+    }
+    breath = cachedBreath;
+    signal = cachedSignal;
+    EnsureFrontHudSolidTexture();
+
+    const float yaw = g_frontHud.yaw;
+    const float sy = std::sin(yaw), cy = std::cos(yaw);
+    // Forward of the panel is (-sin, -cos); the panel hangs that far ahead of
+    // the anchor and turns its face (+Z) back toward it.
+    const XrVector3f centre{g_frontHud.anchorX - sy * kFrontHudDistance,
+                            g_frontHud.height,
+                            g_frontHud.anchorZ - cy * kFrontHudDistance};
+    const XrVector3f right{cy, 0.0f, -sy};
+    const XrVector3f up{0.0f, 1.0f, 0.0f};
+
+    glUseProgram(g_wristProg);
+    glActiveTexture(GL_TEXTURE0);
+    glBindSampler(0, g_wristSampler);
+    glUniform1i(g_wristTexLoc, 0);
+    glUniformMatrix4fv(g_wristMvpLoc, 1, GL_FALSE, mvp);
+    glUniform1f(g_wristOpacityLoc, 1.0f);
+    glDisable(GL_DEPTH_TEST);   // a HUD is always readable; it must not sink into a near wall
+    glEnable(GL_BLEND);
+    glBlendEquation(GL_FUNC_ADD);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+    glBindBuffer(GL_ARRAY_BUFFER, g_wristVbo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float),
+                          reinterpret_cast<void*>(0));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float),
+                          reinterpret_cast<void*>(3 * sizeof(float)));
+
+    // A rectangle in panel coordinates (metres, +x right, +y up).
+    const auto quad = [&](GLuint tex, float cx, float cyy, float w, float h,
+                          float u0, float v0, float u1, float v1,
+                          const float tint[4]) {
+        const XrVector3f c = vadd(centre, vadd(vscale(right, cx), vscale(up, cyy)));
+        const XrVector3f rh = vscale(right, w * 0.5f);
+        const XrVector3f uh = vscale(up, h * 0.5f);
+        const XrVector3f tl = vadd(vsub(c, rh), uh);
+        const XrVector3f tr = vadd(vadd(c, rh), uh);
+        const XrVector3f bl = vsub(vsub(c, rh), uh);
+        const XrVector3f br = vsub(vadd(c, rh), uh);
+        const float verts[4 * 5] = {
+            tl.x, tl.y, tl.z, u0, v0,
+            bl.x, bl.y, bl.z, u0, v1,
+            tr.x, tr.y, tr.z, u1, v0,
+            br.x, br.y, br.z, u1, v1,
+        };
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glUniform4fv(g_wristTintLoc, 1, tint);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    };
+    static const float kWhite[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    const auto crop = [&](int element, float cx, float cyy, float w) {
+        const hud::ElementSettings es = hud::GetElementSettings(element);
+        if (!es.enabled || !hudTex || es.sourceWidth <= 0 || es.sourceHeight <= 0) return;
+        const float h = w * static_cast<float>(es.sourceHeight) /
+                        static_cast<float>(es.sourceWidth);
+        const float u0 = static_cast<float>(es.sourceX) / kGameplayHudLogicalWidth;
+        const float v0 = static_cast<float>(es.sourceY) / kGameplayHudLogicalHeight;
+        const float u1 = u0 + static_cast<float>(es.sourceWidth) / kGameplayHudLogicalWidth;
+        const float v1 = v0 + static_cast<float>(es.sourceHeight) / kGameplayHudLogicalHeight;
+        quad(hudTex, cx, cyy, w, h, u0, v0, u1, v1, kWhite);
+    };
+    // element < 0: always shown (the air and locator labels stay readable
+    // whatever the player switched off).
+    const auto text = [&](int element, const HudTextTexture& t, float cx,
+                          float cyy, float w, float h) {
+        if (!t.visible || !t.texture) return;
+        if (element >= 0 && !hud::GetElementSettings(element).enabled) return;
+        quad(t.texture, cx, cyy, w, h, 0.0f, 0.0f, 1.0f, 1.0f, kWhite);
+    };
+
+    // Layout, panel metres from its centre. Radar low left, the status block
+    // (money, health, armour, wanted, weapon) top right, help text top left,
+    // mission timers under the status block, big messages low centre.
+    crop(hud::RADAR, -kFrontHudHalfW + 0.03f + 0.13f, -kFrontHudHalfH + 0.03f + 0.13f, 0.26f);
+    const hud::ElementSettings health = hud::GetElementSettings(hud::HEALTH);
+    const float healthW = 0.36f;
+    const float healthH = health.sourceWidth > 0
+        ? healthW * static_cast<float>(health.sourceHeight) /
+              static_cast<float>(health.sourceWidth) : 0.12f;
+    crop(hud::HEALTH, kFrontHudHalfW - 0.03f - healthW * 0.5f,
+         kFrontHudHalfH - 0.03f - healthH * 0.5f, healthW);
+    text(hud::TIMERS, g_timerTextTexture, kFrontHudHalfW - 0.03f - 0.15f,
+         kFrontHudHalfH - 0.03f - healthH - 0.02f - 0.0375f, 0.30f, 0.075f);
+    text(hud::HELP_TEXT, g_briefTextTexture, -kFrontHudHalfW + 0.03f + 0.25f,
+         kFrontHudHalfH - 0.03f - 0.0625f, 0.50f, 0.125f);
+    text(hud::MESSAGES, g_bigTextTexture, 0.0f, -kFrontHudHalfH + 0.03f + 0.0625f,
+         0.50f, 0.125f);
+
+    // Air and mission-locator gauges, bottom right, readable in any state of
+    // the other elements.
+    const auto gauge = [&](float cx, float cyy, float fraction,
+                           const float fill[4]) {
+        const float w = 0.28f, h = 0.022f;
+        static const float kBack[4] = {0.02f, 0.03f, 0.05f, 0.80f};
+        static const float kRim[4] = {0.85f, 0.95f, 1.0f, 0.95f};
+        quad(g_frontHudSolidTex, cx, cyy, w + 0.008f, h + 0.008f,
+             0.0f, 0.0f, 1.0f, 1.0f, kRim);
+        quad(g_frontHudSolidTex, cx, cyy, w, h, 0.0f, 0.0f, 1.0f, 1.0f, kBack);
+        const float f = std::clamp(fraction, 0.0f, 1.0f);
+        if (f > 0.002f)
+            quad(g_frontHudSolidTex, cx - w * 0.5f + w * f * 0.5f, cyy, w * f, h,
+                 0.0f, 0.0f, 1.0f, 1.0f, fill);
+    };
+    const float gaugeX = kFrontHudHalfW - 0.03f - 0.14f;
+    if (breath >= 0) {
+        static const float kAir[4] = {0.15f, 0.80f, 1.0f, 0.95f};
+        static const float kLow[4] = {1.0f, 0.22f, 0.10f, 0.95f};
+        text(-1, g_breathTextTexture, gaugeX, -kFrontHudHalfH + 0.03f + 0.056f,
+             0.22f, 0.055f);
+        gauge(gaugeX, -kFrontHudHalfH + 0.03f + 0.011f, breath / 100.0f,
+              breath <= 20 ? kLow : kAir);
+    }
+    if (signal >= 0) {
+        static const float kSig[4] = {0.25f, 1.0f, 0.35f, 0.95f};
+        const float base = breath >= 0 ? 0.13f : 0.0f;
+        text(-1, g_signalTextTexture, gaugeX,
+             -kFrontHudHalfH + 0.03f + base + 0.056f, 0.22f, 0.055f);
+        gauge(gaugeX, -kFrontHudHalfH + 0.03f + base + 0.011f, signal / 100.0f, kSig);
+    }
+
+    glDisableVertexAttribArray(0);
+    glDisableVertexAttribArray(1);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+    glBindSampler(0, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
 void DrawHandsForEye(const XrPosef& rp, int e, int fbW, int fbH,
                      unsigned int gameDepthRbo, int gameDepthW, int gameDepthH,
                      float renderedNearZ, float renderedFarZ,
@@ -11273,6 +11559,10 @@ void DrawHandsForEye(const XrPosef& rp, int e, int fbW, int fbH,
     const bool hudCalibrating = g_hudActive.load(std::memory_order_relaxed);
     const bool dashAnchored =
         drivingWheel.active || drivingWheel.dashAnchorValid;
+    // FRONT PANEL preset: the whole HUD as one eased panel in front of the
+    // player (see DrawFrontHudForEye). Text and gauges need no HUD capture,
+    // so it does not wait for hudSourceTex.
+    const bool frontHudWanted = !scope.active && hud::ShouldRenderFloatingHud();
     const bool wristWanted = !scope.active && hudSourceTex != 0 &&
         (hud::ShouldRenderWristHud() || hudCalibrating) &&
         (dashAnchored ||
@@ -11285,7 +11575,7 @@ void DrawHandsForEye(const XrPosef& rp, int e, int fbW, int fbH,
         (!trackedVisuals || (throwableTrajectory[0].count <= 1 &&
                              throwableTrajectory[1].count <= 1)) &&
         !chuteVisuals && !chuteRingVisual &&
-        !wristWanted &&
+        !wristWanted && !frontHudWanted &&
         tracerCount <= 0 && objectiveMarkerCount <= 0) return;
     if (haveHands) EnsureHandProgram();
 
@@ -11475,6 +11765,8 @@ void DrawHandsForEye(const XrPosef& rp, int e, int fbW, int fbH,
     if (wristWanted)
         DrawWristPanelsForEye(mvp, bakedHands, bakedTwoHand, drivingWheel,
                               hudSourceTex, rp, weaponHandMask);
+    if (frontHudWanted)
+        DrawFrontHudForEye(mvp, e, hudSourceTex);
 
     glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, 0);
     glDisable(GL_DEPTH_TEST);
@@ -12046,6 +12338,8 @@ bool RenderStereoEyeProjection(XrCompositionLayerProjection& layer,
         // Mission/tutorial text is an independent immersive layer. Disabling
         // CLASSIC hides phone-HUD crops, not text or calibration samples.
         if (!cinemaSlot &&
+            (!hud::ShouldRenderFloatingHud()||
+             g_hudActive.load(std::memory_order_relaxed)) &&
             (hudSource||g_signalPercent.load(std::memory_order_relaxed)>=0))
             DrawHudComposite(hudSource,chain.width,chain.height,
                              hud::ShouldRenderClassicHud(),e);

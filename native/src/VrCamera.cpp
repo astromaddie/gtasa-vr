@@ -21271,6 +21271,7 @@ void OnRenderScene(bool underwater) {
         ScriptedCutsceneRunning();
     const bool hudNeeded=!cutsceneHudSuppressed&&(
         hud::ShouldRenderClassicHud()||hud::ShouldRenderWristHud()||
+        hud::ShouldRenderFloatingHud()||
         directTextEnabled||xr::HudCalibrationActive());
     // First-time HUD raster creation records RenderQueue resource commands.
     // Keep that rare lifecycle transition behind the completed retail token;

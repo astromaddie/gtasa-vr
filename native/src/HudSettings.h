@@ -6,9 +6,18 @@ namespace savr::hud {
 // original 2D HUD crops in front of the player; IMMERSIVE wears the same two
 // real crops as wrist panels on the tracked hands (radar on the left forearm,
 // the status block on the right), exactly like the Vice City Quest port.
+//
+// FLOATING (shown as FRONT PANEL) is the Steam Frame default: one panel a
+// metre and a half or so in front of you, readable without looking down. It
+// is fixed in the room and eases after your head (yaw and position are low-
+// pass filtered with a dead zone, it never rolls), so it neither jitters nor
+// turns with every small head movement the way CLASSIC does (CLASSIC is
+// pasted onto the eye image, so it is head-locked and trembles when the
+// runtime re-projects the frame).
 enum Preset {
     IMMERSIVE = 0,
     CLASSIC   = 1,
+    FLOATING  = 2,
 };
 
 // Objective indicators are independent from the flat HUD. ORIGINAL replays
@@ -107,7 +116,8 @@ void Init();
 Preset CurrentPreset();
 const char* PresetName();
 void SetPreset(Preset preset);       // persists immediately
-void TogglePreset();                 // persists immediately
+void TogglePreset();                 // persists immediately (IMMERSIVE <-> CLASSIC, legacy)
+void CyclePreset(int direction);     // persists immediately; all three presets
 
 bool GameplayHudEnabled();
 void SetGameplayHudEnabled(bool enabled); // persists immediately
@@ -128,6 +138,9 @@ bool ShouldRenderClassicHud();
 // IMMERSIVE preset: the radar and status crops become quads worn on the
 // tracked wrists instead of screen-space overlays. Same master switch.
 bool ShouldRenderWristHud();
+
+// FLOATING preset: the front panel (see Preset).
+bool ShouldRenderFloatingHud();
 
 ObjectiveMarkerMode GetObjectiveMarkerMode();
 const char* ObjectiveMarkerModeName();
