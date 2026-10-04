@@ -3447,6 +3447,22 @@ bool Cinema3DWanted() {
 }
 #endif
 
+// THIRD: OVER SHOULDER, when it is the one in charge of the view. It steps
+// aside for the cases the first-person machinery owns outright: cutscenes
+// (cinema or head-tracked), the jetpack, skydiving and the canopy, RC models
+// and cranes, the beach dance. Re-evaluated every frame, so the view returns
+// to first person by itself the moment one of them starts and comes back
+// when it ends (the camera blend below hides the swap).
+bool OverShoulderAvailable() {
+    if (!locomotion::ThirdPersonView()) return false;
+    if (FormalCutsceneRunning() || ScriptedCutsceneRunning()) return false;
+    if (beachdance::Active() || jetpack::IsActive()) return false;
+    if (ParachuteStateActive()) return false;
+    if (driving::GetRemoteControlledVehicle() != nullptr ||
+        driving::IsCraneControlActive()) return false;
+    return true;
+}
+
 bool ActorHasPosedHead(void* actor) {
     if (!actor || !g.GetAnimHierarchyFromSkinClump || !g.RpHAnimIDGetIndex ||
         !g.RpHAnimHierarchyGetMatrixArray) return false;
@@ -3734,8 +3750,17 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                     g.FindPlayerVehicle(-1, false) : nullptr;
                 const bool enteringVehicle = g.PlayerIsEnteringCar &&
                     g.PlayerIsEnteringCar();
+                const bool overShoulder = OverShoulderAvailable();
                 const bool thirdPersonView = vehicle != nullptr &&
                     !enteringVehicle && driving::ThirdPersonViewActive();
+                // OVER SHOULDER on foot, including the walk to a car door and
+                // the climb out: our own camera behind the player, so it is
+                // locked to him through every enter/exit animation. Once he
+                // is seated the stock chase camera takes over (blended).
+                const bool osOnFoot = overShoulder &&
+                    (vehicle == nullptr || enteringVehicle);
+                // Level, yaw-only view (no seat, no vehicle tilt, no eye nudge).
+                const bool levelView = thirdPersonView || osOnFoot;
                 // The combine's tall, forward cab magnifies horizon-lock and
                 // world-height smoothing into metres of apparent cockpit drift.
                 // Keep the entire seated view in its rigid vehicle frame.
@@ -4104,7 +4129,7 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                         // frame and the camera never turned with the model —
                         // Vice City turns it, and now this port does too.
                         const bool useVehicleFrame =
-                            vehicle != nullptr || enteringVehicle;
+                            (vehicle != nullptr || enteringVehicle) && !osOnFoot;
                         if (useVehicleFrame) {
                             // Vice City re-latches the physical head yaw when
                             // first-person switches from the ped frame to the
@@ -4112,7 +4137,9 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                             // at the moment of entry becomes straight ahead in
                             // the cockpit instead of preserving an arbitrary
                             // room-space yaw from on-foot play.
-                            if (!g_wasDriving) {
+                            // (OVER SHOULDER keeps the physical facing: the
+                            // camera blend below carries the view over.)
+                            if (!g_wasDriving && !overShoulder) {
                                 g_origin.valid = false;
                                 LOGI("[camera] vehicle entry relatching physical facing");
                             }
@@ -4129,7 +4156,12 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                             // air bail-out — defer the reseed until it is
                             // valid instead of snapping the yaw to north.
                             static bool g_yawReseedPending = false;
-                            if (!g_bodyYawSet || g_wasDriving ||
+                            // OVER SHOULDER keeps its heading when the
+                            // player climbs out: it is the user's own turn
+                            // yaw, and the view must not swing to wherever
+                            // the ped happens to face.
+                            if (!g_bodyYawSet ||
+                                (g_wasDriving && !overShoulder) ||
                                 (beachdance::Active() && !g_wasBeachDance))
                                 g_yawReseedPending = true;
                             if (g_yawReseedPending && pedMatrixValid) {
@@ -4190,7 +4222,8 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                                     (locomotion::GetTurnSensitivityPercent()/100.0f)*dt;
                             }
                             if (locomotion::GetMovementMode()==
-                                    locomotion::MOVEMENT_HEAD_TURN) {
+                                    locomotion::MOVEMENT_HEAD_TURN &&
+                                !overShoulder) {
                                 const float move=std::hypot(mappedMoveX,mappedMoveY);
                                 const float headYaw=CurrentLocalHeadYaw();
                                 constexpr float threshold=10.0f*
@@ -4218,7 +4251,7 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                             g.CVehicle_GetVehicleAppearance&&
                             g.CVehicle_GetVehicleAppearance(vehicle)==2;
                         const bool aircraftTilt = vehicle != nullptr &&
-                            !thirdPersonView && vehicleBasisValid &&
+                            !levelView && vehicleBasisValid &&
                             locomotion::FlightCameraTilt() &&
                             g.CVehicle_GetVehicleAppearance &&
                             [&] {
@@ -4227,12 +4260,12 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                                 return a == 3 || a == 5;
                             }();
                         const bool carTilt = vehicle != nullptr &&
-                            !thirdPersonView && vehicleBasisValid &&
+                            !levelView && vehicleBasisValid &&
                             (rigidCombineCabin || driving::CarCameraTiltEnabled()) &&
                             g.CVehicle_GetVehicleAppearance &&
                             g.CVehicle_GetVehicleAppearance(vehicle) == 1;
                         const bool boatTilt = vehicle != nullptr &&
-                            !thirdPersonView && vehicleBasisValid &&
+                            !levelView && vehicleBasisValid &&
                             driving::BoatCameraTiltEnabled() &&
                             g.CVehicle_GetVehicleAppearance &&
                             g.CVehicle_GetVehicleAppearance(vehicle) == 4;
@@ -4243,7 +4276,7 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                             base.right = vehicleRight * -1.0f;
                             base.forward = vehicleForward;
                             base.up = vehicleUp;
-                        } else if (vehicleIsBike&&vehicleBasisValid&&!thirdPersonView) {
+                        } else if (vehicleIsBike&&vehicleBasisValid&&!levelView) {
                             float visualRightValues[3]{},visualForwardValues[3]{},
                                   visualUpValues[3]{};
                             const bool visualBasisValid=
@@ -4318,7 +4351,7 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                         // chase view sits exactly on the stock camera and takes
                         // no seat or eye-forward offsets at all.
                         if (rearPassenger)justbusiness::detail::FaceRear(base);
-                        if (vehicle != nullptr && !thirdPersonView && !rearPassenger) {
+                        if (vehicle != nullptr && !levelView && !rearPassenger) {
                             seatSide=static_cast<float>(
                                 driving::GetActiveSeatSideCm())/100.0f;
                             // The selected category/mode global seat and the
@@ -4330,10 +4363,10 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                                 driving::GetActiveSeatHeightCm())/100.0f;
                         }
                         const V3 heightAxis =
-                            (vehicle != nullptr && !thirdPersonView) ? vehicleUp :
+                            (vehicle != nullptr && !levelView) ? vehicleUp :
                             V3{0.0f, 0.0f, 1.0f};
                         const float eyeForward =
-                            thirdPersonView ? 0.0f : (rearPassenger?-kEyeForward:kEyeForward);
+                            levelView ? 0.0f : (rearPassenger?-kEyeForward:kEyeForward);
                         // Seat calibration must rotate around the same cab as
                         // the model dummy and wheel, including pitch and roll.
                         const bool rigidSeatAxes = rigidCombineCabin && vehicleBasisValid;
@@ -4361,6 +4394,116 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                         }
                         // Publish the yaw-only body frame for the weapon-in-hand
                         // matrix (it must not inherit head pitch/roll).
+                        // OVER SHOULDER on foot: the eye is behind and a little
+                        // above CJ instead of in his head. The game's own chase
+                        // camera supplies the distance and height (sampled from
+                        // the stock camera, so its zoom for walking, aiming and
+                        // so on carries over); the heading is the user's own
+                        // snap/smooth turn yaw (g_bodyYaw), which is what makes
+                        // the camera turn only when the user turns and keeps the
+                        // horizon level. A line test from his head pulls the eye
+                        // in at walls so it never ends up behind geometry.
+                        if (osOnFoot && pedMatrixValid) {
+                            static float osDist = 3.2f, osHeight = 1.1f;
+                            static float osRatio = 1.0f;
+                            static double osMs = 0.0;
+                            const double nowMs = NowMs();
+                            const bool osStale = nowMs - osMs > 500.0;
+                            const float dt = osStale ? 0.016f : static_cast<float>(
+                                std::clamp((nowMs - osMs) / 1000.0, 0.001, 0.1));
+                            osMs = nowMs;
+                            float stockDist = 3.2f, stockHeight = 1.1f;
+                            {
+                                const V3 d = stockCamera.pos - pedPosition;
+                                const float horiz = std::hypot(d.x, d.y);
+                                if (Finite(d) && horiz > 0.5f && horiz < 12.0f) {
+                                    stockDist = horiz;
+                                    stockHeight = d.z;
+                                }
+                            }
+                            const float targetDist = std::clamp(stockDist, 2.4f, 4.6f);
+                            const float targetHeight = std::clamp(stockHeight, 0.6f, 1.9f);
+                            if (osStale) {
+                                osDist = targetDist;
+                                osHeight = targetHeight;
+                                osRatio = 1.0f;
+                            } else {
+                                const float k = 1.0f - std::exp(-dt / 0.35f);
+                                osDist += (targetDist - osDist) * k;
+                                osHeight += (targetHeight - osHeight) * k;
+                            }
+                            constexpr float kShoulder = 0.40f;   // over the right shoulder
+                            const V3 pivot = pedPosition + V3{0.0f, 0.0f, kEyeHeight};
+                            V3 eyeBehind{
+                                pedPosition.x - fwd.x * osDist + right.x * kShoulder,
+                                pedPosition.y - fwd.y * osDist + right.y * kShoulder,
+                                pedPosition.z + osHeight};
+                            float wanted = 1.0f;
+                            if (g.CWorld_ProcessLineOfSight) {
+                                const V3 dir = eyeBehind - pivot;
+                                const float length = std::sqrt(Dot(dir, dir));
+                                if (Finite(dir) && length > 0.2f) {
+                                    const GameSymbols::Vec3 a{pivot.x, pivot.y, pivot.z};
+                                    const GameSymbols::Vec3 b{eyeBehind.x, eyeBehind.y,
+                                                              eyeBehind.z};
+                                    alignas(8) std::uint8_t col[0x2c]{};
+                                    void* hit = nullptr;
+                                    if (g.CWorld_ProcessLineOfSight(&a, &b, col, &hit,
+                                            true, false, false, true, false, false,
+                                            true, false)) {
+                                        const V3 hp = *reinterpret_cast<const V3*>(col);
+                                        const float hitDist = std::sqrt(
+                                            Dot(hp - pivot, hp - pivot));
+                                        if (Finite(hp) && hitDist < length)
+                                            wanted = std::clamp(
+                                                std::max(0.7f, hitDist - 0.35f) / length,
+                                                0.05f, 1.0f);
+                                    }
+                                }
+                            }
+                            // Pull in at once, ease back out.
+                            if (wanted < osRatio) osRatio = wanted;
+                            else osRatio += (wanted - osRatio) *
+                                            (1.0f - std::exp(-dt / 0.25f));
+                            eyeBehind = pivot + (eyeBehind - pivot) * osRatio;
+                            base.pos = eyeBehind;
+                            static unsigned int osLog = 0;
+                            if ((++osLog % 240u) == 1u)
+                                LOGI("[view.os] on foot: dist %.2f height %.2f pull %.2f "
+                                     "(stock chase %.2f/%.2f)",
+                                     osDist, osHeight, osRatio, stockDist, stockHeight);
+                        }
+                        // Carry the eye across view changes (first person <->
+                        // over shoulder, orbit <-> the stock vehicle chase
+                        // camera) over half a second instead of jumping. Only
+                        // the position needs it: the heading is the same
+                        // g_bodyYaw before and after.
+                        {
+                            struct Blend {
+                                bool valid; int source; V3 pos;
+                                V3 from; double startMs; double lastMs;
+                            };
+                            static Blend blend{};
+                            const double nowMs = NowMs();
+                            const int source = osOnFoot ? 2 : (thirdPersonView ? 1 : 0);
+                            if (blend.valid && nowMs - blend.lastMs > 500.0)
+                                blend.valid = false;
+                            if (blend.valid && source != blend.source) {
+                                blend.from = blend.pos;
+                                blend.startMs = nowMs;
+                                LOGI("[view.os] view change %d -> %d, blending", blend.source, source);
+                            }
+                            const float t = static_cast<float>(
+                                std::clamp((nowMs - blend.startMs) / 500.0, 0.0, 1.0));
+                            if (blend.valid && t < 1.0f && Finite(blend.from)) {
+                                const float w = t * t * (3.0f - 2.0f * t);
+                                base.pos = blend.from + (base.pos - blend.from) * w;
+                            }
+                            blend.valid = true;
+                            blend.source = source;
+                            blend.pos = base.pos;
+                            blend.lastMs = nowMs;
+                        }
                         g_vrBase = base; g_vrBaseValid = true;
                         driving::RefreshVisualTracking();
                 }
@@ -5028,6 +5171,29 @@ void ApplyJetpackThrust() {
     g.CPhysical_ApplyMoveForce(ped, thrust.x * k, thrust.y * k, thrust.z * k);
 }
 
+// OVER SHOULDER weapon switch: the next (+1) or previous (-1) of the 13
+// inventory slots that holds a weapon, wrapping through unarmed (slot 0).
+// CPed+0x730 is the weapon array (0x20 per slot, type first), CPed+0x8dc the
+// active slot (same offsets VrFire and PhysicalWeapon use).
+void CycleOwnedWeapon(int direction) {
+    void* ped = g.FindPlayerPed ? g.FindPlayerPed(-1) : nullptr;
+    if (!ped || !g.CPed_SetCurrentWeaponSlot) return;
+    const auto* bytes = static_cast<const std::uint8_t*>(ped);
+    const int current = *reinterpret_cast<const std::int8_t*>(bytes + 0x8dc);
+    for (int step = 1; step <= 13; ++step) {
+        const int slot = ((current + direction * step) % 13 + 13) % 13;
+        const int type = *reinterpret_cast<const std::int32_t*>(
+            bytes + 0x730 + static_cast<std::uintptr_t>(slot) * 0x20);
+        if (slot == 0 || (type != 0 && type != 46 /* parachute */)) {
+            g.CPed_SetCurrentWeaponSlot(ped, slot);
+            LOGI("[view.os] weapon %s: slot %d -> %d (type %d)",
+                 direction > 0 ? "next" : "previous", current, slot, type);
+            xr::TriggerHaptic(direction > 0 ? 1 : 0, 0.3f, 0.0f, 30.0f);
+            return;
+        }
+    }
+}
+
 void OnUpdatePads() {
     g_origUpdatePads();
 
@@ -5173,7 +5339,8 @@ void OnUpdatePads() {
     }
 
     float moveX=mappedMoveX,moveY=mappedMoveY;
-    locomotion::TransformMoveStick(CurrentLocalHeadYaw(),&moveX,&moveY);
+    locomotion::TransformMoveStick(CurrentLocalHeadYaw(),&moveX,&moveY,
+                                   OverShoulderAvailable());
     ns[0] = static_cast<int16_t>(std::clamp(moveX,-1.0f,1.0f) *  127.0f);
     ns[1] = static_cast<int16_t>(std::clamp(moveY,-1.0f,1.0f) * -127.0f);
 
@@ -5378,6 +5545,22 @@ void OnUpdatePads() {
     if(vehicle==nullptr && GroundWalkControlsActive())
         ns[16]=locomotion::RunEnabled() && !g_duckLatched ? 255 : 0;
 
+    // OVER SHOULDER, on foot. Hands are hidden and no gun is held, so the
+    // controllers work like a pad: right trigger fires (VrFire's GetWeapon
+    // hook), and the grips step through the weapons CJ owns, left = previous,
+    // right = next. The game's mobile build reads weapon change from touch
+    // swipes only, so the slot is set directly.
+    {
+        static bool gripWas[2] = {false, false};
+        const bool osFoot = OverShoulderAvailable() && vehicle == nullptr &&
+            !bothGrips && actionControls;
+        for (int hand = 0; hand < 2; ++hand) {
+            const bool down = osFoot && in.grip[hand] >= 0.75f;
+            if (down && !gripWas[hand]) CycleOwnedWeapon(hand == 1 ? +1 : -1);
+            gripWas[hand] = down;
+        }
+    }
+
     // Arm-swing running is land-only. Swimming owns native water velocity.
     // Apply after stick writes so a real stick push wins over arm running.
     {
@@ -5393,7 +5576,8 @@ void OnUpdatePads() {
             if (stickMagnitude < 0.25f) {
                 float gestureX = 0.0f, gestureY = gm.forward;
                 locomotion::TransformMoveStick(
-                    CurrentLocalHeadYaw(), &gestureX, &gestureY);
+                    CurrentLocalHeadYaw(), &gestureX, &gestureY,
+                    OverShoulderAvailable());
                 ns[0] = static_cast<int16_t>(
                     std::clamp(gestureX, -1.0f, 1.0f) *  127.0f);
                 ns[1] = static_cast<int16_t>(
@@ -21318,6 +21502,7 @@ void OnRenderScene(bool underwater) {
 #else
     constexpr bool cinema3d = false;
 #endif
+    const bool overShoulderFrame = OverShoulderAvailable();
     // A late native camera copy may contain the ped's heading. Rebuild the
     // photographic eye basis from the actual head pose before narrowing it.
     // Zoom affects only the frustum; it never moves or rotates this anchor.
@@ -21332,12 +21517,12 @@ void OnRenderScene(bool underwater) {
     const bool scopedFrame = scopeaim::IsActive();
     const bool hideChuteWeapons =
         g_hideWeaponsForChuteDeploy.load(std::memory_order_relaxed);
-    auto queueWeapon = [scopedFrame,hideChuteWeapons,cinema3d](void* clump,
+    auto queueWeapon = [scopedFrame,hideChuteWeapons,cinema3d,overShoulderFrame](void* clump,
                                                       const RwMat& matrix) {
         // reference Quest build lets the optic own the complete view. Keep all tracked weapon
         // poses current for firing/ownership, but do not bake held, flying or
         // holstered models into a zoomed eye texture.
-        if (cinema3d || scopedFrame || hideChuteWeapons || !clump ||
+        if (cinema3d || overShoulderFrame || scopedFrame || hideChuteWeapons || !clump ||
             g_pendingWeaponCount >= kMaxPendingWeapons) return;
         g_pendingWeapons[g_pendingWeaponCount++] = PendingWeaponDraw{clump, matrix};
     };
@@ -21345,6 +21530,12 @@ void OnRenderScene(bool underwater) {
     xr::HandPose renderedHandPoses[2]{};
     if (!physicalweapon::GetHandPosesSnapshot(renderedHandPoses))
         xr::GetHandPoses(renderedHandPoses);
+    // OVER SHOULDER: no tracked hands. Every hand visual (meshes, laser,
+    // wrist panels, the held gun) is built from these baked poses, so marking
+    // them invalid hides them all in one place.
+    if (overShoulderFrame) {
+        for (auto& hand : renderedHandPoses) hand.valid = hand.aimValid = false;
+    }
     xr::SetRenderedHandPoses(renderedHandPoses);
     const bool playerInVehicle = g.FindPlayerVehicle && g.FindPlayerVehicle(-1, false);
 
@@ -21925,8 +22116,10 @@ void OnRenderScene(bool underwater) {
             // DEFAULT vehicle mode keeps the stock seated CJ body and suppresses
             // late VR hands. IMMERSIVE uses the same eye anchor but hides CJ and
             // renders the tracked hands plus the virtual wheel instead.
+            // OVER SHOULDER draws the player (and his own gun) like a scene does.
             const bool hideBody = playerlife::HideBody(playerlife::Dead(playerPed),
-                FormalCutsceneRunning()||ScriptedCutsceneRunning(),playerInVehicle,
+                FormalCutsceneRunning()||ScriptedCutsceneRunning()||overShoulderFrame,
+                playerInVehicle,
                 driving::GetMode()==driving::MODE_IMMERSIVE);
             ScopedPlayerBodyHide hidePlayerBody(hideBody ? playerPed : nullptr);
             airhlod::Render(eye.pos.x, eye.pos.y,
@@ -29761,6 +29954,8 @@ bool IsColorGradingEnabled() {
     EnsureGraphicsSettingsLoaded();
     return g_colorGradingEnabled.load(std::memory_order_acquire);
 }
+
+bool OverShoulderActive() { return OverShoulderAvailable(); }
 
 bool IsPs2ColourFilter() {
     EnsureGraphicsSettingsLoaded();

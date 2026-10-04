@@ -8129,39 +8129,41 @@ void BuildLocomotionMenu() {
     const int cx=kPanelW/2;
     PanelText("LOCOMOTION",cx,16,5,100,225,255);
     const int sel=g_locomotionSel.load(std::memory_order_relaxed);
-    char rows[14][72]{};
-    std::snprintf(rows[0],sizeof(rows[0]),"MOVE DIRECTION   < %s >",
+    char rows[15][72]{};
+    std::snprintf(rows[0],sizeof(rows[0]),"VIEW   < %s >",
+                  locomotion::ViewModeName());
+    std::snprintf(rows[1],sizeof(rows[1]),"MOVE DIRECTION   < %s >",
                   locomotion::MovementModeName());
-    std::snprintf(rows[1],sizeof(rows[1]),"TURNING   < %s >",
+    std::snprintf(rows[2],sizeof(rows[2]),"TURNING   < %s >",
                   locomotion::TurnModeName());
-    std::snprintf(rows[2],sizeof(rows[2]),"TURN SENSITIVITY   < %d%% >",
+    std::snprintf(rows[3],sizeof(rows[3]),"TURN SENSITIVITY   < %d%% >",
                   locomotion::GetTurnSensitivityPercent());
-    std::snprintf(rows[3],sizeof(rows[3]),"SNAP ANGLE   < %d DEG >",
+    std::snprintf(rows[4],sizeof(rows[4]),"SNAP ANGLE   < %d DEG >",
                   locomotion::GetSnapAngleDegrees());
-    std::snprintf(rows[4],sizeof(rows[4]),"WALKING HEAD BOB   < %s >",
+    std::snprintf(rows[5],sizeof(rows[5]),"WALKING HEAD BOB   < %s >",
                   locomotion::HeadBobEnabled()?"ON":"OFF");
-    std::snprintf(rows[5],sizeof(rows[5]),"ARM SWING RUN   < %s >",
+    std::snprintf(rows[6],sizeof(rows[6]),"ARM SWING RUN   < %s >",
                   locomotion::GestureRunEnabled()?"ON":"OFF");
-    std::snprintf(rows[6],sizeof(rows[6]),"SWIM STROKES   < %s >",
+    std::snprintf(rows[7],sizeof(rows[7]),"SWIM STROKES   < %s >",
                   locomotion::GestureSwimEnabled()?"ON":"OFF");
-    std::snprintf(rows[7],sizeof(rows[7]),"PARACHUTE CAMERA   < %s >",
+    std::snprintf(rows[8],sizeof(rows[8]),"PARACHUTE CAMERA   < %s >",
                   locomotion::ParachuteCameraFollow()?"FOLLOW":"FIXED");
-    std::snprintf(rows[8],sizeof(rows[8]),"PARACHUTE CONTROL   < %s >",
+    std::snprintf(rows[9],sizeof(rows[9]),"PARACHUTE CONTROL   < %s >",
                   locomotion::ParachuteControlImmersive()?"RISERS":"STICKS");
-    std::snprintf(rows[9],sizeof(rows[9]),"AUTO PARACHUTE   < %s >",
+    std::snprintf(rows[10],sizeof(rows[10]),"AUTO PARACHUTE   < %s >",
                   locomotion::AutoParachuteEnabled()?"ON":"OFF");
-    std::snprintf(rows[10],sizeof(rows[10]),"VEHICLE CAMERA");
-    std::snprintf(rows[11],sizeof(rows[11]),"RECENTER VIEW");
-    std::snprintf(rows[12],sizeof(rows[12]),"JETPACK   < %s >",
+    std::snprintf(rows[11],sizeof(rows[11]),"VEHICLE CAMERA");
+    std::snprintf(rows[12],sizeof(rows[12]),"RECENTER VIEW");
+    std::snprintf(rows[13],sizeof(rows[13]),"JETPACK   < %s >",
                   jetpack::ModeName());
-    std::snprintf(rows[13],sizeof(rows[13]),"BACK");
-    // 14 rows on the 512px panel: a 27px pitch from y=56 keeps the last row
+    std::snprintf(rows[14],sizeof(rows[14]),"BACK");
+    // 15 rows on the 512px panel: a 26px pitch from y=54 keeps the last row
     // and the hint line inside the panel.
-    const int top=56,rowH=27;
-    for (int i=0;i<14;++i) {
+    const int top=54,rowH=26;
+    for (int i=0;i<15;++i) {
         const int y=top+i*rowH;
         if (i==sel) PanelFillRect(26,y-4,kPanelW-26,y+22,120,40,110,235);
-        if (i==10) {
+        if (i==11) {
             PanelText(rows[i],cx,y,2,i==sel?255:100,
                       i==sel?235:225,i==sel?120:255);
         } else {
@@ -8169,7 +8171,8 @@ void BuildLocomotionMenu() {
             PanelText(rows[i],cx,y,2,c,c,i==sel?120:c);
         }
     }
-    PanelText("STICK SEL   L2/R2 ADJUST   A ACTION",cx,kPanelH-18,
+    PanelText(sel==0?"VIEW BUTTON (LEFT)   SHORT PRESS IN PLAY TOGGLES":
+                     "STICK SEL   L2/R2 ADJUST   A ACTION",cx,kPanelH-18,
               2,150,185,150);
 }
 

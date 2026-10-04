@@ -555,11 +555,11 @@ void ToggleFlightCameraTilt() {
     Save();
 }
 
-void TransformMoveStick(float localHeadYaw,float* x,float* y) {
+void TransformMoveStick(float localHeadYaw,float* x,float* y,bool forceBody) {
     EnsureInit();
     if (!x||!y) return;
     // HEAD mode uses native camera-relative movement. BODY mode cancels physical head yaw.
-    if (g_movement.load()!=MOVEMENT_BODY) return;
+    if (!forceBody&&g_movement.load()!=MOVEMENT_BODY) return;
     const float oldX=*x,oldY=*y;
     const float c=std::cos(-localHeadYaw),s=std::sin(-localHeadYaw);
     *x=oldX*c-oldY*s;

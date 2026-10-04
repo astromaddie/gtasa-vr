@@ -99,7 +99,12 @@ void ToggleFlightCameraTilt();
 
 // Rotate the physical left stick from the body frame into the current HMD
 // heading for HEAD and HEAD TURN EXP modes.
-void TransformMoveStick(float localHeadYaw, float* x, float* y);
+// forceBody: always cancel the head's yaw (movement relative to the body
+// heading), whatever MOVE DIRECTION is set to. OVER SHOULDER uses it: the
+// stick walks relative to the camera the way a pad does, not to where the
+// head happens to point.
+void TransformMoveStick(float localHeadYaw, float* x, float* y,
+                        bool forceBody = false);
 
 // Gameplay-only remapping.  The raw OpenXR state remains untouched so the VR
 // menu laser/cursor and its navigation can never be affected by these knobs.

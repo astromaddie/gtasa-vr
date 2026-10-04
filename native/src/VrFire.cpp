@@ -288,6 +288,23 @@ int OnPadGetWeapon(void* pad, void* ped, bool allowPassive) {
     float trigger = 0.0f;
     if (!GetPhysicalTrigger(playerPed, weaponType, hand, trigger)) {
         ResetPadTriggerLatch();
+        // THIRD: OVER SHOULDER, on foot: no weapon is physically held, so the
+        // right trigger is the pad's fire button, handed straight to the game's
+        // own use-weapon logic (it shoots where CJ faces, or at the target the
+        // game picks, like a pad player).
+        if (playerPed && vrcam::OverShoulderActive() &&
+            !(g.FindPlayerVehicle && g.FindPlayerVehicle(-1, false))) {
+            xr::InputState in{};
+            xr::GetInput(in);
+            const bool fire = in.triggers[1] >= 0.60f && in.grip[0] < 0.75f &&
+                              in.grip[1] < 0.75f;
+            static bool wasFiring = false;
+            if (fire != wasFiring) {
+                wasFiring = fire;
+                LOGI("[view.os] right trigger %s -> pad fire", fire ? "down" : "up");
+            }
+            if (fire) return 255;
+        }
         // Skydive deploy: while free-falling the game's active weapon is the
         // parachute on CJ's back — nothing is physically held, yet opening it
         // is the pad fire button. Pass the right trigger straight through.

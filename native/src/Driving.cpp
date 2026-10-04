@@ -2961,6 +2961,10 @@ bool ThirdPersonViewActive() {
     const int appearance=
         g_activeVehicleAppearance.load(std::memory_order_acquire);
     if (appearance<=0) return false;
+    // THIRD: OVER SHOULDER is a global choice: every vehicle is viewed from
+    // the stock chase camera (the per-type CAMERA VIEW rows still decide the
+    // view in first person).
+    if (locomotion::ThirdPersonView()) return true;
     if (appearance==1) {
         if (g_activeVehicleModel.load(std::memory_order_acquire)==
             kRhinoModelId)

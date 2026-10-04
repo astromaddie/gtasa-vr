@@ -1388,6 +1388,15 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
             }
             viewPrev = viewNow;
         }
+        // In gameplay (no menu, controls are the player's, no cutscene) a
+        // short View press switches FIRST PERSON <-> THIRD: OVER SHOULDER.
+        // In menus it stays "back".
+        if (viewBack && menuPage == PG_NONE && inGameplay && playerExists &&
+            !formalCutscene && controlsEnabled && !widescreen) {
+            viewBack = false;
+            savr::locomotion::CycleViewMode(+1);
+            xr::TriggerHaptic(0, 0.35f, 0.0f, 40.0f);
+        }
 #endif
 
         const auto menuNav=savr::menu::Navigate(menuPage!=PG_NONE,
@@ -1734,40 +1743,42 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
             break;
         }
         case PG_LOCOMOTION: {
-            constexpr int ROWS=14;
+            constexpr int ROWS=15;
             if (navUp) locomotionSel=(locomotionSel-1+ROWS)%ROWS;
             if (navDown) locomotionSel=(locomotionSel+1)%ROWS;
             const int step=minus?-1:(plus?1:0);
             if (locomotionSel==0&&(step||enter))
-                savr::locomotion::CycleMovementMode(step?step:+1);
+                savr::locomotion::CycleViewMode(step?step:+1);
             else if (locomotionSel==1&&(step||enter))
+                savr::locomotion::CycleMovementMode(step?step:+1);
+            else if (locomotionSel==2&&(step||enter))
                 savr::locomotion::CycleTurnMode(step?step:+1);
-            else if (locomotionSel==2&&step)
-                savr::locomotion::AdjustTurnSensitivity(step);
             else if (locomotionSel==3&&step)
+                savr::locomotion::AdjustTurnSensitivity(step);
+            else if (locomotionSel==4&&step)
                 savr::locomotion::AdjustSnapAngle(step);
-            else if (locomotionSel==4&&enter)
+            else if (locomotionSel==5&&enter)
                 savr::locomotion::ToggleHeadBob();
-            else if (locomotionSel==5&&(step||enter))
-                savr::locomotion::ToggleGestureRun();
             else if (locomotionSel==6&&(step||enter))
-                savr::locomotion::ToggleGestureSwim();
+                savr::locomotion::ToggleGestureRun();
             else if (locomotionSel==7&&(step||enter))
-                savr::locomotion::ToggleParachuteCameraFollow();
+                savr::locomotion::ToggleGestureSwim();
             else if (locomotionSel==8&&(step||enter))
-                savr::locomotion::ToggleParachuteControl();
+                savr::locomotion::ToggleParachuteCameraFollow();
             else if (locomotionSel==9&&(step||enter))
+                savr::locomotion::ToggleParachuteControl();
+            else if (locomotionSel==10&&(step||enter))
                 savr::locomotion::ToggleAutoParachute();
-            else if (locomotionSel==10&&enter) {
+            else if (locomotionSel==11&&enter) {
                 menuPage=PG_VEHICLE_CAMERA;
                 vehicleCameraSel=0;
             }
-            else if (locomotionSel==11&&enter)
+            else if (locomotionSel==12&&enter)
                 vrcam::RequestRecenter();
-            else if (locomotionSel==12&&enter) {
+            else if (locomotionSel==13&&enter) {
                 menuPage=PG_JETPACK; jetpackSel=0;
             }
-            else if (locomotionSel==13&&enter)
+            else if (locomotionSel==14&&enter)
                 menuPage=PG_MAIN;
             if (back) menuPage=PG_MAIN;
             break;
@@ -2171,14 +2182,25 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
         const bool weaponInteractionsBlocked = catalystBlocked || savr::catalyst::Active() ||
             driving::GetRemoteControlledVehicle() != nullptr ||
             driving::IsCraneControlActive();
-        savr::physicalweapon::Update(
-            weaponInteractionsBlocked,
-            menuPage == PG_HOLSTER_CALIB && savr::holster::GripMarkersEnabled(),
-            menuPage == PG_CALIB);
-        savr::melee::Update(weaponInteractionsBlocked);
-        savr::scopeaim::Update(weaponInteractionsBlocked);
-        savr::vrfire::Update(weaponInteractionsBlocked);
-        savr::throwable::Update(weaponInteractionsBlocked);
+        if (vrcam::OverShoulderActive()) {
+            // THIRD: OVER SHOULDER: no tracked hands, no holsters, no physical
+            // gun. Drop whatever a hand was holding (as in a vehicle) and let
+            // the game's own pad logic fire the equipped weapon.
+            savr::physicalweapon::ResetTransient();
+            savr::melee::Reset();
+            savr::scopeaim::Reset();
+            savr::vrfire::Update(true);
+            savr::throwable::Reset();
+        } else {
+            savr::physicalweapon::Update(
+                weaponInteractionsBlocked,
+                menuPage == PG_HOLSTER_CALIB && savr::holster::GripMarkersEnabled(),
+                menuPage == PG_CALIB);
+            savr::melee::Update(weaponInteractionsBlocked);
+            savr::scopeaim::Update(weaponInteractionsBlocked);
+            savr::vrfire::Update(weaponInteractionsBlocked);
+            savr::throwable::Update(weaponInteractionsBlocked);
+        }
         savr::physicalweapon::EnforceBikeWeaponLimit();
         savr::physicalweapon::AutoEquipParachute();
         savr::physicalweapon::AutoAssignGadgetPoint();
