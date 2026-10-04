@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <cstdint>
@@ -168,6 +169,13 @@ float* g_mobileRedGrade{};
 float* g_mobileGreenGrade{};
 float* g_mobileBlueGrade{};
 float* g_mobileGradeBlur{};
+// PS2 colour filter source: CTimeCycle::m_CurrentColours' two post-fx colours.
+std::atomic<bool> g_ps2ColourResolveAttempted{false};
+bool g_ps2ColourReady = false;
+const float* g_timecyclePostFx1{};          // r,g,b,a floats, 0..255
+const float* g_timecyclePostFx2{};
+const std::uint8_t* g_postNightVision{};
+const std::uint8_t* g_postInfrared{};
 std::atomic<bool> g_skyResolveAttempted{false};
 bool g_skyStateReady = false;
 void** g_skyCoronaTextures = nullptr;
@@ -2198,8 +2206,145 @@ bool ResolveMobileColorState() {
     return true;
 }
 
+// PS2 colour filter. The PS2 game ends every frame with CPostEffects::
+// ColourFilter(c1, c2), fed by the timecycle's two post-fx colours (the
+// "Alpha1 RGB1 Alpha2 RGB2" columns of timecyc.dat). On the PS2 colour range
+// (128 = 1.0) it does two passes over a copy of the frame F:
+//   pass 1:  out  = F * c1           (blending off, alpha ignored)
+//   pass 2:  out += F * c2 * a2      (additive, weighted by the second alpha)
+// aap's SkyGfx (github.com/aap/skygfx, postfx.cpp ColourFilter_PS2) rebuilds
+// exactly that on the PC with MODULATE2X vertex colours, and its commented
+// "fun trick" inside ColourFilter_Mobile writes the same thing as a plain
+// per-channel gain. This builds that gain from the maths alone (no SkyGfx code
+// is used, see NOTICE.md):
+//   gain_c = c1_c / 127.5 + (a2 / 255) * c2_c / 127.5        (PC-range bytes)
+// timecyc.dat in the mobile game carries the PC byte range, where the PS2's
+// alpha 128 is stored as 255, hence a2/255. The gain goes into the existing eye
+// resolve as ContrastMult (mode 1, no add term), so it costs nothing beyond the
+// mobile grade it replaces. SkyGfx also blurs the second pass by a few
+// sub-pixels; that is left out here (a faint bloom on bright edges, not part of
+// the colour).
+bool ResolvePs2ColourSource() {
+    if (g_ps2ColourResolveAttempted.exchange(true,
+                                             std::memory_order_acq_rel)) {
+        return g_ps2ColourReady;
+    }
+    void* const handle = dlopen("libGame.so", RTLD_NOLOAD | RTLD_NOW);
+    if (!handle) {
+        LOGE("[ps2.colour] libGame.so unavailable: %s", dlerror());
+        return false;
+    }
+    const auto* const current = Resolve<const std::uint8_t*>(
+        handle, "_ZN10CTimeCycle16m_CurrentColoursE");
+    const auto* const nightVision = Resolve<const std::uint8_t*>(
+        handle, "_ZN12CPostEffects14m_bNightVisionE");
+    const auto* const infrared = Resolve<const std::uint8_t*>(
+        handle, "_ZN12CPostEffects17m_bInfraredVisionE");
+    const auto mobileRender = Resolve<const std::uint8_t*>(
+        handle, "_ZN12CPostEffects12MobileRenderEv");
+    Dl_info info{};
+    if (!current || !nightVision || !infrared || !mobileRender ||
+        dladdr(reinterpret_cast<const void*>(mobileRender), &info) == 0 ||
+        !info.dli_fbase) {
+        LOGW("[ps2.colour] disabled: missing retail symbols");
+        return false;
+    }
+    const auto base = reinterpret_cast<std::uintptr_t>(info.dli_fbase);
+    // MobileRender itself reads the two colours as float quadruples at
+    // m_CurrentColours + 0x78 and + 0x88 ("ldp s0,s1,[x20,#0x78]" and the
+    // three that follow it). Check both the symbol addresses and those four
+    // instructions, so the layout is only trusted on the exact 2.11.311 build.
+    static constexpr struct { std::uintptr_t rva; std::uint32_t word; } kLoads[4] = {
+        {0x5e2cecu, 0x2d4f0680u}, {0x5e2d00u, 0x2d500680u},
+        {0x5e2d30u, 0x2d510680u}, {0x5e2d40u, 0x2d520680u},
+    };
+    bool match =
+        reinterpret_cast<std::uintptr_t>(current) - base == 0xa153b0u &&
+        reinterpret_cast<std::uintptr_t>(nightVision) - base == 0xc90424u &&
+        reinterpret_cast<std::uintptr_t>(infrared) - base == 0xc90434u &&
+        reinterpret_cast<std::uintptr_t>(mobileRender) - base == 0x5e2c9cu;
+    for (const auto& load : kLoads) {
+        match = match &&
+            *reinterpret_cast<const std::uint32_t*>(base + load.rva) == load.word;
+    }
+    if (!match) {
+        LOGW("[ps2.colour] disabled: retail 2.11 layout mismatch");
+        return false;
+    }
+    g_timecyclePostFx1 = reinterpret_cast<const float*>(current + 0x78);
+    g_timecyclePostFx2 = reinterpret_cast<const float*>(current + 0x88);
+    g_postNightVision = nightVision;
+    g_postInfrared = infrared;
+    g_ps2ColourReady = true;
+    LOGI("[ps2.colour] timecycle source ready: current=%p postfx1=%p postfx2=%p",
+         static_cast<const void*>(current),
+         static_cast<const void*>(g_timecyclePostFx1),
+         static_cast<const void*>(g_timecyclePostFx2));
+    return true;
+}
+
+// Fills `out` (mode 1) and returns true when the PS2 filter should replace the
+// mobile grade this frame. False means "use the mobile path": the symbols are
+// not trustworthy, a night/infrared/CCTV effect owns the screen (it has its own
+// colours), or the timecycle gave an unusable (near-black) filter.
+bool BuildPs2ColourState(xr::MobileColorState& out) {
+    if (!ResolvePs2ColourSource()) return false;
+    if (*g_postNightVision != 0 || *g_postInfrared != 0) return false;
+    float c1[4], c2[4];
+    for (int i = 0; i < 4; ++i) {
+        const float a = g_timecyclePostFx1[i];
+        const float b = g_timecyclePostFx2[i];
+        if (!std::isfinite(a) || !std::isfinite(b)) return false;
+        // MobileRender clamps both colours to a byte before using them.
+        c1[i] = std::clamp(a, 0.0f, 255.0f);
+        c2[i] = std::clamp(b, 0.0f, 255.0f);
+    }
+    float gain[3];
+    float peak = 0.0f;
+    for (int i = 0; i < 3; ++i) {
+        gain[i] = c1[i] / 127.5f + (c2[3] / 255.0f) * (c2[i] / 127.5f);
+        peak = std::max(peak, gain[i]);
+    }
+    // An all-zero set (some interior and transition states) would paint the
+    // screen black; a real filter always passes at least a quarter of one
+    // channel.
+    if (!(peak >= 0.25f)) return false;
+    out = {};
+    out.mode = 1;
+    for (int i = 0; i < 3; ++i) {
+        out.contrastMult[i] = std::clamp(gain[i], 0.0f, 4.0f);
+        out.contrastAdd[i] = 0.0f;
+    }
+    static float lastLogged[3] = {-1.0f, -1.0f, -1.0f};
+    static double nextLog = 0.0;
+    const double now = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (now >= nextLog &&
+        (std::fabs(lastLogged[0] - out.contrastMult[0]) > 0.05f ||
+         std::fabs(lastLogged[1] - out.contrastMult[1]) > 0.05f ||
+         std::fabs(lastLogged[2] - out.contrastMult[2]) > 0.05f)) {
+        nextLog = now + 5000.0;
+        std::memcpy(lastLogged, out.contrastMult, sizeof(lastLogged));
+        LOGI("[ps2.colour] postfx1=%.0f/%.0f/%.0f a%.0f postfx2=%.0f/%.0f/%.0f "
+             "a%.0f -> gain %.2f/%.2f/%.2f",
+             c1[0], c1[1], c1[2], c1[3], c2[0], c2[1], c2[2], c2[3],
+             out.contrastMult[0], out.contrastMult[1], out.contrastMult[2]);
+    }
+    return true;
+}
+
 void PublishMobileColorState(int eye) {
     if (eye != 0) return;
+    // PS2 filter first: it replaces the mobile grade (and the COLOR GRADING
+    // switch, which only governs the mobile path) when it is selected and the
+    // game's post-fx colours are readable; otherwise the mobile path below.
+    if (vrcam::IsPs2ColourFilter()) {
+        xr::MobileColorState ps2{};
+        if (BuildPs2ColourState(ps2)) {
+            xr::SetMobileColorState(ps2);
+            return;
+        }
+    }
     // Menu toggle: with grading off the resolve keeps the plain-blit look, so
     // players can A/B the mobile colour pipeline from the graphics menu.
     if (!vrcam::IsColorGradingEnabled()) {

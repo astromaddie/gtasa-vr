@@ -7650,7 +7650,7 @@ void BuildGraphicsMenu() {
         activeHeight =
             (static_cast<int>(baseHeight * renderScalePercent / 100.0f + 0.5f)) & ~1;
     }
-    char rows[14][64];
+    char rows[15][64];
     if (renderScalePending) {
         std::snprintf(rows[0], sizeof(rows[0]),
                       "RESOLUTION  < %d%% >  [APPLYING]",
@@ -7671,21 +7671,23 @@ void BuildGraphicsMenu() {
                   vrcam::AreNeonSignsEnabled() ? "ON" : "OFF");
     std::snprintf(rows[5], sizeof(rows[5]), "COLOR GRADING  < %s >",
                   vrcam::IsColorGradingEnabled() ? "ON" : "OFF");
-    std::snprintf(rows[6], sizeof(rows[6]), "ANIMATED TEXTURES  < %s >",
+    std::snprintf(rows[6], sizeof(rows[6]), "COLOUR FILTER  < %s >",
+                  vrcam::IsPs2ColourFilter() ? "PS2" : "MOBILE");
+    std::snprintf(rows[7], sizeof(rows[7]), "ANIMATED TEXTURES  < %s >",
                   savr::animtex::IsEnabled() ? "ON" : "OFF");
-    std::snprintf(rows[7], sizeof(rows[7]), "DYNAMIC SHADOWS  < %s >",
+    std::snprintf(rows[8], sizeof(rows[8]), "DYNAMIC SHADOWS  < %s >",
                   vrcam::GetDynamicShadowModeName());
-    std::snprintf(rows[8], sizeof(rows[8]), "MODEL SET");
-    std::snprintf(rows[9], sizeof(rows[9]), "CUTSCENES  < %s >",
+    std::snprintf(rows[9], sizeof(rows[9]), "MODEL SET");
+    std::snprintf(rows[10], sizeof(rows[10]), "CUTSCENES  < %s >",
                   locomotion::CutsceneModeName());
-    std::snprintf(rows[10], sizeof(rows[10]), "GAME CUTSCENES  < %s >",
+    std::snprintf(rows[11], sizeof(rows[11]), "GAME CUTSCENES  < %s >",
                   locomotion::GameCutsceneModeName());
-    std::snprintf(rows[11], sizeof(rows[11]), "DRAW DISTANCES");
-    std::snprintf(rows[12], sizeof(rows[12]), "RESET DEFAULTS");
-    std::snprintf(rows[13], sizeof(rows[13]), "BACK");
-    // 14 rows now: tighten the pitch so the last one still clears the hint line.
-    const int top = 54, rowH = 30;
-    for (int i = 0; i < 14; ++i) {
+    std::snprintf(rows[12], sizeof(rows[12]), "DRAW DISTANCES");
+    std::snprintf(rows[13], sizeof(rows[13]), "RESET DEFAULTS");
+    std::snprintf(rows[14], sizeof(rows[14]), "BACK");
+    // 15 rows now: tighten the pitch so the last one still clears the hint line.
+    const int top = 54, rowH = 27;
+    for (int i = 0; i < 15; ++i) {
         const int y = top + i * rowH;
         if (i == sel) PanelFillRect(40, y - 5, kPanelW - 40, y + 25, 120, 40, 110, 235);
         const int c = (i == sel) ? 255 : 200;

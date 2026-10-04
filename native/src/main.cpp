@@ -1920,10 +1920,10 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
             break;
         }
         case PG_GRAPHICS: {
-            // scale, CPU, GPU, world effects, neon, grading, animated textures,
-            // dynamic shadows, model sets, cutscenes, game cutscenes,
-            // distances, defaults, Back
-            const int N = 14;
+            // scale, CPU, GPU, world effects, neon, grading, colour filter,
+            // animated textures, dynamic shadows, model sets, cutscenes, game
+            // cutscenes, distances, defaults, Back
+            const int N = 15;
             if (navUp)   gfxSel = (gfxSel - 1 + N) % N;
             if (navDown) gfxSel = (gfxSel + 1) % N;
             const int step = minus ? -1 : (plus ? 1 : 0);
@@ -1941,8 +1941,10 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
             } else if (step && gfxSel == 5) {
                 vrcam::SetColorGradingEnabled(step > 0);
             } else if (step && gfxSel == 6) {
-                savr::animtex::SetEnabled(step > 0);
+                vrcam::SetPs2ColourFilter(step > 0);
             } else if (step && gfxSel == 7) {
+                savr::animtex::SetEnabled(step > 0);
+            } else if (step && gfxSel == 8) {
                 vrcam::AdjustDynamicShadowMode(step);
             }
             if (enter && !step && gfxSel == 3) {
@@ -1953,24 +1955,26 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
             } else if (enter && !step && gfxSel == 5) {
                 vrcam::SetColorGradingEnabled(!vrcam::IsColorGradingEnabled());
             } else if (enter && !step && gfxSel == 6) {
-                savr::animtex::SetEnabled(!savr::animtex::IsEnabled());
+                vrcam::SetPs2ColourFilter(!vrcam::IsPs2ColourFilter());
             } else if (enter && !step && gfxSel == 7) {
-                vrcam::AdjustDynamicShadowMode(1);
+                savr::animtex::SetEnabled(!savr::animtex::IsEnabled());
             } else if (enter && !step && gfxSel == 8) {
+                vrcam::AdjustDynamicShadowMode(1);
+            } else if (enter && !step && gfxSel == 9) {
                 menuPage = PG_MODEL_SETS;
                 modelSetSel = 0;
                 modelSetParent = PG_GRAPHICS;
-            } else if ((step || enter) && gfxSel == 9) {
-                savr::locomotion::CycleCutsceneMode(step < 0 ? -1 : +1);
             } else if ((step || enter) && gfxSel == 10) {
+                savr::locomotion::CycleCutsceneMode(step < 0 ? -1 : +1);
+            } else if ((step || enter) && gfxSel == 11) {
                 savr::locomotion::CycleGameCutsceneMode(step < 0 ? -1 : +1);
-            } else if (enter && gfxSel == 11) {
+            } else if (enter && gfxSel == 12) {
                 menuPage = PG_GRAPHICS_DISTANCES;
                 gfxDistanceSel = 0;
-            } else if (enter && gfxSel == 12) {
+            } else if (enter && gfxSel == 13) {
                 vrcam::ResetGraphicsDefaults();
                 xr::SetPerfLevels(3, 3);
-            } else if (enter && gfxSel == 13) {
+            } else if (enter && gfxSel == 14) {
                 menuPage = PG_MAIN;
             }
             if (back) menuPage = PG_MAIN;

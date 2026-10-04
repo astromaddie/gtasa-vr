@@ -125,6 +125,11 @@ void SetDynamicShadowsEnabled(bool enabled);
 bool AreNeonSignsEnabled();
 void SetNeonSignsEnabled(bool enabled);
 bool IsColorGradingEnabled();
+// PS2 colour filter (COLOUR FILTER < MOBILE | PS2 > in GRAPHICS): replaces the
+// mobile grade with the PS2 game's post-fx colours from the live timecycle.
+// Default PS2 on the Steam Frame build, MOBILE elsewhere.
+bool IsPs2ColourFilter();
+void SetPs2ColourFilter(bool enabled);
 void SetColorGradingEnabled(bool enabled);
 bool IsHdWeaponsEnabled();
 void SetHdWeaponsEnabled(bool enabled);

@@ -571,6 +571,12 @@ std::atomic<int> g_appliedRenderScaleIndex{kDefaultRenderScaleIndex};
 std::atomic<bool> g_worldEffectsEnabled{true};
 std::atomic<bool> g_neonSignsEnabled{true};
 std::atomic<bool> g_colorGradingEnabled{true};
+#ifdef SAVR_STEAM_FRAME
+constexpr bool kDefaultPs2ColourFilter = true;
+#else
+constexpr bool kDefaultPs2ColourFilter = false;
+#endif
+std::atomic<bool> g_ps2ColourFilter{kDefaultPs2ColourFilter};
 constexpr int kShadowModeOff = 0;
 constexpr int kShadowModeSimple = 1;
 constexpr int kShadowModeHybrid = 2;
@@ -649,6 +655,7 @@ void LoadGraphicsSettings() {
     bool worldEffects = true;
     bool neonSigns = true;
     bool colorGrading = true;
+    bool ps2Filter = kDefaultPs2ColourFilter;
     int shadowMode = kDefaultShadowMode;
     bool shadowModeExplicit = false;
     bool hdWeapons = false;
@@ -678,6 +685,10 @@ void LoadGraphicsSettings() {
             }
             if (std::strcmp(key, "ColorGrading") == 0) {
                 colorGrading = value != 0;
+                continue;
+            }
+            if (std::strcmp(key, "ColourFilter") == 0) {
+                ps2Filter = value != 0;
                 continue;
             }
             if (std::strcmp(key, "DynamicShadows") == 0) {
@@ -721,6 +732,7 @@ void LoadGraphicsSettings() {
     g_worldEffectsEnabled.store(worldEffects, std::memory_order_release);
     g_neonSignsEnabled.store(neonSigns, std::memory_order_release);
     g_colorGradingEnabled.store(colorGrading, std::memory_order_release);
+    g_ps2ColourFilter.store(ps2Filter, std::memory_order_release);
     shadowMode = ClampShadowMode(shadowMode);
     g_dynamicShadowMode.store(shadowMode, std::memory_order_release);
     g_hdWeaponsEnabled.store(hdWeapons, std::memory_order_release);
@@ -798,6 +810,9 @@ void SaveGraphicsSettings() {
                               ? 1 : 0) >= 0 && ok;
         ok = std::fprintf(file, "ColorGrading=%d\n",
                           g_colorGradingEnabled.load(std::memory_order_acquire)
+                               ? 1 : 0) >= 0 && ok;
+        ok = std::fprintf(file, "ColourFilter=%d\n",
+                          g_ps2ColourFilter.load(std::memory_order_acquire)
                                ? 1 : 0) >= 0 && ok;
         ok = std::fprintf(file, "DynamicShadows=%d\n",
                           g_dynamicShadowMode.load(std::memory_order_acquire) !=
@@ -29746,6 +29761,21 @@ bool IsColorGradingEnabled() {
     return g_colorGradingEnabled.load(std::memory_order_acquire);
 }
 
+bool IsPs2ColourFilter() {
+    EnsureGraphicsSettingsLoaded();
+    return g_ps2ColourFilter.load(std::memory_order_acquire);
+}
+
+void SetPs2ColourFilter(bool enabled) {
+    EnsureGraphicsSettingsLoaded();
+    if (g_ps2ColourFilter.exchange(enabled, std::memory_order_acq_rel) ==
+        enabled) {
+        return;
+    }
+    SaveGraphicsSettings();
+    LOGI("[graphics.colourfilter] %s", enabled ? "PS2" : "MOBILE");
+}
+
 bool IsHdWeaponsEnabled() {
     EnsureGraphicsSettingsLoaded();
     return g_hdWeaponsEnabled.load(std::memory_order_acquire);
@@ -29870,6 +29900,7 @@ void ResetGraphicsDefaults() {
     g_worldEffectsEnabled.store(true, std::memory_order_release);
     g_neonSignsEnabled.store(true, std::memory_order_release);
     g_colorGradingEnabled.store(true, std::memory_order_release);
+    g_ps2ColourFilter.store(kDefaultPs2ColourFilter, std::memory_order_release);
     g_dynamicShadowMode.store(kDefaultShadowMode, std::memory_order_release);
     ApplyDynamicShadowPreference();
     g_hdWeaponsEnabled.store(false, std::memory_order_release);
