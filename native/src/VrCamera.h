@@ -112,6 +112,15 @@ void RememberCutsceneCamera();
 // immediately while a complete replacement stereo ring is prepared in the
 // background and switched atomically once every texture is ready.
 int  GetRenderScalePercent();
+#ifdef SAVR_STEAM_FRAME
+// Choose the launch render scale from the runtime's recommended eye width: by
+// default the one that gives ~2160 per eye (1728 -> 125%, 2160 -> 100%), unless
+// the user picked a scale in the menu. Call before LaunchEyeDimension.
+void ResolveLaunchEyeScale(int recommendedWidth);
+// Eye swapchain size for the runtime's recommended `base`, at the launch scale.
+// The game renders straight into images this size.
+int  LaunchEyeDimension(int base);
+#endif
 int  GetActiveRenderScalePercent();
 bool RenderScaleChangePending();
 void AdjustRenderScale(int direction);

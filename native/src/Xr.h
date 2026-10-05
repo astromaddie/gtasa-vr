@@ -35,6 +35,10 @@ void NotifyCinemaRecenter();
 void SetCinema3DOverlay(unsigned int fadeRgba, bool subtitlesBeforeFade);
 // Distance between the runtime's two eye poses, false without a plausible one.
 bool GetIpdMeters(float* ipdOut);
+// The rate the game loop should be paced at: the refresh_rate setting until the
+// session has picked a rate, then the rate the compositor really runs (and the
+// fallback steps), never above the setting. See "Display rate" in Xr.cpp.
+float TargetFrameRateHz();
 #endif
 
 // Heartbeat of the present loop, for main.cpp's stall watchdog. `stage` is

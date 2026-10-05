@@ -560,7 +560,18 @@ constexpr int kRenderScaleCount =
 // Native 100% is the public baseline. Quest Games Optimizer users commonly
 // raise the app resolution externally, so silently stacking 110% on top wastes
 // GPU time. The menu still exposes up to 200% for deliberate local testing.
+#ifdef SAVR_STEAM_FRAME
+// Steam Frame: the default is an absolute ~2160 x 2160 per eye (standard section
+// 9), so the scale is worked out at session start from the runtime's recommended
+// size (ResolveLaunchEyeScale): 1728 -> 125%, 2160 -> 100%. This index is only the
+// placeholder until then (the 125% of the stock 1728 recommendation). The eye
+// swapchains are created at the resulting size at launch and the game renders
+// straight into images of the same size, so there is no render-larger-then-blit.
+constexpr int kDefaultRenderScaleIndex = 6;
+constexpr int kFrameTargetEyePixels = 2160;
+#else
 constexpr int kDefaultRenderScaleIndex = 4;
+#endif
 const char* const kGraphicsSettingsPath = savr::storage::FilesPath("vr_graphics.ini");
 
 std::once_flag g_graphicsSettingsLoadOnce;
@@ -595,6 +606,17 @@ constexpr int kDefaultTracerSmokeSpread = 100;
 std::atomic<int> g_tracerSmokeSpread{kDefaultTracerSmokeSpread};
 std::atomic<std::uint32_t> g_neonSignsSeenMask{0};
 int g_currentRenderScaleIndex = kDefaultRenderScaleIndex;
+// The scale the eye swapchains were sized for at launch. On the Frame the eye
+// rasters are pinned to it (a menu change is saved and applies at the next
+// launch), so swapchain and render size always match.
+int g_launchRenderScaleIndex = kDefaultRenderScaleIndex;
+std::atomic<bool> g_graphicsMigrationSavePending{false};
+// Frame: true once the user has picked a scale in the menu (saved as
+// RenderScaleUser=1); otherwise the scale is the computed ~2160 default.
+bool g_renderScaleUserChosen = false;
+bool g_launchScaleResolved = false;
+int  g_autoRenderScaleIndex = kDefaultRenderScaleIndex;
+std::mutex g_launchScaleMutex;
 
 int ClampRenderScaleIndex(int index) {
     return std::clamp(index, 0, kRenderScaleCount - 1);
@@ -652,6 +674,8 @@ int NearestDistanceChoice(int field, int metres) {
 
 void LoadGraphicsSettings() {
     int renderScale = kDefaultRenderScaleIndex;
+    bool frameDisplayMarker = false;
+    bool renderScaleUser = false;
     bool worldEffects = true;
     bool neonSigns = true;
     bool colorGrading = true;
@@ -673,6 +697,14 @@ void LoadGraphicsSettings() {
             if (std::sscanf(line, "%47[^=]=%d", key, &value) != 2) continue;
             if (std::strcmp(key, "RenderScale") == 0) {
                 renderScale = value;
+                continue;
+            }
+            if (std::strcmp(key, "FrameDisplay") == 0) {
+                frameDisplayMarker = value != 0;
+                continue;
+            }
+            if (std::strcmp(key, "RenderScaleUser") == 0) {
+                renderScaleUser = value != 0;
                 continue;
             }
             if (std::strcmp(key, "Effects") == 0) {
@@ -725,7 +757,23 @@ void LoadGraphicsSettings() {
         std::fclose(file);
     }
 
+#ifdef SAVR_STEAM_FRAME
+    // Without a user-chosen scale the default applies: the stored index is only a
+    // placeholder until ResolveLaunchEyeScale computes ~2160. A file from before
+    // the 2160 default stored the old 100% and has no marker, so it is not a
+    // choice either (every save after this writes the markers).
+    g_renderScaleUserChosen = frameDisplayMarker && renderScaleUser;
+    if (!g_renderScaleUserChosen) {
+        renderScale = kDefaultRenderScaleIndex;
+        if (!frameDisplayMarker)
+            g_graphicsMigrationSavePending.store(true, std::memory_order_release);
+    }
+#else
+    (void)frameDisplayMarker;
+    (void)renderScaleUser;
+#endif
     renderScale = ClampRenderScaleIndex(renderScale);
+    g_launchRenderScaleIndex = renderScale;
     g_currentRenderScaleIndex = renderScale;
     g_requestedRenderScaleIndex.store(renderScale, std::memory_order_release);
     g_appliedRenderScaleIndex.store(renderScale, std::memory_order_release);
@@ -802,6 +850,10 @@ void SaveGraphicsSettings() {
         const int renderScale = ClampRenderScaleIndex(
             g_requestedRenderScaleIndex.load(std::memory_order_acquire));
         bool ok = std::fprintf(file, "RenderScale=%d\n", renderScale) >= 0;
+#ifdef SAVR_STEAM_FRAME
+        ok = std::fprintf(file, "FrameDisplay=1\nRenderScaleUser=%d\n",
+                          g_renderScaleUserChosen ? 1 : 0) >= 0 && ok;
+#endif
         ok = std::fprintf(file, "Effects=%d\n",
                           g_worldEffectsEnabled.load(std::memory_order_acquire)
                               ? 1 : 0) >= 0 && ok;
@@ -21128,8 +21180,19 @@ void ActivatePendingRasterSet() {
 bool PrepareEyeRasterSet(int mainWidth, int mainHeight) {
     EnsureGraphicsSettingsLoaded();
     TickRetiredRasterSet();
+#ifdef SAVR_STEAM_FRAME
+    ResolveLaunchEyeScale(mainWidth);   // no-op once the swapchains have done it
+#endif
+    if (g_graphicsMigrationSavePending.exchange(false, std::memory_order_acq_rel))
+        SaveGraphicsSettings();
+#ifdef SAVR_STEAM_FRAME
+    // Pinned to the scale the eye swapchains were created for (see
+    // g_launchRenderScaleIndex): the render size must equal the swapchain size.
+    const int requested = g_launchRenderScaleIndex;
+#else
     const int requested = ClampRenderScaleIndex(
         g_requestedRenderScaleIndex.load(std::memory_order_acquire));
+#endif
 
     if (!RasterSetHasAny(g_eyeRaster)) {
         int selected = requested;
@@ -21145,6 +21208,12 @@ bool PrepareEyeRasterSet(int mainWidth, int mainHeight) {
                 g_appliedRenderScaleIndex.store(selected,
                                                 std::memory_order_release);
                 g_requestedRenderScaleIndex.store(selected, std::memory_order_release);
+#ifdef SAVR_STEAM_FRAME
+                g_launchRenderScaleIndex = selected;
+                if (selected != requested)
+                    LOGW("[stereo] eye rasters at %dx%d (scale index %d), smaller than the "
+                         "swapchain asked for; the blit will scale up", width, height, selected);
+#endif
                 if (selected != requested) SaveGraphicsSettings();
                 LOGI("[stereo] %d eye-texture sets created %dx%d (main %dx%d, %d%%)",
                      kEyeSets, width, height, mainWidth, mainHeight,
@@ -29847,6 +29916,46 @@ void EndGameFrameTelemetry() {
     g_enginePreProfile.stage = EnginePreStage::Inactive;
 }
 
+#ifdef SAVR_STEAM_FRAME
+// Size for an eye swapchain, from the runtime's recommended size and the scale in
+// force at launch. Same rounding as the eye rasters, so the two are equal.
+int LaunchEyeDimension(int base) {
+    EnsureGraphicsSettingsLoaded();
+    return ScaledEyeDimension(base, ClampRenderScaleIndex(g_launchRenderScaleIndex));
+}
+
+// Pick the launch scale once, at session start, from the runtime's recommended
+// eye width. Default (no user choice): the table scale whose eye image is closest
+// to 2160, so a recommendation of 1728 gives 125% and one of 2160 (SteamVR's
+// per-app resolutionOverride) gives 100%. A scale the user picked in the menu
+// overrides it. Safe to call again; only the first call does anything.
+void ResolveLaunchEyeScale(int recommendedWidth) {
+    EnsureGraphicsSettingsLoaded();
+    if (recommendedWidth <= 0) return;
+    std::lock_guard<std::mutex> lock(g_launchScaleMutex);
+    if (g_launchScaleResolved) return;
+    g_launchScaleResolved = true;
+    int best = 0, bestDelta = 1 << 30;
+    for (int i = 0; i < kRenderScaleCount; ++i) {
+        const int delta = std::abs(ScaledEyeDimension(recommendedWidth, i) - kFrameTargetEyePixels);
+        if (delta < bestDelta) { best = i; bestDelta = delta; }
+    }
+    g_autoRenderScaleIndex = best;
+    const int chosen = g_renderScaleUserChosen ? ClampRenderScaleIndex(g_launchRenderScaleIndex) : best;
+    g_launchRenderScaleIndex = chosen;
+    g_currentRenderScaleIndex = chosen;
+    g_requestedRenderScaleIndex.store(chosen, std::memory_order_release);
+    g_appliedRenderScaleIndex.store(chosen, std::memory_order_release);
+    LOGI("[vr] eye resolution: runtime recommends %d, target %d, %s scale %d%% (default would be %d%%) "
+         "-> %d per eye",
+         recommendedWidth, kFrameTargetEyePixels,
+         g_renderScaleUserChosen ? "user-chosen" : "default",
+         static_cast<int>(kEyeRenderScales[chosen] * 100.0f + 0.5f),
+         static_cast<int>(kEyeRenderScales[best] * 100.0f + 0.5f),
+         ScaledEyeDimension(recommendedWidth, chosen));
+}
+#endif
+
 int GetRenderScalePercent() {
     EnsureGraphicsSettingsLoaded();
     const int index = ClampRenderScaleIndex(
@@ -29880,6 +29989,9 @@ void AdjustRenderScale(int direction) {
         if (g_requestedRenderScaleIndex.compare_exchange_weak(
                 current, desired, std::memory_order_acq_rel,
                 std::memory_order_acquire)) {
+#ifdef SAVR_STEAM_FRAME
+            g_renderScaleUserChosen = true;   // overrides the computed default from now on
+#endif
             SaveGraphicsSettings();
             LOGI("[stereo] render scale saved: %d%% active=%d%% applying=1",
                  static_cast<int>(kEyeRenderScales[desired] * 100.0f + 0.5f),
@@ -30120,8 +30232,14 @@ void AdjustGraphicsDistanceSetting(int field, int direction) {
 
 void ResetGraphicsDefaults() {
     EnsureGraphicsSettingsLoaded();
+#ifdef SAVR_STEAM_FRAME
+    g_renderScaleUserChosen = false;
+    g_requestedRenderScaleIndex.store(
+        g_autoRenderScaleIndex, std::memory_order_release);
+#else
     g_requestedRenderScaleIndex.store(
         kDefaultRenderScaleIndex, std::memory_order_release);
+#endif
     g_worldEffectsEnabled.store(true, std::memory_order_release);
     g_neonSignsEnabled.store(true, std::memory_order_release);
     g_colorGradingEnabled.store(true, std::memory_order_release);

@@ -197,6 +197,10 @@ constexpr long long kOuterPacerTargetPeriodNs =
 // from combining the stock 30 gate with a new target-rate outer pacer.
 std::atomic<long long> g_outerPacerPeriodNs{kOuterPacerFallbackPeriodNs};
 std::atomic<bool> g_resetGameTiming{true};
+// Frame: true once the retail limiter patch is verified. Only then does the pacer
+// follow xr::TargetFrameRateHz (the refresh_rate setting and the automatic
+// fallback); otherwise the fixed fail-safe cadence above stays.
+std::atomic<bool> g_limiterPatchActive{false};
 double g_prevGameFrameStartMs = 0.0;
 long long g_lastPacerFrameNs = 0;
 constexpr char kAbsoluteOuterPacerProperty[] =
@@ -830,6 +834,7 @@ void OnSurfaceChanged(JNIEnv* env, jclass clazz, jobject surface, jint width, ji
         const bool knownRetail211 = drawOffset == 0x7d28d4u;
         const GameLimiterPatchStatus limiter =
             EnableSingleOuterLimiter(g.LoadBase, knownRetail211);
+        g_limiterPatchActive.store(limiter.active, std::memory_order_release);
         const long long outerPacerPeriodNs =
             g_outerPacerPeriodNs.load(std::memory_order_acquire);
         const double outerPacerHz = outerPacerPeriodNs > 0
@@ -2667,8 +2672,15 @@ void OnDrawFrame(JNIEnv* env, jclass clazz, jfloat deltaTime) {
     timespec now{};
     clock_gettime(CLOCK_MONOTONIC, &now);
     const long long nowNs = now.tv_sec * 1000000000LL + now.tv_nsec;
-    const long long outerPacerPeriodNs =
+    long long outerPacerPeriodNs =
         g_outerPacerPeriodNs.load(std::memory_order_acquire);
+#ifdef SAVR_STEAM_FRAME
+    if (g_limiterPatchActive.load(std::memory_order_acquire)) {
+        const float targetHz = xr::TargetFrameRateHz();
+        if (targetHz >= 30.0f && targetHz <= 240.0f)
+            outerPacerPeriodNs = static_cast<long long>(1.0e9 / targetHz);
+    }
+#endif
     if (AbsoluteOuterPacerRequested()) {
         if (g_lastPacerFrameNs == 0) {
             g_lastPacerFrameNs = nowNs;

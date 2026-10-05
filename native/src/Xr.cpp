@@ -2908,24 +2908,104 @@ void ResolveDiagnosticExtensions() {
          g_appGpuFrameTimePath != XR_NULL_PATH ? 1 : 0);
 }
 
+#ifdef SAVR_STEAM_FRAME
+// ---------------------------------------------------------------------------
+// Display rate (Steam Frame, standard section 9). The target is 120 Hz at ~2160
+// per eye. `refresh_rate` in vr_display.ini (default 120) is the ceiling; the
+// rate requested is the highest one XR_FB_display_refresh_rate offers that is not
+// above it. SteamVR only offers the per-app preferred rate set in its per-app
+// settings for this Steam title, so the list may hold a single entry; the real
+// rate is whatever the compositor runs (xrWaitFrame's predictedDisplayPeriod),
+// and the game loop is paced to that, never above it.
+//
+// Fallback while worn: two consecutive 10 s windows with the game below 90% of the
+// rate step the request 120 -> 90 -> 72. Unmeasured on a headset.
+// ---------------------------------------------------------------------------
+constexpr int kRefreshSettingDefault = 120;
+constexpr double kRefreshWindowSeconds = 10.0;
+constexpr float kRefreshWindowFraction = 0.90f;
+constexpr int kRefreshStepsHz[3] = {120, 90, 72};
+
+std::atomic<float> g_targetHz{0.0f};      // pacing target for the game loop
+std::vector<float> g_offeredRates;
+float g_compositorHz = 0.0f;              // from predictedDisplayPeriod
+bool  g_compositorStable = false;
+bool  g_refreshFallbackActive = false;    // a fallback request is in flight
+bool  g_refreshFloor = false;             // nowhere lower to go / request refused
+XrTime g_refreshFallbackCheckAt = 0;
+float g_refreshFallbackFromHz = 0.0f;
+
+int LoadRefreshSettingImpl() {
+    int value = kRefreshSettingDefault;
+    const char* path = savr::storage::FilesPath("vr_display.ini");
+    bool found = false;
+    if (FILE* f = std::fopen(path, "r")) {
+        char line[128];
+        while (std::fgets(line, sizeof(line), f)) {
+            int v = 0;
+            if (std::sscanf(line, "refresh_rate=%d", &v) == 1) {
+                value = std::clamp(v, 60, 240);
+                found = true;
+            }
+        }
+        std::fclose(f);
+    }
+    if (!found) {
+        if (FILE* f = std::fopen(path, "w")) {
+            std::fprintf(f, "# Display. refresh_rate is the highest rate to ask SteamVR for (the\n"
+                            "# nearest offered rate at or below it is requested). SteamVR only offers\n"
+                            "# the per-app rate set in its settings for this Steam title.\n"
+                            "refresh_rate=%d\n", kRefreshSettingDefault);
+            std::fclose(f);
+        }
+    }
+    LOGI("[vr] refresh_rate setting %d (%s)", value, found ? path : "default");
+    return value;
+}
+
+// Thread-safe: first called from whichever of the game thread (pacer) or the XR
+// thread (session setup) gets there first.
+int LoadRefreshSetting() {
+    static const int value = LoadRefreshSettingImpl();
+    return value;
+}
+
+// Highest offered rate not above `ceiling`; the lowest offered one if all are above;
+// `ceiling` itself when no list is known.
+float PickRefreshRate(float ceiling) {
+    if (g_offeredRates.empty()) return ceiling;
+    float best = 0.0f, lowest = 1.0e9f;
+    for (float r : g_offeredRates) {
+        if (!(std::isfinite(r) && r > 0.0f)) continue;
+        lowest = std::min(lowest, r);
+        if (r <= ceiling + 0.5f && r > best) best = r;
+    }
+    return best > 0.0f ? best : (lowest < 1.0e9f ? lowest : ceiling);
+}
+#endif
+
 void InitializeSessionDiagnostics() {
+#ifdef SAVR_STEAM_FRAME
+    const float targetHz = static_cast<float>(LoadRefreshSetting());
+#else
+    const float targetHz = static_cast<float>(frame_target::kFps);
+#endif
     if (g_hasDisplayRefreshExt && g_enumerateDisplayRefreshRates &&
         g_getDisplayRefreshRate && g_requestDisplayRefreshRate) {
         uint32_t count = 0;
         g_displayRefreshRequestSupported = false;
-        g_requestedDisplayRefreshHz = static_cast<float>(frame_target::kFps);
+        g_requestedDisplayRefreshHz = targetHz;
         const XrResult countResult = g_enumerateDisplayRefreshRates(
             s.session, 0, &count, nullptr);
+        char offered[160]{};
         if (XR_SUCCEEDED(countResult) && count > 0) {
             std::vector<float> rates(count);
             if (XR_SUCCEEDED(g_enumerateDisplayRefreshRates(
                     s.session, count, &count, rates.data()))) {
-                char offered[160]{};
                 std::size_t used = 0;
                 float closestDistance = 10000.0f;
                 for (uint32_t i = 0; i < count && used + 12 < sizeof(offered); ++i) {
-                    const float distance = std::fabs(
-                        rates[i] - static_cast<float>(frame_target::kFps));
+                    const float distance = std::fabs(rates[i] - targetHz);
                     if (std::isfinite(rates[i]) && rates[i] > 0.0f &&
                         distance < closestDistance) {
                         closestDistance = distance;
@@ -2933,11 +3013,15 @@ void InitializeSessionDiagnostics() {
                     }
                     const int wrote = std::snprintf(
                         offered + used, sizeof(offered) - used,
-                        "%s%.1f", i ? "/" : "", rates[i]);
+                        "%s%.0f", i ? ", " : "", rates[i]);
                     if (wrote <= 0) break;
                     used += static_cast<std::size_t>(wrote);
                 }
                 g_displayRefreshRequestSupported = closestDistance < 10000.0f;
+#ifdef SAVR_STEAM_FRAME
+                g_offeredRates = rates;
+                g_requestedDisplayRefreshHz = PickRefreshRate(targetHz);
+#endif
                 LOGI("[perf.init] display rates offered=%s", offered);
             }
         } else {
@@ -2950,21 +3034,26 @@ void InitializeSessionDiagnostics() {
                  count, static_cast<int>(countResult),
                  g_requestedDisplayRefreshHz);
         }
+#ifdef SAVR_STEAM_FRAME
+        LOGI("[vr] refresh: setting %d, offered {%s}, requested %.0f",
+             static_cast<int>(targetHz), offered, g_requestedDisplayRefreshHz);
+        g_targetHz.store(g_requestedDisplayRefreshHz, std::memory_order_release);
+#else
         if (g_displayRefreshRequestSupported &&
-            std::fabs(g_requestedDisplayRefreshHz -
-                      static_cast<float>(frame_target::kFps)) >= 0.5f) {
+            std::fabs(g_requestedDisplayRefreshHz - targetHz) >= 0.5f) {
             LOGW("[perf.init] exact target %dHz unavailable; closest is %.1fHz",
                  frame_target::kFps, g_requestedDisplayRefreshHz);
         }
+#endif
         float candidate = 0.0f;
         const XrResult result = g_getDisplayRefreshRate(s.session, &candidate);
         if (XR_SUCCEEDED(result) && std::isfinite(candidate) && candidate > 0.0f) {
             g_displayRefreshHz = candidate;
             g_displayRefreshValid = true;
         }
-        LOGI("[perf.init] display target=%dHz selected=%.1fHz requestable=%d "
+        LOGI("[perf.init] display target=%.0fHz selected=%.1fHz requestable=%d "
              "current=%.1fHz get_rc=%d",
-             frame_target::kFps, g_requestedDisplayRefreshHz,
+             targetHz, g_requestedDisplayRefreshHz,
              g_displayRefreshRequestSupported ? 1 : 0,
              g_displayRefreshValid ? g_displayRefreshHz : -1.0f,
              static_cast<int>(result));
@@ -2976,6 +3065,25 @@ XrResult RequestTargetDisplayRefresh(const char* phase) {
         !g_displayRefreshRequestSupported || s.session == XR_NULL_HANDLE) {
         return XR_ERROR_FUNCTION_UNSUPPORTED;
     }
+#ifdef SAVR_STEAM_FRAME
+    // The compositor's own period is the truth: the FB list can offer only 90
+    // while it runs 120, and asking for 90 then would downgrade it. Wait until
+    // the period is measured, and never request below what it already runs.
+    if (!g_refreshFallbackActive) {
+        if (!g_compositorStable) return XR_SUCCESS;   // retried on the next tick
+        if (g_compositorHz > g_requestedDisplayRefreshHz * 1.04f) {
+            static bool logged = false;
+            if (!logged) {
+                logged = true;
+                LOGI("[vr] refresh: compositor already runs %.1f Hz, above the %.0f Hz "
+                     "this request would ask for; not requesting (no downgrade)",
+                     g_compositorHz, g_requestedDisplayRefreshHz);
+            }
+            g_displayRefreshRetryCount = 8;
+            return XR_SUCCESS;
+        }
+    }
+#endif
 
     const XrResult requestResult = g_requestDisplayRefreshRate(
         s.session, g_requestedDisplayRefreshHz);
@@ -2987,15 +3095,115 @@ XrResult RequestTargetDisplayRefresh(const char* phase) {
         g_displayRefreshHz = current;
         g_displayRefreshValid = true;
     }
-    LOGI("[perf.refresh] phase=%s target=%dHz selected=%.1fHz request_rc=%d "
+    LOGI("[perf.refresh] phase=%s requested=%.0fHz request_rc=%d "
          "current=%.1fHz get_rc=%d retry=%d/8",
-         phase ? phase : "?", frame_target::kFps,
+         phase ? phase : "?",
          g_requestedDisplayRefreshHz,
          static_cast<int>(requestResult),
          g_displayRefreshValid ? g_displayRefreshHz : -1.0f,
          static_cast<int>(getResult), g_displayRefreshRetryCount);
     return requestResult;
 }
+
+#ifdef SAVR_STEAM_FRAME
+// Next rung of the fallback ladder below `fromHz`, snapped to an offered rate.
+// Returns 0 when there is nothing lower.
+float NextFallbackRate(float fromHz) {
+    for (int step : kRefreshStepsHz) {
+        if (static_cast<float>(step) >= fromHz - 0.5f) continue;
+        const float pick = PickRefreshRate(static_cast<float>(step));
+        if (pick < fromHz - 0.5f) return pick;
+    }
+    return 0.0f;
+}
+
+// Once per presented frame, on the present thread. Tracks the compositor's real
+// rate, keeps the game loop paced to it, and runs the 10 s performance windows.
+void RefreshPolicyTick(XrTime now, XrDuration predictedPeriod, std::uint32_t gameFrames) {
+    // 1. compositor rate, from predictedDisplayPeriod
+    static float ema = 0.0f;
+    static int steady = 0;
+    if (predictedPeriod > 1000000 && predictedPeriod < 50000000) {
+        const float hz = 1.0e9f / static_cast<float>(predictedPeriod);
+        if (ema <= 0.0f || std::fabs(hz - ema) > 0.08f * ema) {
+            ema = hz;
+            steady = 0;
+            g_compositorStable = false;
+        } else {
+            ema += (hz - ema) * 0.1f;
+            if (++steady >= 90) g_compositorStable = true;
+        }
+        g_compositorHz = ema;
+    }
+
+    // 2. pace the game to the rate the compositor actually runs
+    if (g_compositorStable) {
+        const float snapped = std::nearbyint(g_compositorHz);
+        const float target = g_targetHz.load(std::memory_order_acquire);
+        if (snapped >= 30.0f && snapped <= 240.0f && std::fabs(snapped - target) >= 2.0f) {
+            g_targetHz.store(snapped, std::memory_order_release);
+            LOGI("[vr] refresh: compositor runs %.0f Hz (predictedDisplayPeriod); "
+                 "pacing the game at %.0f Hz (was %.0f)", snapped, snapped, target);
+        }
+    }
+
+    // 3. did a fallback request take?
+    if (g_refreshFallbackActive && now >= g_refreshFallbackCheckAt) {
+        g_refreshFallbackActive = false;
+        if (g_compositorHz > g_refreshFallbackFromHz - 2.0f) {
+            g_refreshFloor = true;
+            LOGW("[vr] refresh: asked for %.0f Hz but the compositor still runs %.0f Hz; "
+                 "SteamVR only offers the per-app rate set for this title, so the fallback "
+                 "ends here", g_requestedDisplayRefreshHz, g_compositorHz);
+        }
+    }
+
+    // 4. 10 s performance windows (worn, in the world only)
+    static XrTime windowStart = 0;
+    static std::uint32_t windowFrames = 0;
+    static bool windowClean = true;
+    static int badWindows = 0;
+    const bool counting = s.sessionState == XR_SESSION_STATE_FOCUSED && !s.theaterMode &&
+        g_compositorStable && !g_refreshFallbackActive && !g_refreshFloor;
+    if (windowStart == 0) {
+        windowStart = now; windowFrames = gameFrames; windowClean = true;
+    }
+    if (!counting) windowClean = false;
+    const double elapsed = static_cast<double>(now - windowStart) / 1.0e9;
+    if (elapsed >= kRefreshWindowSeconds) {
+        const float rate = g_targetHz.load(std::memory_order_acquire);
+        const float fps = static_cast<float>((gameFrames - windowFrames) / elapsed);
+        if (windowClean && rate > 1.0f) {
+            const bool slow = fps < kRefreshWindowFraction * rate;
+            badWindows = slow ? badWindows + 1 : 0;
+            LOGI("[vr] refresh: 10 s window %.1f fps against %.0f Hz (%s, %d bad in a row)",
+                 fps, rate, slow ? "below 90%" : "ok", badWindows);
+            if (badWindows >= 2) {
+                badWindows = 0;
+                const float next = NextFallbackRate(rate);
+                if (next > 0.0f) {
+                    LOGW("[vr] refresh: two windows below 90%% of %.0f Hz; stepping down to %.0f Hz",
+                         rate, next);
+                    g_requestedDisplayRefreshHz = next;
+                    g_displayRefreshRetryCount = 0;
+                    g_refreshFallbackActive = true;
+                    g_refreshFallbackFromHz = g_compositorHz;
+                    g_refreshFallbackCheckAt = now + 12000000000LL;
+                    RequestTargetDisplayRefresh("fallback");
+                    g_displayRefreshRetryCount = 1;
+                } else {
+                    g_refreshFloor = true;
+                    LOGW("[vr] refresh: still below 90%% of %.0f Hz and nothing lower to step "
+                         "down to", rate);
+                }
+            }
+        } else {
+            badWindows = 0;   // a menu, a load or a lost focus in the window: not counted
+        }
+        windowStart = now; windowFrames = gameFrames; windowClean = true;
+    }
+}
+#endif
 
 void EnablePerformanceMetrics() {
     if (!g_hasPerformanceMetricsExt || !g_setMetricsState || g_metricsEnabled ||
@@ -3026,15 +3234,30 @@ void QueryRuntimeDiagnostics() {
     if (s.sessionState == XR_SESSION_STATE_FOCUSED &&
         g_displayRefreshRequestSupported &&
         g_displayRefreshRetryCount < 8) {
-        const bool confirmed = g_displayRefreshValid &&
+        bool confirmed = g_displayRefreshValid &&
             std::fabs(g_displayRefreshHz - g_requestedDisplayRefreshHz) < 0.5f;
+#ifdef SAVR_STEAM_FRAME
+        // The compositor's own period decides too: the FB query can lag behind it
+        // or list a different rate (see RequestTargetDisplayRefresh).
+        if (g_compositorStable &&
+            std::fabs(g_compositorHz - g_requestedDisplayRefreshHz) <
+                0.04f * g_requestedDisplayRefreshHz)
+            confirmed = true;
+#endif
         if (confirmed) {
             LOGI("[perf.refresh] confirmed %.1fHz after %d request(s)",
                  g_displayRefreshHz, g_displayRefreshRetryCount);
             g_displayRefreshRetryCount = 8;
         } else {
-            RequestTargetDisplayRefresh("retry");
-            ++g_displayRefreshRetryCount;
+            const XrResult retryResult = RequestTargetDisplayRefresh("retry");
+            bool counted = true;
+#ifdef SAVR_STEAM_FRAME
+            // Waiting for the compositor period to settle is not a failed try.
+            if (retryResult == XR_SUCCESS && !g_compositorStable) counted = false;
+#else
+            (void)retryResult;
+#endif
+            if (counted) ++g_displayRefreshRetryCount;
         }
     }
 
@@ -3342,6 +3565,25 @@ bool CreateSwapchains() {
         info.sampleCount = 1;
         info.width       = static_cast<int32_t>(view.recommendedImageRectWidth);
         info.height      = static_cast<int32_t>(view.recommendedImageRectHeight);
+#ifdef SAVR_STEAM_FRAME
+        // The eye images are created at the render size (recommended x the launch
+        // scale, ~2160 by default), and the game renders straight into
+        // rasters of the same size: no render-larger-then-blit-down.
+        {
+            vrcam::ResolveLaunchEyeScale(static_cast<int>(view.recommendedImageRectWidth));
+            int32_t w = vrcam::LaunchEyeDimension(static_cast<int>(view.recommendedImageRectWidth));
+            int32_t h = vrcam::LaunchEyeDimension(static_cast<int>(view.recommendedImageRectHeight));
+            if (view.maxImageRectWidth > 0 && w > static_cast<int32_t>(view.maxImageRectWidth))
+                w = static_cast<int32_t>(view.maxImageRectWidth);
+            if (view.maxImageRectHeight > 0 && h > static_cast<int32_t>(view.maxImageRectHeight))
+                h = static_cast<int32_t>(view.maxImageRectHeight);
+            LOGI("[vr] eye image %dx%d (runtime recommends %ux%u, max %ux%u)", w, h,
+                 view.recommendedImageRectWidth, view.recommendedImageRectHeight,
+                 view.maxImageRectWidth, view.maxImageRectHeight);
+            info.width = w;
+            info.height = h;
+        }
+#endif
         info.faceCount   = 1;
         info.arraySize   = 1;
         info.mipCount    = 1;
@@ -8110,8 +8352,17 @@ void BuildGraphicsMenu() {
         activeWidth = g_stereoEyeW[set].load(std::memory_order_acquire);
         activeHeight = g_stereoEyeH[set].load(std::memory_order_acquire);
     }
+#ifdef SAVR_STEAM_FRAME
+    // The swapchain is already at the render size; the OpenXR base is the
+    // runtime's recommendation.
+    const int baseWidth = !s.configViews.empty()
+        ? static_cast<int>(s.configViews[0].recommendedImageRectWidth) : 0;
+    const int baseHeight = !s.configViews.empty()
+        ? static_cast<int>(s.configViews[0].recommendedImageRectHeight) : 0;
+#else
     const int baseWidth = !s.swapchains.empty() ? s.swapchains[0].width : 0;
     const int baseHeight = !s.swapchains.empty() ? s.swapchains[0].height : 0;
+#endif
     // Before the first stereo pair is published, still show the exact size the
     // current scale will allocate from the runtime's OpenXR recommendation.
     if ((activeWidth <= 0 || activeHeight <= 0) &&
@@ -8123,9 +8374,15 @@ void BuildGraphicsMenu() {
     }
     char rows[15][64];
     if (renderScalePending) {
+#ifdef SAVR_STEAM_FRAME
+        std::snprintf(rows[0], sizeof(rows[0]),
+                      "RESOLUTION  < %d%% >  [NEXT LAUNCH]",
+                      renderScalePercent);
+#else
         std::snprintf(rows[0], sizeof(rows[0]),
                       "RESOLUTION  < %d%% >  [APPLYING]",
                       renderScalePercent);
+#endif
     } else if (activeWidth > 0 && activeHeight > 0) {
         std::snprintf(rows[0], sizeof(rows[0]),
                       "RESOLUTION  < %d X %d >  %d%%",
@@ -8167,6 +8424,11 @@ void BuildGraphicsMenu() {
     }
     char hint[64]{};
     if (sel == 0 && renderScalePending) {
+#ifdef SAVR_STEAM_FRAME
+        std::snprintf(hint, sizeof(hint),
+                      "ACTIVE %d%%  %d X %d   SAVED, APPLIES ON RESTART",
+                      activeRenderScalePercent, activeWidth, activeHeight);
+#else
         if (activeWidth > 0 && activeHeight > 0) {
             std::snprintf(hint, sizeof(hint),
                           "ACTIVE %d%%  %d X %d   PREPARING NEW BUFFER",
@@ -8176,6 +8438,7 @@ void BuildGraphicsMenu() {
                           "ACTIVE %d%%   PREPARING NEW BUFFER",
                           activeRenderScalePercent);
         }
+#endif
     } else if (sel == 0 && baseWidth > 0 && baseHeight > 0) {
         std::snprintf(hint, sizeof(hint),
                       "OPENXR BASE %d X %d PER EYE   L2/R2 ADJUST",
@@ -12460,7 +12723,7 @@ bool BuildCinemaOverlayProgram() {
     return true;
 }
 
-// Subtitle box inside the band, as fractions of the whole screen image
+// Text boxes inside the band, as fractions of the whole screen image
 // (top-left origin). The text raster is 2048x512 (4:1), so on the 2.56 m wide
 // screen a 1.76 m wide box is 0.44 m tall; the band is 0.48 m. The eye image
 // is stretched over the picture part only, so the fractions are of the full
@@ -13163,6 +13426,10 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs) {
         ResetStereoPhaseFeedback();
         sLastTheaterMode = s.theaterMode;
     }
+#ifdef SAVR_STEAM_FRAME
+    RefreshPolicyTick(frameState.predictedDisplayTime, frameState.predictedDisplayPeriod,
+                      g_gameFrames.load(std::memory_order_relaxed));
+#endif
     {
         static int pn = 0;
         if ((++pn % 180) == 1) {
@@ -13894,6 +14161,13 @@ void SetTheaterCrop(int width, int height) {
     g_theaterCropW.store(width, std::memory_order_relaxed);
     g_theaterCropH.store(height, std::memory_order_relaxed);
 }
+
+#ifdef SAVR_STEAM_FRAME
+float TargetFrameRateHz() {
+    const float hz = g_targetHz.load(std::memory_order_acquire);
+    return hz > 1.0f ? hz : static_cast<float>(LoadRefreshSetting());
+}
+#endif
 
 bool RecommendedEyeSize(int& width, int& height) {
     if (s.configViews.empty()) {
