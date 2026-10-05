@@ -6,10 +6,12 @@ runtime. The game itself is unchanged: it's the same Google Play build
 (2.11.311) with the same VR layer. What's different is how it's packaged,
 where its files live and how the controllers map.
 
-Status: it has been worn twice (2026-10-03 and 2026-10-04, see "Wear
-feedback" at the end). Menus, story cutscenes in 3D cinema, subtitles and
-fades work. The changes made after the second wear build on the host and
-have not been worn yet.
+Status: it has been worn three times (2026-10-03, 2026-10-04 and 2026-10-05,
+see "Wear feedback" at the end). Menus, story cutscenes in 3D cinema,
+subtitles, fades and the third-person camera work. Everything changed after
+the second wear, including the round-3 fixes (laser dot, cutscene tooltips,
+subtitle gap, 120 Hz and 2160 per eye), builds on the host and has not been
+worn yet: "host build, headset-unverified" until someone has it on.
 
 ## What's different from the Quest build
 
@@ -53,7 +55,13 @@ builds come out the same as before.
   a black band under the picture (the screen is 2.56 x 1.92 m: the 16:9
   picture on top, a 0.48 m band below, all in one plane), like the letterbox
   band in the GTA III and Vice City cinema, so they no longer float over a 3D
-  image at a different depth.
+  image at a different depth. The first subtitle line sits right under the
+  picture's bottom edge (about 1.4 cm margin; it used to float about 20 cm
+  lower, because the text was centred in a tall box). The tutorial help box
+  (the "press X to..." tooltips the opening cutscenes show) is drawn in the
+  same band, under the subtitle text, or at the top of it when there are no
+  subtitles. It follows the HELP TEXT switch in the HUD menu. Host build, not
+  worn.
 - **In-engine cutscenes.** The camera cuts you get in the middle of play
   (following CJ walking, mission cameras with the black letterbox bars) use
   the same 3D cinema screen. GAME CUTSCENES in the graphics menu has CINEMA,
@@ -162,8 +170,8 @@ baked into the flat screen is kept only as a fallback if the pointer swapchain
 cannot be created. The trigger uses hysteresis (down at 0.6, up at 0.45), with a
 10 ms 0.2 hover pulse on the right hand when the hovered menu row changes and a
 30 ms 0.5 click pulse (`ui_hover` / `ui_click`; the kit has no haptics-scale
-setting yet, so these are unscaled). The dot and beam face the head about world
-up, so they do not roll.
+setting yet, so these are unscaled). The dot lies flat on whatever surface the ray hit (see "Round 3" below),
+so it does not roll with the head.
 
 **The VR menu is pointer-operable.** Hovering a row selects it (only when the
 hovered row changes, so the left stick keeps working while the ray rests
@@ -188,9 +196,130 @@ pose is counter-rotated); the circular mask is rotation-invariant. The front HUD
 and the sky sun/moon were already upright.
 
 What to look at on the headset: the beam above the VR menu, above the 3D cinema
-and above the flat pause menu; the dot landing on the right row; clicking rows,
+and above the flat pause menu; the dot landing on the right row, whole, on a
+tilted panel, with no dither where it meets the menu; clicking rows,
 the side zones and the sliders; tilting your head while looking at a street
 lamp, a wet road or through a scope.
+
+## Display: 120 Hz and 2160 per eye
+
+Host build, headset-unverified, and the frame rate is unmeasured.
+
+**Target.** 120 Hz at about 2160 x 2160 per eye (the panel's own resolution;
+the runtime recommends 1728 x 1728 by default, or 2160 with SteamVR's per-app
+resolution override set).
+
+**Refresh rate.** `refresh_rate=120` in `vr_display.ini` (next to the other
+`vr_*.ini` files; written with the default on first launch). At session start
+the port enumerates `XR_FB_display_refresh_rate`, asks for the highest offered
+rate that is not above the setting and logs it:
+
+    [vr] refresh: setting 120, offered {72, 90, 120}, requested 120
+
+The game loop is paced to the rate the compositor really runs (the pacer reads
+`xr::TargetFrameRateHz`, which follows `predictedDisplayPeriod`), and the port
+never asks for less than the compositor already runs, because the FB list can
+offer only one rate while the compositor does something else. GTA's own frame
+cap word is now 120 on the Frame build (the ceiling); the Quest build keeps 72.
+
+**Fallback while worn.** While the session is FOCUSED and you are in the world,
+the port counts game frames in 10 s windows. Two windows in a row below 90% of
+the rate step the request 120 -> 90 -> 72, each step logged
+(`[vr] refresh: two windows below 90% of 120 Hz; stepping down to 90 Hz`). Menus,
+loading and lost focus don't count. The step is per session, it isn't saved.
+If the compositor doesn't follow (see below), the fallback stops and says so.
+
+**Per-app refresh.** SteamVR only offers the preferred rate set for that app in
+SteamVR's per-app settings, and only for launches through the Steam title. So
+the GTASAVR Steam title needs its per-app refresh rate set to 120 once, by
+whoever is wearing it, in SteamVR's settings in the headset. Editing the
+settings file from SSH while SteamVR runs does nothing. Without it the list is
+just that one rate, and the port runs at whatever it is.
+
+**Will it hold 120?** Unknown. SA in stereo at 2160 per eye is heavy and it
+very likely can't hold 120; the automatic fallback is there for that. Nothing
+here has been measured on the headset, so the default stays 120 per the
+standard. If a wear shows it can't, the default can move to 90 with the
+measurement written down.
+
+**Resolution.** The default is an absolute ~2160 x 2160 per eye, whatever the
+runtime recommends. At session start the port takes the runtime's recommended
+eye width and picks the RESOLUTION step whose eye image comes closest to 2160:
+a recommendation of 1728 gives 125% (1728 x 1.25 = 2160), and one of 2160 (what
+SteamVR's per-app `resolutionOverride=2160` makes it) gives 100%, not 125% of
+2160. It logs the lot:
+
+    [vr] eye resolution: runtime recommends 2160, target 2160, default scale 100% (default would be 100%) -> 2160 per eye
+
+A scale you pick in the RESOLUTION menu row overrides the default from then on
+(saved as `RenderScaleUser=1` in `vr_graphics.ini`); RESET DEFAULTS goes back to
+the computed one. The eye swapchains are created at that size at launch and the
+game renders straight into rasters of the same size, so there is no render-
+larger-then-blit-down step any more (the old code rendered at the scale and
+blitted into a swapchain at the runtime's recommended size). The consequence:
+the scale is fixed for the session. Changing RESOLUTION in the menu is saved and
+shows `[NEXT LAUNCH]`; it applies on restart. An older `vr_graphics.ini` (which
+holds the old 100% but no marker) is not treated as a choice and gets the
+computed default. Logs: `[vr] eye resolution`, `[vr] eye image WxH` and
+`[stereo] N eye-texture sets created WxH`.
+
+**Wear checklist for display.** 1) Set the GTASAVR title's per-app refresh to
+120 in SteamVR's settings, once. 2) Launch from Steam and look for the
+`[vr] refresh:` lines, and for `[vr] eye resolution` / `[vr] eye image` (about
+2160 per eye). 3) Note how long it
+takes the fallback to step down, if it does, and what the in-world frame rate
+is at each step.
+
+## Round 3 (2026-10-05): laser dot, tooltips, subtitle gap, grip
+
+Host build, not worn.
+
+**Laser dot and beam.** The dot was a quad facing the head and centred exactly
+on the hit point, so on a tilted panel half of it sat behind the surface.
+SteamVR depth-composites quads that intersect, so that half was hidden and the
+crossing dithered (the same cause as the GTA III and Vice City ports; the beam's
+last centimetres crossed the plane the same way). Now:
+
+- The dot takes the orientation of the surface that was hit (the flat game
+  screen or the VR menu panel, as last submitted), so it lies flat on it and
+  can't roll with the head. Its position is the hit point plus 12 mm along the
+  surface normal, flipped to the side the head is on. The size rule is
+  unchanged (5% of the head distance, 4 to 14 cm).
+- The beam ends in front of the surface: it is pulled back along the ray by
+  `0.02 / max(|dot(dir, n)|, 0.25)` m, never shorter than 3 cm.
+- Beam and dot are still the last two layers submitted, drawn as alpha-blended
+  quad layers, so they sit above the menu, the cinema and the HUD.
+
+**Cutscene tooltips.** The tutorial help text lives in `CWidgetHelpText`'s
+queue, and the cinema's text path published only the subtitles
+(`PublishCinemaOverlayState` passed a null help string), so the box never
+reached the cinema. It is published now, from the same queue the in-world HUD
+reads. Where it draws: in the black band under the picture, under the subtitle
+text (or at the top of the band with no subtitles), in a slightly smaller font.
+Why there and not top-left on the picture like a TV: the user didn't like text
+on the 3D picture at the screen plane for subtitles (round 2), and a tooltip
+would have the same problem, so the band is the consistent place, and it needs
+no new layer. The front HUD panel isn't an option inside the cinema, because it
+is geometry drawn into the eye image and the cinema frame is its own render.
+A long box under two subtitle lines can run out of band; the box is capped at
+4 lines and the subtitles at 3.
+
+**Subtitle gap.** Before: the text was centred in a 0.44 m tall raster that sat
+in the 0.48 m band, so one subtitle line started about 0.2 m under the picture
+(two and a bit lines; two lines about 0.15 m). After: the raster is top-aligned
+and placed at the top edge of the band, so the first line starts about 1.4 cm
+under the picture. (Computed from the layout, not measured on the headset.)
+
+**Grip and the handbrake.** Grip is not the handbrake here. In a vehicle the
+handbrake is A alone (the `CPad::GetHandBrake` hook returns full while A is
+held, unless a mission has claimed A), and no grip reaches it. Grip is a
+modifier: both grips with Menu or Y open the VR menu, both grips with R2 answer
+the phone, both grips with B quit a minigame; in a vehicle X changes the radio
+station (with the left grip, back a station) and B with one grip held looks and
+drive-by fires to that side; in the Hydra the left grip with R2 climbs; in OVER
+SHOULDER on foot the grips step through weapons; with tracked hands it grabs
+the wheel and the holstered weapons. Nothing needed changing, so the bindings
+check and the controls docs stay as they are.
 
 ## Build (Mac or Linux)
 
@@ -212,7 +341,9 @@ python3 tools/assemble.py --validate-only --steam-frame --allow-unofficial-sourc
 ```
 
 You get `<build>/out/base.apk` (about 1.4 GB) and `<build>/payload` (about
-2.5 GB). Keep at least 8 GB free while it builds.
+2.5 GB). Keep at least 8 GB free while it builds. For a native-only rebuild
+while iterating, run `ninja` in `<build>/native` (it takes about 40 s and
+leaves `libsavr.so`); the Java loader change needs the full build.
 
 ## Put it on the headset
 
@@ -313,6 +444,23 @@ it) it sets the ped's current and target heading to the view heading before
 desired move by the stick's heading minus the view heading. Log line:
 `[view.os] character faces the view`.
 
+**Third wear (2026-10-05).** Worn and good: the third-person camera now stays
+locked to the player whichever way the character faces (the FACE MOVE work
+above). Problems:
+
+1. The laser dot was clipped to a half circle, with a dither where it met the
+   menu.
+2. The tutorial tooltips in the opening cutscenes weren't visible.
+3. The subtitles sat about two dialogue lines too far under the cinema picture.
+4. Question: is grip the handbrake? (It isn't, see above.)
+5. Display: wanted 120 Hz at native resolution.
+
+What was done (all "host build, not worn"): 1 to 4 are under "Round 3" above,
+and 5 is "Display: 120 Hz and 2160 per eye". The first three need looking at
+on the headset; the display one needs the per-app refresh set first.
+
 Logs to look for: `[cutscene.scripted] scene on/off`, `[cinema3d] projection
 screen ON/OFF`, `[cinema3d] anchor ... subtitle band`, `[hud.front] panel`,
-`[view] mode`, `[view.os]` lines, `[ps2.colour]` and `[graphics.colourfilter]`.
+`[view] mode`, `[view.os]` lines, `[ps2.colour]` and `[graphics.colourfilter]`,
+`[hud.text]` (the `cinema subtitle` / `cinema help` rasters),
+`[cinema3d] help box shown`, `[vr] refresh:`, `[vr] eye resolution` and `[vr] eye image`.
