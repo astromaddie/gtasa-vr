@@ -102,9 +102,12 @@ struct HudTextTexture {
     int height{};
     std::uint64_t revision{~std::uint64_t{0}};
     bool visible{};
+    float contentBottom{};   // lowest drawn row as a fraction of the raster height
 };
 
 HudTextTexture g_briefTextTexture;
+HudTextTexture g_cinemaSubtitleTexture;   // 3D cinema band: subtitles (Java style 2)
+HudTextTexture g_cinemaHelpTexture;       // 3D cinema band: tutorial help box (style 3)
 HudTextTexture g_bigTextTexture;
 HudTextTexture g_timerTextTexture;
 HudTextTexture g_breathTextTexture;
@@ -4245,6 +4248,7 @@ bool UpdateHudTextTexture(HudTextTexture& target,
     if (target.revision==revision) return target.visible;
     target.revision=revision;
     target.visible=false;
+    target.contentBottom=0.0f;
     if (text.empty()||!g_hudTextVm||!g_hudTextApplication||
         !g_renderVrTextMethod) return false;
 
@@ -4293,10 +4297,12 @@ bool UpdateHudTextTexture(HudTextTexture& target,
     // addresses source rectangles with a top-left origin, so preserve the row
     // order while converting to RGBA (a second flip makes text upside-down).
     std::vector<std::uint8_t> rgba(static_cast<std::size_t>(count)*4u);
+    int lastRow=-1;
     for (int y=0;y<kTextHeight;++y) {
         for (int x=0;x<kTextWidth;++x) {
             const std::uint32_t colour=static_cast<std::uint32_t>(
                 argb[static_cast<std::size_t>(y)*kTextWidth+x]);
+            if ((colour>>24)>16u) lastRow=y;
             const std::size_t out=(static_cast<std::size_t>(y)*
                                    kTextWidth+x)*4u;
             rgba[out+0]=static_cast<std::uint8_t>((colour>>16)&0xffu);
@@ -4328,10 +4334,12 @@ bool UpdateHudTextTexture(HudTextTexture& target,
                  GL_RGBA,GL_UNSIGNED_BYTE,rgba.data());
     target.width=kTextWidth;
     target.height=kTextHeight;
+    target.contentBottom=static_cast<float>(lastRow+1)/static_cast<float>(kTextHeight);
     const GLenum uploadError=glGetError();
     target.visible=target.texture!=0&&uploadError==GL_NO_ERROR;
     LOGI("[hud.text] direct %s raster chars=%zu tex=%u visible=%d gl=0x%x",
-         style==1?"big":"help",text.size(),target.texture,
+         style==1?"big":style==2?"cinema subtitle":style==3?"cinema help":"help",
+         text.size(),target.texture,
          target.visible?1:0,uploadError);
     return target.visible;
 }
@@ -12456,25 +12464,38 @@ bool BuildCinemaOverlayProgram() {
 // (top-left origin). The text raster is 2048x512 (4:1), so on the 2.56 m wide
 // screen a 1.76 m wide box is 0.44 m tall; the band is 0.48 m. The eye image
 // is stretched over the picture part only, so the fractions are of the full
-// swapchain image (picture on top, band under it).
+// swapchain image (picture on top, band under it). The rasters are top-aligned
+// (Java styles 2 and 3), so a box placed AT the top edge of the band puts its
+// first line right under the picture with a small margin (8 px of 1024-wide
+// reference = 0.014 m). The old centred raster put one subtitle line about
+// 0.2 m (two and a half lines) below the picture.
 constexpr float kCinemaSubtitleWm = 1.76f;
 constexpr float kCinemaSubtitleHm = kCinemaSubtitleWm / 4.0f;
 constexpr float kCinemaSubtitleX = 0.5f - 0.5f * kCinemaSubtitleWm / kCinemaScreenW;
 constexpr float kCinemaSubtitleW = kCinemaSubtitleWm / kCinemaScreenW;
 constexpr float kCinemaSubtitleH = kCinemaSubtitleHm / kCinemaTotalH;
-constexpr float kCinemaSubtitleY = kCinemaPictureFrac +
-    0.5f * (1.0f - kCinemaPictureFrac - kCinemaSubtitleH);
+constexpr float kCinemaSubtitleY = kCinemaPictureFrac;
+// The tutorial help box goes under the subtitle text (or at the top of the band
+// when there is none), this far below it.
+constexpr float kCinemaHelpGapM = 0.02f;
 
 void DrawCinemaOverlay(int targetWidth, int targetHeight, unsigned fadeRgba,
                        bool subtitlesBeforeFade) {
     if (!BuildCinemaOverlayProgram()) return;
     const HudTextState textState = SnapshotHudText();
-    std::u16string smallText = textState.help;
-    if (!textState.brief.empty()) {
-        if (!smallText.empty()) smallText.append(u"\n\n");
-        smallText.append(textState.brief);
+    // Subtitles and the help box go in the band, never on the 3D picture at the
+    // screen plane (a different depth from the picture, which the user did not
+    // like; wear 2026-10-04). They are two rasters so each keeps its own text
+    // size and the help box can sit under however many subtitle lines there are.
+    const bool helpEnabled = hud::GetElementSettings(hud::HELP_TEXT).enabled;
+    UpdateHudTextTexture(g_cinemaSubtitleTexture, textState.brief, 2, textState.revision << 4);
+    UpdateHudTextTexture(g_cinemaHelpTexture, helpEnabled ? textState.help : std::u16string(),
+                         3, (textState.revision << 4) | (helpEnabled ? 1u : 0u));
+    static bool sHelpLogged = false;
+    if (!sHelpLogged && g_cinemaHelpTexture.visible) {
+        sHelpLogged = true;
+        LOGI("[cinema3d] help box shown in the subtitle band (%zu chars)", textState.help.size());
     }
-    UpdateHudTextTexture(g_briefTextTexture, smallText, 0, textState.revision << 4);
 
     glViewport(0, 0, targetWidth, targetHeight);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -12491,12 +12512,23 @@ void DrawCinemaOverlay(int targetWidth, int targetHeight, unsigned fadeRgba,
     glUniform1i(g_cinemaOverlayTextureUniform, 0);
 
     const auto drawText = [&] {
-        if (!g_briefTextTexture.visible || !g_briefTextTexture.texture) return;
-        glBindTexture(GL_TEXTURE_2D, g_briefTextTexture.texture);
-        glUniform1f(g_cinemaOverlayUseTextureUniform, 1.0f);
-        glUniform4f(g_cinemaOverlayDestUniform, kCinemaSubtitleX, kCinemaSubtitleY,
-                    kCinemaSubtitleW, kCinemaSubtitleH);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        float helpY = kCinemaSubtitleY;
+        if (g_cinemaSubtitleTexture.visible && g_cinemaSubtitleTexture.texture) {
+            glBindTexture(GL_TEXTURE_2D, g_cinemaSubtitleTexture.texture);
+            glUniform1f(g_cinemaOverlayUseTextureUniform, 1.0f);
+            glUniform4f(g_cinemaOverlayDestUniform, kCinemaSubtitleX, kCinemaSubtitleY,
+                        kCinemaSubtitleW, kCinemaSubtitleH);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            helpY = kCinemaSubtitleY + g_cinemaSubtitleTexture.contentBottom * kCinemaSubtitleH +
+                    kCinemaHelpGapM / kCinemaTotalH;
+        }
+        if (g_cinemaHelpTexture.visible && g_cinemaHelpTexture.texture) {
+            glBindTexture(GL_TEXTURE_2D, g_cinemaHelpTexture.texture);
+            glUniform1f(g_cinemaOverlayUseTextureUniform, 1.0f);
+            glUniform4f(g_cinemaOverlayDestUniform, kCinemaSubtitleX, helpY,
+                        kCinemaSubtitleW, kCinemaSubtitleH);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
     };
     const auto drawFade = [&] {
         const unsigned alpha = (fadeRgba >> 24) & 0xffu;

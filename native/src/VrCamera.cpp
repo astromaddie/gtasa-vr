@@ -3196,6 +3196,24 @@ bool MobileMenuOpen() {
            *reinterpret_cast<void* const*>(menu + 0x30) != nullptr;
 }
 
+// The mobile tutorial/help box text (CWidgetHelpText's queue), or nullptr when
+// none is up. Ten retail help queue entries, each 0x334 bytes; the first 800
+// bytes of an entry are GxtChar[400]. Prefer the first non-empty entry. The
+// queue is filled by the script whether or not anything is drawing it, so it
+// can be read in a cinema frame too.
+const std::int16_t* CurrentHelpText() {
+    if (!g.CWidgetHelpText_m_pInstance||!*g.CWidgetHelpText_m_pInstance)
+        return nullptr;
+    const auto* widget=static_cast<const std::uint8_t*>(
+        *g.CWidgetHelpText_m_pInstance);
+    for (int slot=0;slot<10;++slot) {
+        const auto* candidate=reinterpret_cast<const std::int16_t*>(
+            widget+0xcc+slot*0x334);
+        if (candidate[0]!=0) return candidate;
+    }
+    return nullptr;
+}
+
 #ifdef SAVR_STEAM_FRAME
 // The 2D layer of a 3D cinema frame (see DrawCinemaOverlay in Xr.cpp). The eye
 // renders hold no 2D; the stock 2D pass lands on the flat surface that is not
@@ -3211,8 +3229,11 @@ void PublishCinemaOverlayState() {
         g.CMessages_Display(1);
         g.CMessages_Display(0);
     }
+    // The tutorial help box is published too (it used to be passed as nullptr,
+    // so the opening cutscenes' tooltips never reached the cinema). It is drawn
+    // in the band under the picture next to the subtitles, see DrawCinemaOverlay.
     xr::PublishHudText(g.CHud_m_Message, 400, g.CHud_m_BigMessage, 8, 128,
-                       nullptr, 0);
+                       CurrentHelpText(), 400);
     xr::PublishMissionTimersText("");
     unsigned int fade = 0;
     if (g.CDraw_FadeValue && g.CDraw_FadeRed && g.CDraw_FadeGreen &&
@@ -20895,21 +20916,7 @@ void RenderGameplayHudPass() {
     // CMessages::Display has now expanded numbers, inserted strings and copied
     // the final GXT text into CHud. Publish those characters directly instead
     // of asking the OpenXR compositor to discover them in a screenshot crop.
-    const std::int16_t* helpText=nullptr;
-    if (g.CWidgetHelpText_m_pInstance&&*g.CWidgetHelpText_m_pInstance) {
-        const auto* widget=static_cast<const std::uint8_t*>(
-            *g.CWidgetHelpText_m_pInstance);
-        // Ten retail help queue entries, each 0x334 bytes. The first 800 bytes
-        // of an entry are GxtChar[400]. Prefer the first non-empty entry.
-        for (int slot=0;slot<10;++slot) {
-            const auto* candidate=reinterpret_cast<const std::int16_t*>(
-                widget+0xcc+slot*0x334);
-            if (candidate[0]!=0) {
-                helpText=candidate;
-                break;
-            }
-        }
-    }
+    const std::int16_t* helpText=CurrentHelpText();
     static bool sourcesLogged=false;
     if (!sourcesLogged) {
         sourcesLogged=true;

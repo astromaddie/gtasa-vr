@@ -194,7 +194,12 @@ public final class SavrApplication extends Application {
                 TextPaint.SUBPIXEL_TEXT_FLAG);
         paint.setColor(Color.WHITE);
         paint.setTypeface(style == 1 ? vrBigTypeface : vrHudTypeface);
-        paint.setTextSize((style == 1 ? 76.0f : 42.0f) * resolutionScale);
+        // Styles 2 and 3 are the 3D cinema's text band (Steam Frame): 2 = cutscene
+        // subtitles, 3 = the tutorial help box under them. Both are top-aligned,
+        // so the first line sits right under the picture instead of floating in
+        // the middle of the raster (which read as two lines too low).
+        final boolean bandText = style == 2 || style == 3;
+        paint.setTextSize((style == 1 ? 76.0f : style == 3 ? 34.0f : 42.0f) * resolutionScale);
         paint.setShadowLayer((style == 1 ? 4.0f : 3.0f) * resolutionScale,
                 2.0f * resolutionScale, 2.0f * resolutionScale, Color.BLACK);
 
@@ -205,11 +210,12 @@ public final class SavrApplication extends Application {
                 .setAlignment(Layout.Alignment.ALIGN_CENTER)
                 .setIncludePad(false)
                 .setEllipsize(TextUtils.TruncateAt.END)
-                .setMaxLines(style == 1 ? 2 : 5)
+                .setMaxLines(style == 1 ? 2 : style == 2 ? 3 : style == 3 ? 4 : 5)
                 .build();
         canvas.save();
-        canvas.translate(horizontalPadding,
-                Math.max(0.0f, (height - layout.getHeight()) * 0.5f));
+        canvas.translate(horizontalPadding, bandText
+                ? 8.0f * resolutionScale
+                : Math.max(0.0f, (height - layout.getHeight()) * 0.5f));
         layout.draw(canvas);
         canvas.restore();
 
