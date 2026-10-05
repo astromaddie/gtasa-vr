@@ -209,38 +209,50 @@ Host build, headset-unverified, and the frame rate is unmeasured.
 the runtime recommends 1728 x 1728 by default, or 2160 with SteamVR's per-app
 resolution override set).
 
-**Refresh rate.** `refresh_rate=120` in `vr_display.ini` (next to the other
-`vr_*.ini` files; written with the default on first launch). At session start
-the port enumerates `XR_FB_display_refresh_rate`, asks for the highest offered
-rate that is not above the setting and logs it:
+**An app can't change the refresh rate on the Frame.** SteamVR offers only one
+rate: the title's per-app preferred rate (or the display setting when the title
+has no entry), and only for launches through the Steam title. So the rate is set
+by the user once, in SteamVR's per-app settings in the headset. The GTASAVR
+title is set to 120 Hz and resolution 2160 (done 2026-10-05). Editing the
+settings file from SSH while SteamVR runs does nothing.
 
-    [vr] refresh: setting 120, offered {72, 90, 120}, requested 120
+**What the port does about it.** `refresh_rate=120` in `vr_display.ini` (next to
+the other `vr_*.ini` files; written with the default on first launch) is the
+rate it asks for. At session start it enumerates `XR_FB_display_refresh_rate`
+and logs
 
-The game loop is paced to the rate the compositor really runs (the pacer reads
-`xr::TargetFrameRateHz`, which follows `predictedDisplayPeriod`), and the port
-never asks for less than the compositor already runs, because the FB list can
-offer only one rate while the compositor does something else. GTA's own frame
-cap word is now 120 on the Frame build (the ceiling); the Quest build keeps 72.
+    [vr] refresh: setting 120, offered {120}, requested 120
 
-**Fallback while worn.** While the session is FOCUSED and you are in the world,
-the port counts game frames in 10 s windows. Two windows in a row below 90% of
-the rate step the request 120 -> 90 -> 72, each step logged
-(`[vr] refresh: two windows below 90% of 120 Hz; stepping down to 90 Hz`). Menus,
-loading and lost focus don't count. The step is per session, it isn't saved.
-If the compositor doesn't follow (see below), the fallback stops and says so.
+where requested is the highest offered rate not above the setting. It then makes
+at most one request per session, only for an offered rate, and only if the
+compositor runs below it (it never asks for less than the compositor already
+runs: the FB list can offer one rate while the compositor does something else).
+With the title set to 120 the log says no request was needed. The game loop is
+paced to the rate the compositor really runs (the pacer reads
+`xr::TargetFrameRateHz`, which follows `predictedDisplayPeriod`). GTA's own
+frame cap word is now 120 on the Frame build (the ceiling); the Quest build
+keeps 72. There is no automatic fallback ladder (a request for a lower rate
+can't take effect).
 
-**Per-app refresh.** SteamVR only offers the preferred rate set for that app in
-SteamVR's per-app settings, and only for launches through the Steam title. So
-the GTASAVR Steam title needs its per-app refresh rate set to 120 once, by
-whoever is wearing it, in SteamVR's settings in the headset. Editing the
-settings file from SSH while SteamVR runs does nothing. Without it the list is
-just that one rate, and the port runs at whatever it is.
+**Telling you when it can't hold the rate.** While the session is FOCUSED and
+you are in the world, the port counts game frames in 10 s windows. After two
+windows in a row below 90% of the display rate it logs once per session:
+
+    [vr] refresh: not holding 120 Hz (fps 71.0, 70.5); set GTASAVR to 72 Hz in SteamVR per-app settings
+
+The suggested rate is the highest of 120, 90 and 72 the measured fps would hold
+(72 at the lowest). Menus, loading and lost focus don't count windows.
+
+**Device check (unattended, nobody wearing it, 2026-10-05, build 19cf8a1).** It
+boots from the Steam title; `[vr] refresh: setting 120, offered {120},
+requested 120`; the eye resolution is 2160 at 100% (the runtime recommends 2160
+because the per-app resolution is set); the title/theater screen presents at
+121 Hz. The in-game frame rate is not measured yet, it needs a wearer.
 
 **Will it hold 120?** Unknown. SA in stereo at 2160 per eye is heavy and it
-very likely can't hold 120; the automatic fallback is there for that. Nothing
-here has been measured on the headset, so the default stays 120 per the
-standard. If a wear shows it can't, the default can move to 90 with the
-measurement written down.
+may well not hold 120 in the world. The default stays 120 per the standard; if
+a wear shows otherwise, the log line above says which per-app rate to set, and
+this doc should then record the measured rate.
 
 **Resolution.** The default is an absolute ~2160 x 2160 per eye, whatever the
 runtime recommends. At session start the port takes the runtime's recommended
@@ -263,12 +275,12 @@ holds the old 100% but no marker) is not treated as a choice and gets the
 computed default. Logs: `[vr] eye resolution`, `[vr] eye image WxH` and
 `[stereo] N eye-texture sets created WxH`.
 
-**Wear checklist for display.** 1) Set the GTASAVR title's per-app refresh to
-120 in SteamVR's settings, once. 2) Launch from Steam and look for the
-`[vr] refresh:` lines, and for `[vr] eye resolution` / `[vr] eye image` (about
-2160 per eye). 3) Note how long it
-takes the fallback to step down, if it does, and what the in-world frame rate
-is at each step.
+**Wear checklist for display.** 1) Set GTASAVR to 120 Hz in SteamVR's per-app
+settings (already done: 120 and resolution 2160). 2) Launch from Steam and look
+for the `[vr] refresh:` lines and for `[vr] eye resolution` / `[vr] eye image`
+(about 2160 per eye). 3) Play a few minutes in the world. If a
+`not holding` line appears, note the fps it reports and what you saw, and set
+the title to the rate it suggests.
 
 ## Round 3 (2026-10-05): laser dot, tooltips, subtitle gap, grip
 
@@ -457,7 +469,7 @@ above). Problems:
 
 What was done (all "host build, not worn"): 1 to 4 are under "Round 3" above,
 and 5 is "Display: 120 Hz and 2160 per eye". The first three need looking at
-on the headset; the display one needs the per-app refresh set first.
+on the headset; the display one needs the per-app refresh set first (done).
 
 Logs to look for: `[cutscene.scripted] scene on/off`, `[cinema3d] projection
 screen ON/OFF`, `[cinema3d] anchor ... subtitle band`, `[hud.front] panel`,
