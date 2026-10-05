@@ -674,6 +674,7 @@ struct PointerFrame {
     bool hit{false};
     bool pressed{false};
     XrVector3f origin{}, dir{}, hitPos{}, head{};
+    XrQuaternionf surfRot{0.0f, 0.0f, 0.0f, 1.0f};   // orientation of the surface that was hit
     bool headValid{false};
 };
 PointerFrame g_pointer;
@@ -5374,6 +5375,7 @@ void UpdatePointer(InputState& in, XrTime displayTime) {
     if (hitMenu && (!hitTheater || tM <= tT)) {
         g_pointer.hit = true;
         g_pointer.hitPos = PtAdd(origin, PtScale(dir, tM));
+        g_pointer.surfRot = menuPose.orientation;
         in.pointerMenu = true;
         in.menuU = uM;
         in.menuV = vM;
@@ -5394,6 +5396,7 @@ void UpdatePointer(InputState& in, XrTime displayTime) {
     } else if (hitTheater) {
         g_pointer.hit = true;
         g_pointer.hitPos = PtAdd(origin, PtScale(dir, tT));
+        g_pointer.surfRot = theaterPose.orientation;
         in.pointerValid = true;
         in.pointerU = uT;
         in.pointerV = vT;
@@ -5545,7 +5548,27 @@ int PresentPointerLayers(XrCompositionLayerQuad quads[2]) {
     const XrVector3f up{0.0f, 1.0f, 0.0f};
     const XrVector3f o = g_pointer.origin, d = g_pointer.dir;
     constexpr float kMissLength = 1.5f;
-    const XrVector3f end = g_pointer.hit ? g_pointer.hitPos : PtAdd(o, PtScale(d, kMissLength));
+    // The surface that was hit: its +Z in LOCAL space, flipped to face the head.
+    // The dot lies flat on it, lifted off by kDotLift, and the beam stops short of
+    // it. Both are needed because SteamVR depth-composites intersecting quads: a
+    // dot centred exactly on a tilted panel has half of it behind the panel (hidden,
+    // with a dithered crossing), and a beam that runs into the plane z-fights there too.
+    constexpr float kDotLift = 0.012f, kBeamBack = 0.02f, kBeamMin = 0.03f;
+    const XrVector3f surfZ = PtRotate(g_pointer.surfRot, {0.0f, 0.0f, 1.0f});
+    XrVector3f n = PtNorm(surfZ, PtScale(d, -1.0f));
+    {
+        const XrVector3f toHead = g_pointer.headValid ? PtSub(g_pointer.head, g_pointer.hitPos)
+                                                     : PtScale(d, -1.0f);
+        if (PtDot(n, toHead) < 0.0f) n = PtScale(n, -1.0f);
+    }
+    const float hitDist = std::sqrt(PtDot(PtSub(g_pointer.hitPos, o), PtSub(g_pointer.hitPos, o)));
+    XrVector3f end;
+    if (g_pointer.hit) {
+        const float back = kBeamBack / std::max(std::abs(PtDot(d, n)), 0.25f);
+        end = PtAdd(o, PtScale(d, std::max(hitDist - back, kBeamMin)));
+    } else {
+        end = PtAdd(o, PtScale(d, kMissLength));
+    }
     const float length = std::sqrt(PtDot(PtSub(end, o), PtSub(end, o)));
     int count = 0;
 
@@ -5561,15 +5584,15 @@ int PresentPointerLayers(XrCompositionLayerQuad quads[2]) {
         q.subImage.imageRect.extent = {rw, rh};
     };
 
-    if (length > 0.03f) {
+    if (length >= kBeamMin - 1e-4f) {
         // Strip along the ray, turned about the ray so its face looks at the head.
         const XrVector3f mid = PtScale(PtAdd(o, end), 0.5f);
         const XrVector3f x = PtNorm(PtSub(end, o), d);
         XrVector3f toHead = g_pointer.headValid ? PtSub(g_pointer.head, mid) : up;
-        XrVector3f n = PtSub(toHead, PtScale(x, PtDot(toHead, x)));
-        if (PtDot(n, n) < 1e-8f) n = PtCross(x, std::abs(x.y) < 0.9f ? up : XrVector3f{1.0f, 0.0f, 0.0f});
-        n = PtNorm(n, up);
-        const XrVector3f y = PtCross(n, x);
+        XrVector3f bn = PtSub(toHead, PtScale(x, PtDot(toHead, x)));
+        if (PtDot(bn, bn) < 1e-8f) bn = PtCross(x, std::abs(x.y) < 0.9f ? up : XrVector3f{1.0f, 0.0f, 0.0f});
+        bn = PtNorm(bn, up);
+        const XrVector3f y = PtCross(bn, x);
         const XrVector3f z = PtCross(x, y);
         baseQuad(quads[count], 128, kPointerBeamRow, 64, kPointerBeamRows);
         quads[count].pose.orientation = PtFromAxes(x, y, z);
@@ -5578,17 +5601,22 @@ int PresentPointerLayers(XrCompositionLayerQuad quads[2]) {
         ++count;
     }
     if (g_pointer.hit) {
-        // Dot facing the head and upright (world up), so it never rolls with the head.
-        XrVector3f z = g_pointer.headValid ? PtSub(g_pointer.head, end) : PtScale(d, -1.0f);
-        const float dist = std::sqrt(PtDot(z, z));
-        z = PtNorm(z, PtScale(d, -1.0f));
-        XrVector3f x = PtCross(up, z);
-        x = PtNorm(x, XrVector3f{1.0f, 0.0f, 0.0f});
-        const XrVector3f y = PtCross(z, x);
-        const float size = std::clamp((g_pointer.headValid ? dist : length) * 0.05f, 0.04f, 0.14f);
+        // Dot flat on the surface that was hit (its orientation, so it does not roll
+        // with the head), lifted toward the viewer. In-plane axes are the surface's own;
+        // when the face points away from the head, turn it 180 degrees about its up.
+        const XrVector3f sx = PtRotate(g_pointer.surfRot, {1.0f, 0.0f, 0.0f});
+        const XrVector3f sy = PtRotate(g_pointer.surfRot, {0.0f, 1.0f, 0.0f});
+        const bool flipped = PtDot(surfZ, n) < 0.0f;
+        const XrVector3f x = flipped ? PtScale(sx, -1.0f) : sx;
+        const XrVector3f y = sy;
+        const XrVector3f z = n;
+        const float dist = g_pointer.headValid
+            ? std::sqrt(PtDot(PtSub(g_pointer.head, g_pointer.hitPos), PtSub(g_pointer.head, g_pointer.hitPos)))
+            : length;
+        const float size = std::clamp(dist * 0.05f, 0.04f, 0.14f);
         baseQuad(quads[count], g_pointer.pressed ? 64 : 0, 0, 64, 64);
         quads[count].pose.orientation = PtFromAxes(x, y, z);
-        quads[count].pose.position = end;
+        quads[count].pose.position = PtAdd(g_pointer.hitPos, PtScale(n, kDotLift));
         quads[count].size = {size, size};
         ++count;
     }
