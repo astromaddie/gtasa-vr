@@ -203,7 +203,11 @@ lamp, a wet road or through a scope.
 
 ## Display: 120 Hz and 2160 per eye
 
-Host build, headset-unverified, and the frame rate is unmeasured.
+Checked on the Frame with nobody wearing it (a98715f, 2026-10-05): SteamVR
+offered `{120}` and the log said so, AUTO picked 2160 per eye (100%, because the
+per-app resolution is 2160), and the title screen presented a steady 120 Hz
+for 75 s. The in-world frame rate needs someone wearing it, so it's still
+unmeasured.
 
 **Target.** 120 Hz at about 2160 x 2160 per eye (the panel's own resolution;
 the runtime recommends 1728 x 1728 by default, or 2160 with SteamVR's per-app
