@@ -2911,29 +2911,30 @@ void ResolveDiagnosticExtensions() {
 #ifdef SAVR_STEAM_FRAME
 // ---------------------------------------------------------------------------
 // Display rate (Steam Frame, standard section 9). The target is 120 Hz at ~2160
-// per eye. `refresh_rate` in vr_display.ini (default 120) is the ceiling; the
-// rate requested is the highest one XR_FB_display_refresh_rate offers that is not
-// above it. SteamVR only offers the per-app preferred rate set in its per-app
-// settings for this Steam title, so the list may hold a single entry; the real
-// rate is whatever the compositor runs (xrWaitFrame's predictedDisplayPeriod),
-// and the game loop is paced to that, never above it.
+// per eye. An app can't change the refresh rate on the Frame: SteamVR offers only
+// the title's per-app preferred rate (or the display setting without one), so the
+// user sets it once in SteamVR's per-app settings. `refresh_rate` in vr_display.ini
+// (default 120) is the rate this port asks for, at most once per session and only
+// if XR_FB_display_refresh_rate offers it (the highest offered rate not above the
+// setting), and never when the compositor already runs at or above it. The real
+// rate is whatever the compositor runs (xrWaitFrame's predictedDisplayPeriod), and
+// the game loop is paced to that.
 //
-// Fallback while worn: two consecutive 10 s windows with the game below 90% of the
-// rate step the request 120 -> 90 -> 72. Unmeasured on a headset.
+// No fallback ladder, since a request for a lower rate can't take effect. Instead,
+// after two consecutive 10 s windows below 90% of the display rate while worn, it
+// logs once which per-app rate to set.
 // ---------------------------------------------------------------------------
 constexpr int kRefreshSettingDefault = 120;
 constexpr double kRefreshWindowSeconds = 10.0;
 constexpr float kRefreshWindowFraction = 0.90f;
-constexpr int kRefreshStepsHz[3] = {120, 90, 72};
+constexpr int kAdviceRatesHz[3] = {120, 90, 72};
 
 std::atomic<float> g_targetHz{0.0f};      // pacing target for the game loop
 std::vector<float> g_offeredRates;
 float g_compositorHz = 0.0f;              // from predictedDisplayPeriod
 bool  g_compositorStable = false;
-bool  g_refreshFallbackActive = false;    // a fallback request is in flight
-bool  g_refreshFloor = false;             // nowhere lower to go / request refused
-XrTime g_refreshFallbackCheckAt = 0;
-float g_refreshFallbackFromHz = 0.0f;
+bool  g_refreshRequestDone = false;       // the single request has been decided
+bool  g_refreshAdviceLogged = false;
 
 int LoadRefreshSettingImpl() {
     int value = kRefreshSettingDefault;
@@ -3060,31 +3061,17 @@ void InitializeSessionDiagnostics() {
     }
 }
 
+#ifdef SAVR_STEAM_FRAME
+// The Frame build asks at most once per session, from RefreshPolicyTick, once the
+// compositor's own rate is measured. The session-state hooks that used to ask at
+// begin/focus and retry every telemetry tick do nothing here.
+XrResult RequestTargetDisplayRefresh(const char*) { return XR_SUCCESS; }
+#else
 XrResult RequestTargetDisplayRefresh(const char* phase) {
     if (!g_hasDisplayRefreshExt || !g_requestDisplayRefreshRate ||
         !g_displayRefreshRequestSupported || s.session == XR_NULL_HANDLE) {
         return XR_ERROR_FUNCTION_UNSUPPORTED;
     }
-#ifdef SAVR_STEAM_FRAME
-    // The compositor's own period is the truth: the FB list can offer only 90
-    // while it runs 120, and asking for 90 then would downgrade it. Wait until
-    // the period is measured, and never request below what it already runs.
-    if (!g_refreshFallbackActive) {
-        if (!g_compositorStable) return XR_SUCCESS;   // retried on the next tick
-        if (g_compositorHz > g_requestedDisplayRefreshHz * 1.04f) {
-            static bool logged = false;
-            if (!logged) {
-                logged = true;
-                LOGI("[vr] refresh: compositor already runs %.1f Hz, above the %.0f Hz "
-                     "this request would ask for; not requesting (no downgrade)",
-                     g_compositorHz, g_requestedDisplayRefreshHz);
-            }
-            g_displayRefreshRetryCount = 8;
-            return XR_SUCCESS;
-        }
-    }
-#endif
-
     const XrResult requestResult = g_requestDisplayRefreshRate(
         s.session, g_requestedDisplayRefreshHz);
     float current = 0.0f;
@@ -3104,21 +3091,40 @@ XrResult RequestTargetDisplayRefresh(const char* phase) {
          static_cast<int>(getResult), g_displayRefreshRetryCount);
     return requestResult;
 }
+#endif
 
 #ifdef SAVR_STEAM_FRAME
-// Next rung of the fallback ladder below `fromHz`, snapped to an offered rate.
-// Returns 0 when there is nothing lower.
-float NextFallbackRate(float fromHz) {
-    for (int step : kRefreshStepsHz) {
-        if (static_cast<float>(step) >= fromHz - 0.5f) continue;
-        const float pick = PickRefreshRate(static_cast<float>(step));
-        if (pick < fromHz - 0.5f) return pick;
+// The one request: only for a rate the runtime offers, only if the compositor runs
+// below it. Decided once the compositor's own rate is measured.
+void RequestRefreshOnce() {
+    g_refreshRequestDone = true;
+    if (!g_hasDisplayRefreshExt || !g_requestDisplayRefreshRate ||
+        !g_displayRefreshRequestSupported || s.session == XR_NULL_HANDLE) {
+        LOGI("[vr] refresh: not requesting (display refresh extension unavailable); "
+             "the compositor runs %.0f Hz", g_compositorHz);
+        return;
     }
-    return 0.0f;
+    bool offered = false;
+    for (float r : g_offeredRates)
+        if (std::fabs(r - g_requestedDisplayRefreshHz) < 0.5f) offered = true;
+    if (!offered) {
+        LOGI("[vr] refresh: not requesting %.0f Hz, it isn't offered; the compositor runs %.0f Hz",
+             g_requestedDisplayRefreshHz, g_compositorHz);
+        return;
+    }
+    if (g_compositorHz >= g_requestedDisplayRefreshHz * 0.96f) {
+        LOGI("[vr] refresh: compositor already runs %.0f Hz (requested %.0f); no request needed",
+             g_compositorHz, g_requestedDisplayRefreshHz);
+        return;
+    }
+    const XrResult rc = g_requestDisplayRefreshRate(s.session, g_requestedDisplayRefreshHz);
+    LOGI("[vr] refresh: requested %.0f Hz once (compositor ran %.0f Hz), rc=%d",
+         g_requestedDisplayRefreshHz, g_compositorHz, static_cast<int>(rc));
 }
 
 // Once per presented frame, on the present thread. Tracks the compositor's real
-// rate, keeps the game loop paced to it, and runs the 10 s performance windows.
+// rate, keeps the game loop paced to it, makes the single request, and runs the
+// 10 s performance windows.
 void RefreshPolicyTick(XrTime now, XrDuration predictedPeriod, std::uint32_t gameFrames) {
     // 1. compositor rate, from predictedDisplayPeriod
     static float ema = 0.0f;
@@ -3145,26 +3151,17 @@ void RefreshPolicyTick(XrTime now, XrDuration predictedPeriod, std::uint32_t gam
             LOGI("[vr] refresh: compositor runs %.0f Hz (predictedDisplayPeriod); "
                  "pacing the game at %.0f Hz (was %.0f)", snapped, snapped, target);
         }
+        if (!g_refreshRequestDone) RequestRefreshOnce();
     }
 
-    // 3. did a fallback request take?
-    if (g_refreshFallbackActive && now >= g_refreshFallbackCheckAt) {
-        g_refreshFallbackActive = false;
-        if (g_compositorHz > g_refreshFallbackFromHz - 2.0f) {
-            g_refreshFloor = true;
-            LOGW("[vr] refresh: asked for %.0f Hz but the compositor still runs %.0f Hz; "
-                 "SteamVR only offers the per-app rate set for this title, so the fallback "
-                 "ends here", g_requestedDisplayRefreshHz, g_compositorHz);
-        }
-    }
-
-    // 4. 10 s performance windows (worn, in the world only)
+    // 3. 10 s performance windows (worn, in the world only): advice, once.
     static XrTime windowStart = 0;
     static std::uint32_t windowFrames = 0;
     static bool windowClean = true;
     static int badWindows = 0;
+    static float badFps[2] = {0.0f, 0.0f};
     const bool counting = s.sessionState == XR_SESSION_STATE_FOCUSED && !s.theaterMode &&
-        g_compositorStable && !g_refreshFallbackActive && !g_refreshFloor;
+        g_compositorStable && !g_refreshAdviceLogged;
     if (windowStart == 0) {
         windowStart = now; windowFrames = gameFrames; windowClean = true;
     }
@@ -3175,27 +3172,23 @@ void RefreshPolicyTick(XrTime now, XrDuration predictedPeriod, std::uint32_t gam
         const float fps = static_cast<float>((gameFrames - windowFrames) / elapsed);
         if (windowClean && rate > 1.0f) {
             const bool slow = fps < kRefreshWindowFraction * rate;
-            badWindows = slow ? badWindows + 1 : 0;
-            LOGI("[vr] refresh: 10 s window %.1f fps against %.0f Hz (%s, %d bad in a row)",
-                 fps, rate, slow ? "below 90%" : "ok", badWindows);
-            if (badWindows >= 2) {
+            LOGI("[vr] refresh: 10 s window %.1f fps against %.0f Hz (%s)",
+                 fps, rate, slow ? "below 90%" : "ok");
+            if (slow) {
+                badFps[badWindows & 1] = fps;
+                ++badWindows;
+            } else {
                 badWindows = 0;
-                const float next = NextFallbackRate(rate);
-                if (next > 0.0f) {
-                    LOGW("[vr] refresh: two windows below 90%% of %.0f Hz; stepping down to %.0f Hz",
-                         rate, next);
-                    g_requestedDisplayRefreshHz = next;
-                    g_displayRefreshRetryCount = 0;
-                    g_refreshFallbackActive = true;
-                    g_refreshFallbackFromHz = g_compositorHz;
-                    g_refreshFallbackCheckAt = now + 12000000000LL;
-                    RequestTargetDisplayRefresh("fallback");
-                    g_displayRefreshRetryCount = 1;
-                } else {
-                    g_refreshFloor = true;
-                    LOGW("[vr] refresh: still below 90%% of %.0f Hz and nothing lower to step "
-                         "down to", rate);
-                }
+            }
+            if (badWindows >= 2) {
+                const float f0 = badFps[0], f1 = badFps[1];
+                const float held = 0.5f * (f0 + f1);
+                int advise = kAdviceRatesHz[2];
+                for (int hz : kAdviceRatesHz)
+                    if (held >= kRefreshWindowFraction * static_cast<float>(hz)) { advise = hz; break; }
+                g_refreshAdviceLogged = true;
+                LOGW("[vr] refresh: not holding %.0f Hz (fps %.1f, %.1f); set GTASAVR to %d Hz "
+                     "in SteamVR per-app settings", rate, f0, f1, advise);
             }
         } else {
             badWindows = 0;   // a menu, a load or a lost focus in the window: not counted
@@ -3231,35 +3224,22 @@ void QueryRuntimeDiagnostics() {
     // Quest can acknowledge a request before the panel actually switches.
     // Re-check once per telemetry tick and retry for a bounded eight seconds,
     // matching the headset-validated Vice City implementation.
+#ifndef SAVR_STEAM_FRAME
     if (s.sessionState == XR_SESSION_STATE_FOCUSED &&
         g_displayRefreshRequestSupported &&
         g_displayRefreshRetryCount < 8) {
-        bool confirmed = g_displayRefreshValid &&
+        const bool confirmed = g_displayRefreshValid &&
             std::fabs(g_displayRefreshHz - g_requestedDisplayRefreshHz) < 0.5f;
-#ifdef SAVR_STEAM_FRAME
-        // The compositor's own period decides too: the FB query can lag behind it
-        // or list a different rate (see RequestTargetDisplayRefresh).
-        if (g_compositorStable &&
-            std::fabs(g_compositorHz - g_requestedDisplayRefreshHz) <
-                0.04f * g_requestedDisplayRefreshHz)
-            confirmed = true;
-#endif
         if (confirmed) {
             LOGI("[perf.refresh] confirmed %.1fHz after %d request(s)",
                  g_displayRefreshHz, g_displayRefreshRetryCount);
             g_displayRefreshRetryCount = 8;
         } else {
-            const XrResult retryResult = RequestTargetDisplayRefresh("retry");
-            bool counted = true;
-#ifdef SAVR_STEAM_FRAME
-            // Waiting for the compositor period to settle is not a failed try.
-            if (retryResult == XR_SUCCESS && !g_compositorStable) counted = false;
-#else
-            (void)retryResult;
-#endif
-            if (counted) ++g_displayRefreshRetryCount;
+            RequestTargetDisplayRefresh("retry");
+            ++g_displayRefreshRetryCount;
         }
     }
+#endif
 
     g_runtimeCpuValid = false;
     g_runtimeGpuValid = false;
@@ -13140,10 +13120,12 @@ bool RenderStereoEyeProjection(XrCompositionLayerProjection& layer,
             (hudSource||g_signalPercent.load(std::memory_order_relaxed)>=0))
             DrawHudComposite(hudSource,chain.width,chain.height,
                              hud::ShouldRenderClassicHud(),e);
+#ifdef SAVR_STEAM_FRAME
         if (cinemaSlot)
             DrawCinemaOverlay(chain.width, chain.height,
                               g_stereoCinemaFade[set].load(std::memory_order_relaxed),
                               g_stereoCinemaSubsBefore[set].load(std::memory_order_relaxed));
+#endif
         if (!cinemaSlot) DrawHandsForEye(
             rp, e, chain.width, chain.height,
             g_stereoEyeDepth[set][e].load(std::memory_order_relaxed),
