@@ -524,3 +524,21 @@ No migrated APK has been signed or installed. The previous personal signing
 key is absent from the build folder, and the Frame went offline. Wear
 acceptance (live adjustment, panel readability, pause/resume, recentring,
 aiming, and vehicle/first-person transitions) remains pending.
+
+### Signing-key recovery and APK writer (2026-10-07)
+
+The Steam library title uses Lepton's APK-hash rebake path. The installed launcher
+compares the APK hash (`lepton:166-180`), clears only `compatdata/<appid>/baked`
+(`liblepton.sh:64-76`, `baking.sh:27-36`), and reinstates the persistent
+`internal/<package>` data link (`mounting.sh:502-513,629-635`). A newly generated
+personal key can therefore update this title through Steam. This exception does
+not apply to `adb install -r` in an existing Quest/development container. Keep keys
+under `~/.local/share/gtasavr-builder/signing`, outside disposable build output;
+back up saves/settings and verify launch/data retention after replacement.
+
+The streaming APK writer now retains known entry sizes, strips source ZIP64
+size/offset fields and writes classic unsigned 32-bit ZIP headers. This avoids
+forced ZIP64 local headers and Python's unnecessary 2 GiB offset conversion,
+which caused Android zipalign to reject a valid 2.6 GiB retail APK rewrite.
+`tools/test-apk-assembly.py` exercises the production copier, preserved contents,
+local/central headers, Android zipalign and the platform-specific signer guard.

@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import zipfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterable
@@ -217,11 +218,41 @@ def safe_member(name: str) -> PurePosixPath:
     return member
 
 
+@contextmanager
+def apk_zip_writer(destination: Path):
+    # APK signing/alignment uses classic ZIP. Python's conservative 2 GiB ZIP64
+    # threshold would convert a valid 2.6 GiB retail APK into an incompatible ZIP64
+    # archive. Its classic fields are unsigned 32-bit, so stream up to that actual
+    # limit and reject ZIP64 instead. This builder writes archives synchronously.
+    previous_limit = zipfile.ZIP64_LIMIT
+    zipfile.ZIP64_LIMIT = (1 << 32) - 1
+    try:
+        with zipfile.ZipFile(destination, "w", allowZip64=False) as archive:
+            yield archive
+    finally:
+        zipfile.ZIP64_LIMIT = previous_limit
+
+
 def clone_zip_info(source: zipfile.ZipInfo) -> zipfile.ZipInfo:
     target = zipfile.ZipInfo(source.filename, date_time=source.date_time)
     target.compress_type = source.compress_type
     target.comment = source.comment
-    target.extra = source.extra
+    # ZIP64 sizes/offsets describe the source archive; never copy them into a new APK.
+    extra = bytearray()
+    cursor = 0
+    while cursor < len(source.extra):
+        if cursor + 4 > len(source.extra):
+            raise KitError(f"truncated ZIP extra field: {source.filename}")
+        tag = int.from_bytes(source.extra[cursor:cursor + 2], "little")
+        size = int.from_bytes(source.extra[cursor + 2:cursor + 4], "little")
+        end = cursor + 4 + size
+        if end > len(source.extra):
+            raise KitError(f"truncated ZIP extra field: {source.filename}")
+        if tag != 1:
+            extra.extend(source.extra[cursor:end])
+        cursor = end
+    target.extra = bytes(extra)
+    target.file_size = source.file_size
     target.internal_attr = source.internal_attr
     target.external_attr = source.external_attr
     target.create_system = source.create_system
@@ -237,7 +268,7 @@ def copy_zip_stream(
 ) -> None:
     info = destination_info or clone_zip_info(source_info)
     with source_archive.open(source_info, "r") as source, destination_archive.open(
-        info, "w", force_zip64=True
+        info, "w", force_zip64=False
     ) as destination:
         shutil.copyfileobj(source, destination, length=1024 * 1024)
 
@@ -1036,7 +1067,7 @@ def patch_manifest(text: str, steam_frame: bool = False) -> str:
 
 
 def create_manifest_stub(base: Path, destination: Path) -> None:
-    with zipfile.ZipFile(base) as source, zipfile.ZipFile(destination, "w", allowZip64=True) as output:
+    with zipfile.ZipFile(base) as source, apk_zip_writer(destination) as output:
         for info in source.infolist():
             lower = info.filename.lower()
             if lower in {"androidmanifest.xml", "resources.arsc"} or lower.startswith("res/"):
@@ -1112,9 +1143,7 @@ def rewrite_apk(
 ) -> None:
     pending = dict(replacements)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(source) as input_apk, zipfile.ZipFile(
-        destination, "w", allowZip64=True
-    ) as output_apk:
+    with zipfile.ZipFile(source) as input_apk, apk_zip_writer(destination) as output_apk:
         existing = {info.filename for info in input_apk.infolist()}
         collision = sorted(set(additions) & existing)
         if collision:
@@ -1710,7 +1739,10 @@ def main() -> int:
         if (args.steam_frame and audio is not None)
         else (),
     )
-    if args.personal_update_source and output_signer != package.signer_sha256:
+    # Steam-title Lepton launches rebuild the package bake when the APK hash
+    # changes and relink persistent compatdata/internal. A new signer is safe on
+    # that route; adb install -r on Quest still requires the original signer.
+    if args.personal_update_source and not args.steam_frame and output_signer != package.signer_sha256:
         raise KitError(
             "the supplied update keystore does not match the existing personal APK set. "
             f"Input signer: {package.signer_sha256}; output signer: {output_signer}"
