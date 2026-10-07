@@ -542,3 +542,39 @@ forced ZIP64 local headers and Python's unnecessary 2 GiB offset conversion,
 which caused Android zipalign to reject a valid 2.6 GiB retail APK rewrite.
 `tools/test-apk-assembly.py` exercises the production copier, preserved contents,
 local/central headers, Android zipalign and the platform-specific signer guard.
+
+## Camera migration Steam delivery (2026-10-07)
+
+The camera source is `e7e8cb2ae8413412ba561689f8b014fd16dce484`; packaging-only
+repair `313999d742bc3f21c891a3e4bfd74e0d6011729d` handles classic ZIP headers and
+the verified Steam-title rebake route. The locally signed/aligned ARM64 APK
+preserves all 1,187 unchanged non-signature payload entries, including the
+original manifest and retail libGame.so; all 11 intended replacements match
+the built inputs.
+
+Installed `~/devkit-game/GTASAVR/GTASA-VR.apk` SHA-256:
+`ec095a4a404348fcd3b2b31c52b3e5e58abd74e64ad4584a0d1e67946c8bf43d`.
+After booking and an idle launch gate, the existing Steam title (raw app ID
+3627321462) ran for 60 seconds through normal Lepton, without adb installation.
+The new certificate worked; the log confirms 2160x2160 eye targets, 120 Hz,
+Frame/Index/Touch profile suggestions accepted (27/18/21 bindings), session
+READY/SYNCHRONIZED, and game frames. Only the task's container was stopped.
+Documents configuration and all saves retain their pre-run hashes and modes.
+
+The old key's loss is not evidence of a deleted cache's cause. A regenerated
+build cannot recreate that key, but same-certificate Android in-place update
+rules are not the normal Frame rebake route. The installed Lepton launcher was
+inspected first: APK hash changes clear baked package state while retaining and
+relinking persistent internal data. The builder now stores its key outside
+disposable build output. No credential is in the package evidence.
+
+| Current increment | Evidence level |
+| --- | --- |
+| ARM64 package, new-signer Steam rebake, game frames and data retention | verified unattended |
+| Live paused camera preview, physical modifier/remaps, tracked recentring and comfort | not worn; preview not captured |
+
+Wear checks: live settings and grip/right-stick adjustments; neutral release;
+right-side panel; pause/resume/recentre; LT target, RT fire and owned-weapon
+cycling on bumpers; first-person actions and vehicle transitions. Evidence:
+task output `device-camera-migration/GTASAVR/lepton-steamlaunch.log` and the
+cross-port report. This smoke run does not certify physical controls or visuals.
