@@ -14,6 +14,7 @@ endif()
 option(SAVR_STEAM_FRAME "Steam Frame (Lepton) build variant" OFF)
 if(SAVR_STEAM_FRAME)
     add_compile_definitions(SAVR_STEAM_FRAME=1)
+    enable_language(C)
 endif()
 
 # Keep the producer-backpressure implementation available in normal builds.
@@ -107,6 +108,12 @@ set(AIRCRAFT_HLOD_PACK
     "${CMAKE_BINARY_DIR}/../aircraft-hlod-global/aircraft.hlod")
 set_property(SOURCE src/AircraftHlodData.S PROPERTY OBJECT_DEPENDS
     "${AIRCRAFT_HLOD_PACK}")
+
+if(SAVR_STEAM_FRAME)
+    target_sources(savr PRIVATE src/CameraComfort.cpp
+        vendor/sfvr/src/sfvr_adjust.c vendor/sfvr/src/sfvr_camera.c)
+    target_include_directories(savr PRIVATE vendor/sfvr/include)
+endif()
 
 target_include_directories(savr PRIVATE src ${OPENXR_DIR}/include)
 

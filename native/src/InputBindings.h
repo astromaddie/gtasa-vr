@@ -12,6 +12,9 @@ namespace savr::xr::bindings {
 enum class Act {
     Stick, Trigger, Grip, A, B, X, Y, Menu, View, StickClick, Thumbrest,
     Aim, GripPose, Haptic,
+#ifdef SAVR_STEAM_FRAME
+    Bumper, DpadUp, DpadDown, DpadLeft, DpadRight, CameraGrip,
+#endif
 };
 
 enum class Kind { Bool, Float, Vec2, Pose, Haptic };
@@ -41,6 +44,22 @@ inline constexpr ActionDef kActions[] = {
     {Act::GripPose,   Kind::Pose,   true,  "grippose",   "grippose"},
     {Act::Haptic,     Kind::Haptic, true,  "haptic",     "haptic"},
 };
+// Frame gamepad additions do not alter the inherited Quest action set.
+#ifdef SAVR_STEAM_FRAME
+    // Extra actions are declared in kFrameActions below.
+#endif
+
+#ifdef SAVR_STEAM_FRAME
+inline constexpr ActionDef kFrameActions[] = {
+    {Act::Bumper,Kind::Bool,true,"bumper","Gamepad bumper"},
+    {Act::DpadUp,Kind::Bool,false,"dpad_up","D-pad up"},
+    {Act::DpadDown,Kind::Bool,false,"dpad_down","D-pad down"},
+    {Act::DpadLeft,Kind::Bool,false,"dpad_left","D-pad left"},
+    {Act::DpadRight,Kind::Bool,false,"dpad_right","D-pad right"},
+    {Act::CameraGrip,Kind::Bool,false,"camera_grip_left","Left grip camera adjustment"},
+};
+#endif
+
 // ACTIONS-END
 
 struct Binding {
@@ -62,6 +81,15 @@ inline constexpr char kProfileTouch[] =
 // There is no thumbrest.
 // FRAME-BEGIN
 inline constexpr Binding kFrameBindings[] = {
+#ifdef SAVR_STEAM_FRAME
+    {Act::Bumper,"/user/hand/left/input/bumper/click"},
+    {Act::Bumper,"/user/hand/right/input/bumper/click"},
+    {Act::DpadUp,"/user/hand/left/input/dpad_up/click"},
+    {Act::DpadDown,"/user/hand/left/input/dpad_down/click"},
+    {Act::DpadLeft,"/user/hand/left/input/dpad_left/click"},
+    {Act::DpadRight,"/user/hand/left/input/dpad_right/click"},
+    {Act::CameraGrip,"/user/hand/left/input/squeeze/value"},
+#endif
     {Act::Stick,      "/user/hand/left/input/thumbstick"},
     {Act::Stick,      "/user/hand/right/input/thumbstick"},
     {Act::Trigger,    "/user/hand/left/input/trigger/value"},

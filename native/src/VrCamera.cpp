@@ -18,6 +18,10 @@
 #include "Hydraulics.h"
 #include "Jetpack.h"
 #include "Locomotion.h"
+#ifdef SAVR_STEAM_FRAME
+#include "CameraComfort.h"
+#include <sfvr/sfvr_camera.h>
+#endif
 #include "Log.h"
 #include "RenderDiagnostics.h"
 #include "PerfTelemetry.h"
@@ -2575,7 +2579,11 @@ CamBasis BuildVrCamera(const CamBasis& base, V3 relPos, const Q& relOri) {
     out.right   = left;
     out.forward = forward;
     out.up      = up;
+#ifdef SAVR_STEAM_FRAME
+    out.pos = base.pos + TrackingToGame(base, relPos)*comfort::UnitsPerMeter();
+#else
     out.pos     = base.pos + TrackingToGame(base, relPos);
+#endif
     return out;
 }
 
@@ -2802,13 +2810,20 @@ bool HolsterWeaponMatrix(int point, int weaponType, RwMat& out) {
     m.right = g_vrBase.up * -1.0f;                         // SA weapon local +X: barrel down
     m.fwd   = g_vrBase.forward * (meta->behind ? 1.0f : -1.0f);
     m.up    = bodyRight * (meta->behind ? 1.0f : -1.0f);
-    m.pos   = g_vrBase.pos + bodyRight * meta->lateral +
-              g_vrBase.up * meta->vertical + g_vrBase.forward * meta->depth;
+    m.pos   = g_vrBase.pos + (bodyRight*meta->lateral+g_vrBase.up*meta->vertical+g_vrBase.forward*meta->depth)
+#ifdef SAVR_STEAM_FRAME
+              *comfort::UnitsPerMeter()
+#endif
+              ;
 
     // The dedicated menu edits this pose per eWeaponType. Match the PC SA order:
     // rotate the model around its socket first, then offset along the final axes.
     const calib::HolsterCalib c = calib::SnapshotHolster(weaponType);
+    #ifdef SAVR_STEAM_FRAME
+    const float kUnitToMetres=.005f*comfort::UnitsPerMeter();
+#else
     constexpr float kUnitToMetres = 0.005f;
+#endif
     constexpr float kHalfDegToRad = 0.5f * 3.14159265358979323846f / 180.0f;
     const V3 socket = m.pos;
     m = MatMul34(m, SetRotate34(c.rotX * kHalfDegToRad, 0.0f, 0.0f));
@@ -2828,7 +2843,11 @@ void PoseToGame(const float p[3], const float o[4], V3& gpos, Q& gori) {
     const Q  xo{o[0], o[1], o[2], o[3]};
     V3 rp; Q ro;
     RelativePose(xp, xo, rp, ro);
+#ifdef SAVR_STEAM_FRAME
+    gpos = g_vrBase.pos + TrackingToGame(g_vrBase,rp)*comfort::UnitsPerMeter();
+#else
     gpos = g_vrBase.pos + TrackingToGame(g_vrBase, rp);
+#endif
     gori = ro;   // origin-relative orientation; game axes come from TrackingToGame of its axes
 }
 
@@ -2875,7 +2894,11 @@ bool HandWeaponMatrixForPoseCalibrated(int hand, int weaponType,
     // not-yet-implemented two-handed support grip). At all-zero calib this reduces
     // to the authored base transform, i.e. identical to the pre-calibration look.
     constexpr float D2R = 0.01745329252f;
+#ifdef SAVR_STEAM_FRAME
+    const float OFS=.005f*comfort::UnitsPerMeter();
+#else
     constexpr float OFS = 0.005f;          // internal -> metres
+#endif
     constexpr float ROT = 0.5f * D2R;      // internal -> radians
 
     // BuildVrTrackedWeaponMatrix: (-right, -forward, +up), offset along the basis.
@@ -2939,7 +2962,11 @@ bool WeaponMatrixToTracking(const RwMat& matrix,
     const V3 delta{matrix.t[0] - g_vrBase.pos.x,
                    matrix.t[1] - g_vrBase.pos.y,
                    matrix.t[2] - g_vrBase.pos.z};
+#ifdef SAVR_STEAM_FRAME
+    const V3 localPos = g_origin.pos + GameVectorToTracking(delta)*(1.f/comfort::UnitsPerMeter());
+#else
     const V3 localPos = g_origin.pos + GameVectorToTracking(delta);
+#endif
     const V3 localRight = GameVectorToTracking({matrix.r[0], matrix.r[1], matrix.r[2]});
     const V3 localForward = GameVectorToTracking({matrix.u[0], matrix.u[1], matrix.u[2]});
     const V3 localUp = GameVectorToTracking({matrix.a[0], matrix.a[1], matrix.a[2]});
@@ -2958,7 +2985,11 @@ bool TrackingWeaponMatrix(const physicalweapon::TrackingPose& pose, RwMat& out) 
     const Q inv{-g_origin.ori.x, -g_origin.ori.y, -g_origin.ori.z, g_origin.ori.w};
     const V3 localPos{pose.position[0], pose.position[1], pose.position[2]};
     const V3 relPos = Rotate(inv, localPos - g_origin.pos);
+#ifdef SAVR_STEAM_FRAME
+    const V3 gamePos = g_vrBase.pos + TrackingToGame(g_vrBase,relPos)*comfort::UnitsPerMeter();
+#else
     const V3 gamePos = g_vrBase.pos + TrackingToGame(g_vrBase, relPos);
+#endif
     const auto AxisToGame = [&](const float axis[3]) {
         return TrackingToGame(g_vrBase, Rotate(inv, {axis[0], axis[1], axis[2]}));
     };
@@ -2974,7 +3005,11 @@ bool TrackingWeaponMatrix(const physicalweapon::TrackingPose& pose, RwMat& out) 
 V3 TrackingPointToGame(V3 localPoint) {
     const Q inv{-g_origin.ori.x, -g_origin.ori.y, -g_origin.ori.z, g_origin.ori.w};
     const V3 rel = Rotate(inv, localPoint - g_origin.pos);
+#ifdef SAVR_STEAM_FRAME
+    return g_vrBase.pos + TrackingToGame(g_vrBase,rel)*comfort::UnitsPerMeter();
+#else
     return g_vrBase.pos + TrackingToGame(g_vrBase, rel);
+#endif
 }
 
 V3 TrackingVectorToGame(V3 localVector) {
@@ -4279,7 +4314,11 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                                 ((in.thumbrest[0] || in.thumbrest[1]) &&
                                  !jetpack::IsActive());
                             const float rx =
-                                thumbrestOwnsTurn ? 0.0f : mappedTurnX;
+                                thumbrestOwnsTurn
+#ifdef SAVR_STEAM_FRAME
+                                || xr::IsMenuVisible() || (in.frameControls && overShoulder && in.triggers[0]>=.5f)
+#endif
+                                ? 0.0f : mappedTurnX;
                             const double now=NowMs();
                             static double previousTurnMs=now;
                             const float dt=static_cast<float>(
@@ -4298,7 +4337,11 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                                 g_snapLatched=false;
                                 constexpr float baseRate=2.0943951f; // 120 deg/s
                                 g_bodyYaw-=rx*baseRate*
-                                    (locomotion::GetTurnSensitivityPercent()/100.0f)*dt;
+                                    (locomotion::GetTurnSensitivityPercent()/100.0f)*dt
+#ifdef SAVR_STEAM_FRAME
+                                    *(locomotion::GetTurnMode()==locomotion::TURN_OFF?0.f:1.f)
+#endif
+                                    ;
                             }
                             if (locomotion::GetMovementMode()==
                                     locomotion::MOVEMENT_HEAD_TURN &&
@@ -4519,6 +4562,21 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
                                 pedPosition.x - fwd.x * osDist + right.x * kShoulder,
                                 pedPosition.y - fwd.y * osDist + right.y * kShoulder,
                                 pedPosition.z + osHeight};
+#ifdef SAVR_STEAM_FRAME
+                            // sfvr uses Y up; RenderWare uses Z up. Constrain the
+                            // requested signed camera with the native LOS below.
+                            static V3 lastEye{},lastTarget{};
+                            static bool haveSource=false;
+                            const bool preview=xr::IsMenuVisible();
+                            const V3 sourceEye=preview&&haveSource?lastEye:eyeBehind;
+                            const V3 sourceTarget=preview&&haveSource?lastTarget:pedPosition;
+                            if(!preview){lastEye=eyeBehind;lastTarget=pedPosition;haveSource=true;}
+                            const float source[3]={sourceEye.x,sourceEye.z,sourceEye.y};
+                            const float target[3]={sourceTarget.x,sourceTarget.z,sourceTarget.y};
+                            float adjusted[3];
+                            sfvr_camera_origin(source,target,comfort::Closer(),comfort::Lower(),adjusted);
+                            eyeBehind={adjusted[0],adjusted[2],adjusted[1]};
+#endif
                             float wanted = 1.0f;
                             if (g.CWorld_ProcessLineOfSight) {
                                 const V3 dir = eyeBehind - pivot;
@@ -4701,6 +4759,26 @@ void OnCopyCameraMatrixToRWCam(void* self, bool alsoPlayerCam) {
             EnsureOrigin(headPos, headOri);
             V3 relPos; Q relOri;
             RelativePose(headPos, headOri, relPos, relOri);
+#ifdef SAVR_STEAM_FRAME
+            if(GroundWalkControlsActive()) {
+                const V3 source=base.pos;
+                base.pos=base.pos+TrackingToGame(base,relPos)*
+                    (comfort::UnitsPerMeter()*(comfort::HeadTranslation()-1.f))+
+                    V3{0,0,comfort::HeightMeters(g_origin.pos.y)*comfort::UnitsPerMeter()};
+                // Native solid-world line test limits only the shown pose.
+                // Requested height/head gain remain saved for an open space.
+                if(g.CWorld_ProcessLineOfSight && Dot(base.pos-source,base.pos-source)>.0001f) {
+                    const GameSymbols::Vec3 a{source.x,source.y,source.z},b{base.pos.x,base.pos.y,base.pos.z};
+                    alignas(8) std::uint8_t col[0x2c]{};void* hit=nullptr;
+                    if(g.CWorld_ProcessLineOfSight(&a,&b,col,&hit,true,false,false,true,false,false,true,false)) {
+                        const V3 point=*reinterpret_cast<const V3*>(col),delta=base.pos-source;
+                        const float length=std::sqrt(Dot(delta,delta)),distance=std::sqrt(Dot(point-source,point-source));
+                        if(Finite(point)&&distance<length)base.pos=source+delta*(std::max(0.f,distance-.05f)/length);
+                    }
+                }
+                g_vrBase=base;g_vrBaseValid=true;
+            }
+#endif
             const CamBasis vr = BuildVrCamera(base, relPos, relOri);
 
             // Never hand the engine a degenerate matrix — one NaN axis takes the
@@ -5459,6 +5537,10 @@ void OnUpdatePads() {
         dpadModeWas = dpadModeNow;
         LOGI("[input] thumbrest dpad %s", dpadModeNow ? "ON" : "OFF");
     }
+#ifdef SAVR_STEAM_FRAME
+    if(in.frameControls){for(int d=0;d<4;++d)ns[8+d]=in.dpad[d]?255:0;}
+    else
+#endif
     if (dpadModeNow) {
         if (mappedTurnY >  0.5f) ns[8]  = 255;   // DPadUp
         if (mappedTurnY < -0.5f) ns[9]  = 255;   // DPadDown
@@ -5636,7 +5718,11 @@ void OnUpdatePads() {
         const bool osFoot = OverShoulderAvailable() && vehicle == nullptr &&
             !bothGrips && actionControls;
         for (int hand = 0; hand < 2; ++hand) {
+#ifdef SAVR_STEAM_FRAME
+            const bool down = osFoot && (in.frameControls ? in.bumpers[hand] : in.grip[hand]>=.75f);
+#else
             const bool down = osFoot && in.grip[hand] >= 0.75f;
+#endif
             if (down && !gripWas[hand]) CycleOwnedWeapon(hand == 1 ? +1 : -1);
             gripWas[hand] = down;
         }
@@ -22062,6 +22148,10 @@ void OnRenderScene(bool underwater) {
     // render stamps must never depend on that optional hook's installation.
     UpdateStaticCullCone();
 
+#ifdef SAVR_STEAM_FRAME
+    float runtimeEyeOffset[2][3]{{-.032f,0,0},{.032f,0,0}};
+    if(!cinema3d)xr::GetEyeOffsetsMeters(runtimeEyeOffset);
+#endif
     ScopedStereoModelDrawDistances stereoModelDrawDistances;
     {
         ScopedScreenDimensions screenDimensions(g.RsGlobal);
@@ -22083,8 +22173,13 @@ void OnRenderScene(bool underwater) {
         // render must land each eye texture at the matching physical position, or
         // near objects (the weapon) double badly while far scenery only shimmers.
         const float sign = (e == 0) ? 1.0f : -1.0f;          // 0 = left, 1 = right
+#ifdef SAVR_STEAM_FRAME
+        eye.pos = cinema3d ? base.pos+base.right*(sign*cinemaHalfBaseline) :
+            base.pos+TrackingToGame(base,{runtimeEyeOffset[e][0],runtimeEyeOffset[e][1],runtimeEyeOffset[e][2]})*comfort::UnitsPerMeter();
+#else
         eye.pos = base.pos + base.right *
             (sign * (cinema3d ? cinemaHalfBaseline : kVrHalfIpd));
+#endif
         const float renderFovX = g.CDraw_ms_fFOV &&
                 std::isfinite(*g.CDraw_ms_fFOV) &&
                 *g.CDraw_ms_fFOV >= 5.0f && *g.CDraw_ms_fFOV < 160.0f
@@ -30509,7 +30604,11 @@ bool WorldPointToTracking(const float worldPoint[3], float trackingPoint[3]) {
     if (!worldPoint || !trackingPoint || !g_vrBaseValid || !g_origin.valid)
         return false;
     const V3 world{worldPoint[0], worldPoint[1], worldPoint[2]};
+#ifdef SAVR_STEAM_FRAME
+    const V3 tracking = g_origin.pos + GameVectorToTracking(world-g_vrBase.pos)*(1.f/comfort::UnitsPerMeter());
+#else
     const V3 tracking = g_origin.pos + GameVectorToTracking(world - g_vrBase.pos);
+#endif
     if (!Finite(tracking)) return false;
     trackingPoint[0] = tracking.x;
     trackingPoint[1] = tracking.y;

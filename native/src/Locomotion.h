@@ -13,10 +13,16 @@ enum MovementMode {
 enum TurnMode {
     TURN_SMOOTH = 0,
     TURN_SNAP,
+#ifdef SAVR_STEAM_FRAME
+    TURN_OFF,
+#endif
     TURN_COUNT
 };
 
 void Init();
+#ifdef SAVR_STEAM_FRAME
+void ResetComfortDefaults(bool personal);
+#endif
 
 int GetMovementMode();
 const char* MovementModeName();

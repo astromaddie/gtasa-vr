@@ -35,6 +35,8 @@ void NotifyCinemaRecenter();
 void SetCinema3DOverlay(unsigned int fadeRgba, bool subtitlesBeforeFade);
 // Distance between the runtime's two eye poses, false without a plausible one.
 bool GetIpdMeters(float* ipdOut);
+bool GetEyeOffsetsMeters(float offsets[2][3]);
+void SetCameraMenu(bool active,int selection);
 // The rate the game loop should be paced at: the refresh_rate setting until the
 // session has picked a rate, then the rate the compositor really runs (and the
 // fallback steps), never above the setting. See "Display rate" in Xr.cpp.
@@ -69,6 +71,9 @@ struct InputState {
     // the system layer in main.cpp derives short press / long press from it.
     bool  view{};
     bool  l3{}, r3{};      // thumbstick clicks (left, right)
+#ifdef SAVR_STEAM_FRAME
+    bool bumpers[2]{}, dpad[4]{}, cameraGrip{}, frameControls{};
+#endif
 
     // Laser pointer hit on the theater screen, in [0,1] (u from left, v from top).
     // pointerValid is false when the ray misses the screen. pointerPressed is the
@@ -98,6 +103,9 @@ enum MenuRowsId {
     MR_DRIVING_CALIB, MR_LOCOMOTION, MR_JETPACK, MR_VEHICLE_CAMERA,
     MR_BASKETBALL, MR_BASKETBALL_CALIB, MR_HUD, MR_CHEATS, MR_GRAPHICS,
     MR_MODEL_SETS, MR_CONTROLS, MR_GFX_DISTANCES,
+#ifdef SAVR_STEAM_FRAME
+    MR_CAMERA,
+#endif
 };
 
 // Copy out the most recent controller state. Cheap; safe to call every frame.

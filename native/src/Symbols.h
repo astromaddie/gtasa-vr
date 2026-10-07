@@ -680,6 +680,13 @@ struct GameSymbols {
     // CPad::NewState.ButtonCircle). It polls touch widgets directly inside
     // CPad::GetWeapon, so the VR trigger is merged at this narrow query.
     int   (*CPad_GetWeapon)(void* pad, void* ped, bool allowPassive);
+#ifdef SAVR_STEAM_FRAME
+    void* CPad_GetEnterTargeting;
+    void* CPad_GetExitTargeting;
+    void* CPad_AimWeaponLeftRight;
+    void* CPad_AimWeaponUpDown;
+    void (*CPlayerPed_ClearWeaponTarget)(void* ped);
+#endif
 
     // --- globals ---
     void*  TheCamera;                    // CCamera; m_mCameraMatrix at +0x970

@@ -207,6 +207,10 @@ def main() -> int:
             expect("Y", r + "y/click")
             expect("Menu", r + "menu/click")
             expect("View", l + "view/click")
+            expect("Bumper", l + "bumper/click", r + "bumper/click")
+            expect("CameraGrip", l + "squeeze/value")
+            for direction in ("Up", "Down", "Left", "Right"):
+                expect("Dpad" + direction, l + "dpad_" + direction.lower() + "/click")
             if "Thumbrest" in by_action:
                 failures.append("kFrameBindings: thumbrest bound")
         elif const == "kProfileIndex":

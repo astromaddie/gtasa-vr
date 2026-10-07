@@ -725,6 +725,87 @@ PadGetWeaponFn InstallPadGetWeaponHook(void* target) {
     return body;
 }
 
+#ifdef SAVR_STEAM_FRAME
+// Verified against the pinned 2.11.311 arm64 retail engine (4c6a7445...).
+// Mobile targeting consumes these queries, never NewState's shoulder bit.
+using TargetQueryFn=int (*)(void*);
+using AimLeftRightFn=float (*)(void*,void*,bool*);
+using AimUpDownFn=std::int16_t (*)(void*,void*,bool*);
+TargetQueryFn frameEnterBody{},frameExitBody{};
+AimLeftRightFn frameAimLeftRight{};
+AimUpDownFn frameAimUpDown{};
+bool FramePadContext(void* pad,xr::InputState& in) {
+    if(!pad || !g.CPad_GetPad || pad!=g.CPad_GetPad(0) ||
+       *reinterpret_cast<const std::uint16_t*>(static_cast<const char*>(pad)+0x110)!=0 ||
+       !xr::IsSessionFocused() || xr::IsMenuVisible() ||
+       !vrcam::OverShoulderActive() || !vrcam::GroundWalkControlsActive())return false;
+    xr::GetInput(in);return in.frameControls;
+}
+void FrameTargetEdges(bool held,bool& entered,bool& exited) {
+    static std::uint32_t frame=~0u;
+    static bool previous=false,enter=false,exit=false;
+    const auto current=g.CTimer_m_FrameCounter?*g.CTimer_m_FrameCounter:0;
+    if(current!=frame){frame=current;enter=held&&!previous;exit=!held&&previous;previous=held;}
+    entered=enter;exited=exit;
+}
+int OnFrameEnterTargeting(void* pad) {
+    if(!pad || *reinterpret_cast<const std::uint16_t*>(static_cast<const char*>(pad)+0x110)!=0)return 0;
+    xr::InputState in{};
+    if(!FramePadContext(pad,in))return frameEnterBody?frameEnterBody(pad):0;
+    bool enter=false,exit=false;FrameTargetEdges(in.triggers[0]>=.5f,enter,exit);
+    return enter?1:0;
+}
+int OnFrameExitTargeting(void* pad) {
+    if(!pad || *reinterpret_cast<const std::uint16_t*>(static_cast<const char*>(pad)+0x110)!=0)return 0;
+    xr::InputState in{};
+    if(!FramePadContext(pad,in))return frameExitBody?frameExitBody(pad):0;
+    bool enter=false,exit=false;FrameTargetEdges(in.triggers[0]>=.5f,enter,exit);
+    if(!exit)return 0;
+    void* ped=g.FindPlayerPed?g.FindPlayerPed(-1):nullptr;
+    if(ped && g.CPlayerPed_ClearWeaponTarget){
+        g.CPlayerPed_ClearWeaponTarget(ped);
+        auto* data=*reinterpret_cast<std::uint8_t**>(static_cast<std::uint8_t*>(ped)+0x540);
+        if(data){auto* flags=reinterpret_cast<std::uint16_t*>(data+0x48);*flags&=~std::uint16_t(8);}
+    }
+    return 1;
+}
+float OnFrameAimLeftRight(void* pad,void* ped,bool* touch) {
+    xr::InputState in{};
+    if(!FramePadContext(pad,in) || in.triggers[0]<.5f)return frameAimLeftRight?frameAimLeftRight(pad,ped,touch):0.f;
+    if(touch)*touch=false;
+    return std::isfinite(in.rightStick[0])?std::clamp(in.rightStick[0],-1.f,1.f)*127.f:0.f;
+}
+std::int16_t OnFrameAimUpDown(void* pad,void* ped,bool* touch) {
+    xr::InputState in{};
+    if(!FramePadContext(pad,in) || in.triggers[0]<.5f)return frameAimUpDown?frameAimUpDown(pad,ped,touch):0;
+    if(touch)*touch=false;
+    return std::isfinite(in.rightStick[1])?static_cast<std::int16_t>(-std::clamp(in.rightStick[1],-1.f,1.f)*127.f):0;
+}
+TargetQueryFn InstallFrameTargetQuery(void* target,void* replacement) {
+    constexpr std::uint32_t expected[]{0x79422008,0x34000068,0x2a1f03e0,0xd65f03c0};
+    if(!target || std::memcmp(target,expected,sizeof(expected))!=0){LOGW("[frame.target] retail query signature mismatch; preserved native query");return nullptr;}
+    const long ps=sysconf(_SC_PAGESIZE);if(ps<=0)return nullptr;
+    const auto first=reinterpret_cast<std::uintptr_t>(target)&~(std::uintptr_t(ps)-1);
+    const auto last=(reinterpret_cast<std::uintptr_t>(target)+16+ps-1)&~(std::uintptr_t(ps)-1);
+    if(mprotect(reinterpret_cast<void*>(first),last-first,PROT_READ|PROT_WRITE|PROT_EXEC)!=0)return nullptr;
+    auto* words=static_cast<std::uint32_t*>(target);words[0]=0x58000051;words[1]=0xd61f0220;
+    *reinterpret_cast<void**>(words+2)=replacement;
+    __builtin___clear_cache(static_cast<char*>(target),static_cast<char*>(target)+16);
+    return reinterpret_cast<TargetQueryFn>(static_cast<char*>(target)+16);
+}
+void InstallFrameTargeting() {
+    // First four aim instructions are ordinary stack saves; no displaced PC-relative branch.
+    constexpr std::uint32_t lr[]{0xd10143ff,0xfd000be8,0xa9027bfd,0xa90357f6};
+    constexpr std::uint32_t ud[]{0xd10103ff,0xa9017bfd,0xa90257f6,0xa9034ff4};
+    if(!g.CPlayerPed_ClearWeaponTarget || !g.CTimer_m_FrameCounter)return;
+    frameAimLeftRight=reinterpret_cast<AimLeftRightFn>(InstallVerifiedTrampoline(g.CPad_AimWeaponLeftRight,reinterpret_cast<void*>(OnFrameAimLeftRight),lr,"Frame aim left/right"));
+    frameAimUpDown=reinterpret_cast<AimUpDownFn>(InstallVerifiedTrampoline(g.CPad_AimWeaponUpDown,reinterpret_cast<void*>(OnFrameAimUpDown),ud,"Frame aim up/down"));
+    frameEnterBody=InstallFrameTargetQuery(g.CPad_GetEnterTargeting,reinterpret_cast<void*>(OnFrameEnterTargeting));
+    frameExitBody=InstallFrameTargetQuery(g.CPad_GetExitTargeting,reinterpret_cast<void*>(OnFrameExitTargeting));
+    LOGI("[frame.target] enter=%d exit=%d aim=%d/%d",!!frameEnterBody,!!frameExitBody,!!frameAimLeftRight,!!frameAimUpDown);
+}
+#endif
+
 bool CoreSymbolsReady() {
     return g.CWeapon_FireInstantHit && g.CWorld_ProcessLineOfSight &&
            g.CWorld_pIgnoreEntity && g.CWorld_bIncludeDeadPeds &&
@@ -960,6 +1041,9 @@ bool Install() {
         return false;
     }
 
+#ifdef SAVR_STEAM_FRAME
+    InstallFrameTargeting();
+#endif
     g_installed.store(true, std::memory_order_release);
     scopeaim::SetSniperFireAvailable(g_origFireSniper != nullptr);
     LOGI("[vr.fire] controller hitscan + pad trigger installed%s "

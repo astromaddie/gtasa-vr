@@ -368,6 +368,13 @@ bool ResolveGameSymbols(void* handle) {
         {"_ZN12CAudioEngine24GetCurrentRadioStationIDEv",                        reinterpret_cast<void**>(&g.CAudioEngine_GetCurrentRadioStationID),  false},
         {"_ZN4CPad19ExitVehicleJustDownEbP8CVehiclebRK7CVector",                  reinterpret_cast<void**>(&g.CPad_ExitVehicleJustDown),              false},
         {"_ZN4CPad9GetWeaponEP4CPedb",                                           reinterpret_cast<void**>(&g.CPad_GetWeapon),                       false},
+#ifdef SAVR_STEAM_FRAME
+        {"_ZN4CPad17GetEnterTargetingEv", reinterpret_cast<void**>(&g.CPad_GetEnterTargeting), false},
+        {"_ZN4CPad16GetExitTargetingEv", reinterpret_cast<void**>(&g.CPad_GetExitTargeting), false},
+        {"_ZN4CPad18AimWeaponLeftRightEP4CPedPb", reinterpret_cast<void**>(&g.CPad_AimWeaponLeftRight), false},
+        {"_ZN4CPad15AimWeaponUpDownEP4CPedPb", reinterpret_cast<void**>(&g.CPad_AimWeaponUpDown), false},
+        {"_ZN10CPlayerPed17ClearWeaponTargetEv", reinterpret_cast<void**>(&g.CPlayerPed_ClearWeaponTarget), false},
+#endif
         {"Scene",                                                                reinterpret_cast<void**>(&g.Scene),                                 true },
 
         // globals

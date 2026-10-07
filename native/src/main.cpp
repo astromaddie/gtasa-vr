@@ -15,6 +15,9 @@
 #include "Holster.h"
 #include "HudSettings.h"
 #include "Locomotion.h"
+#ifdef SAVR_STEAM_FRAME
+#include "CameraComfort.h"
+#endif
 #include "Log.h"
 #include "StoragePaths.h"
 #include "Melee.h"
@@ -435,7 +438,7 @@ void OnPreloadCutsceneTrack(void* /*self*/, short /*a*/, unsigned char /*b*/) {}
 // simulation and audio.  Preserve stock pause everywhere else (loading, theater,
 // cutscenes and while the OpenXR session is not focused).
 void OnStartUserPause() {
-    if (xr::IsSessionFocused() && vrcam::IsStereoActive()) {
+    if (xr::IsSessionFocused() && vrcam::IsStereoActive() && !xr::IsMenuVisible()) {
         static bool logged = false;
         if (!logged) {
             LOGW("[pause.fix] suppressed StartUserPause during focused VR gameplay");
@@ -1230,8 +1233,15 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
            PG_HUD_WRIST, PG_CHEATS, PG_GRAPHICS, PG_GRAPHICS_DISTANCES, PG_MODEL_SETS,
            PG_CONTROLS, PG_CONTROLS_TIPS, PG_ABOUT, PG_BASKETBALL,
            PG_BASKETBALL_CALIB,
-           PG_VEHICLE_CAMERA, PG_JETPACK };
+           PG_VEHICLE_CAMERA, PG_JETPACK
+#ifdef SAVR_STEAM_FRAME
+           ,PG_CAMERA
+#endif
+    };
     static int  menuPage = PG_NONE;
+#ifdef SAVR_STEAM_FRAME
+    static int cameraSel=0;
+#endif
     static int  mainSel = 0, cheatSel = 0, cheatCategory = -1, calibSel = 0;
     static int  calibWeaponType = 0;
     static int  holsterCalibSel = 0, holsterSel = 0, drivingSel = 0;
@@ -1376,12 +1386,12 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
 #ifdef SAVR_STEAM_FRAME
         {
             using ViewClock = std::chrono::steady_clock;
-            static bool viewPrev = false, viewFired = false;
+            static bool viewPrev = false, viewFired = false, heightFired = false;
             static ViewClock::time_point viewDownAt{};
             const bool viewNow = in.view && xr::IsSessionFocused();
             if (viewNow && !viewPrev) {
                 viewDownAt = ViewClock::now();
-                viewFired = false;
+                viewFired = false; heightFired = false;
             } else if (viewNow && !viewFired &&
                        ViewClock::now() - viewDownAt >= std::chrono::milliseconds(1000)) {
                 viewFired = true;
@@ -1392,17 +1402,19 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
             } else if (!viewNow && viewPrev && !viewFired) {
                 viewBack = true;   // released before the hold threshold
             }
+            if(viewNow && !heightFired && ViewClock::now()-viewDownAt>=std::chrono::seconds(3)) {
+                heightFired=true;float p[3]{},q[4]{};
+                if(xr::GetHeadPose(p,q))comfort::CalibrateStanding(p[1]);
+                vrcam::RequestRecenter();
+                xr::TriggerHaptic(0,.6f,0,120);xr::TriggerHaptic(1,.6f,0,120);
+            }
             viewPrev = viewNow;
         }
         // In gameplay (no menu, controls are the player's, no cutscene) a
         // short View press switches FIRST PERSON <-> THIRD: OVER SHOULDER.
         // In menus it stays "back".
-        if (viewBack && menuPage == PG_NONE && inGameplay && playerExists &&
-            !formalCutscene && controlsEnabled && !widescreen) {
-            viewBack = false;
-            savr::locomotion::CycleViewMode(+1);
-            xr::TriggerHaptic(0, 0.35f, 0.0f, 40.0f);
-        }
+        // Gameplay camera mode is chosen in the existing settings page.
+        if(menuPage==PG_NONE)viewBack=false;
 #endif
 
         // Laser pointer on the VR menu panel (Steam Frame). Hovering a row
@@ -1438,6 +1450,9 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
             case PG_DRIVING:          selRef = &drivingSel;        wantId = xr::MR_DRIVING; break;
             case PG_DRIVING_CALIB:    selRef = &drivingCalibSel;   wantId = xr::MR_DRIVING_CALIB; break;
             case PG_LOCOMOTION:       selRef = &locomotionSel;     wantId = xr::MR_LOCOMOTION; break;
+#ifdef SAVR_STEAM_FRAME
+            case PG_CAMERA:selRef=&cameraSel;wantId=xr::MR_CAMERA;break;
+#endif
             case PG_JETPACK:          selRef = &jetpackSel;        wantId = xr::MR_JETPACK; break;
             case PG_VEHICLE_CAMERA:   selRef = &vehicleCameraSel;  wantId = xr::MR_VEHICLE_CAMERA; break;
             case PG_BASKETBALL:       selRef = &basketballSel;     wantId = xr::MR_BASKETBALL; break;
@@ -1814,7 +1829,11 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
             break;
         }
         case PG_LOCOMOTION: {
+#ifdef SAVR_STEAM_FRAME
+            constexpr int ROWS=17;
+#else
             constexpr int ROWS=16;
+#endif
             if (navUp) locomotionSel=(locomotionSel-1+ROWS)%ROWS;
             if (navDown) locomotionSel=(locomotionSel+1)%ROWS;
             const int step=minus?-1:(plus?1:0);
@@ -1851,11 +1870,26 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
             else if (locomotionSel==14&&enter) {
                 menuPage=PG_JETPACK; jetpackSel=0;
             }
+#ifdef SAVR_STEAM_FRAME
+            else if(locomotionSel==15&&enter){menuPage=PG_CAMERA;cameraSel=0;}
+            else if(locomotionSel==16&&enter)menuPage=PG_MAIN;
+#else
             else if (locomotionSel==15&&enter)
                 menuPage=PG_MAIN;
+#endif
             if (back) menuPage=PG_MAIN;
             break;
         }
+#ifdef SAVR_STEAM_FRAME
+        case PG_CAMERA:{
+            if(navUp)cameraSel=(cameraSel-1+savr::comfort::kRows)%savr::comfort::kRows;
+            if(navDown)cameraSel=(cameraSel+1)%savr::comfort::kRows;
+            const int step=minus?-1:plus?1:0;
+            if((step||enter)&&cameraSel<savr::comfort::kRows-1)savr::comfort::Adjust(cameraSel,step?step:1);
+            if(back||(enter&&cameraSel==savr::comfort::kRows-1))menuPage=PG_LOCOMOTION;
+            break;
+        }
+#endif
         case PG_JETPACK: {
             constexpr int ROWS=4;
             if (navUp)   jetpackSel=(jetpackSel-1+ROWS)%ROWS;
@@ -2159,6 +2193,9 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
         xr::SetDrivingCalibrationMenu(menuPage == PG_DRIVING_CALIB,
                                       drivingCalibSel,drivingCalibHand);
         xr::SetLocomotionMenu(menuPage == PG_LOCOMOTION,locomotionSel);
+#ifdef SAVR_STEAM_FRAME
+        xr::SetCameraMenu(menuPage==PG_CAMERA,cameraSel);
+#endif
         xr::SetJetpackMenu(menuPage == PG_JETPACK,jetpackSel);
         xr::SetVehicleCameraMenu(menuPage == PG_VEHICLE_CAMERA,
                                  vehicleCameraSel);
@@ -2196,6 +2233,21 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
     // can suppress their button while the player is navigating any menu page,
     // not only the cheat page (g_menuVisible).
     xr::SetAnyMenuOpen(anyMenu);
+#ifdef SAVR_STEAM_FRAME
+    // Own only the pause we acquired; a pre-existing stock pause is retained.
+    static bool cameraPauseOwned=false;
+    if(anyMenu&&inGameplay&&g.CTimer_m_UserPause&&
+       !*g.CTimer_m_UserPause&&g.CTimer_StartUserPause){
+        g.CTimer_StartUserPause();cameraPauseOwned=true;
+    } else if(!anyMenu&&cameraPauseOwned){
+        const bool stockMenu=vrcam::IsMobileMenuOpen();
+        if(!stockMenu&&g.CTimer_EndUserPause)g.CTimer_EndUserPause();
+        cameraPauseOwned=false;
+    }
+    const bool nativeCamera=savr::vrcam::GroundWalkControlsActive();
+    savr::comfort::SetEligible(nativeCamera&&savr::locomotion::ThirdPersonView(),
+                              nativeCamera&&anyMenu);
+#endif
     // Arm the jetpack B-drop lockout HERE (this menu loop runs every frame, even
     // while game input is blocked and WritePad is skipped). This is what finally
     // stops closing a menu with B from also dropping the belt.
@@ -2439,10 +2491,16 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
             dpadMode ? in.rightStick[0] : in.leftStick[0];
         const float dpy = scriptedWeapon ? 0.0f :
             dpadMode ? in.rightStick[1] : in.leftStick[1];
-        edge(dpy >  kThreshold, providerUp, 8);
-        edge(dpy < -kThreshold, providerDown, 9);
-        edge(dpx < -kThreshold, providerLeft, 10);
-        edge(dpx >  kThreshold, providerRight, 11);
+#ifdef SAVR_STEAM_FRAME
+        if(in.frameControls){
+            edge(!scriptedWeapon&&in.dpad[0],providerUp,8);edge(!scriptedWeapon&&in.dpad[1],providerDown,9);
+            edge(!scriptedWeapon&&in.dpad[2],providerLeft,10);edge(!scriptedWeapon&&in.dpad[3],providerRight,11);
+        } else
+#endif
+        {
+            edge(dpy > kThreshold,providerUp,8);edge(dpy < -kThreshold,providerDown,9);
+            edge(dpx < -kThreshold,providerLeft,10);edge(dpx > kThreshold,providerRight,11);
+        }
     } else {
         savr::beachdance::SetInput(false,0,0);
         g.implOnGamepadAxesChanged(env, clazz, 0, 0, 0, 0, 0, 0, 0);

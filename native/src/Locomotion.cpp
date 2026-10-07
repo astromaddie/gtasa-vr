@@ -1,4 +1,7 @@
 #include "Locomotion.h"
+#ifdef SAVR_STEAM_FRAME
+#include "CameraComfort.h"
+#endif
 #include "RunToggle.h"
 
 #include "Log.h"
@@ -20,7 +23,11 @@ const char* const kPath = savr::storage::FilesPath("vr_locomotion.ini");
 std::once_flag g_initOnce;
 std::mutex g_saveMutex;
 std::atomic<int> g_movement{MOVEMENT_HEAD};
+#ifdef SAVR_STEAM_FRAME
+std::atomic<int> g_turn{TURN_SNAP};
+#else
 std::atomic<int> g_turn{TURN_SMOOTH};
+#endif
 std::atomic<int> g_turnSensitivity{100};
 std::atomic<int> g_snapAngle{30};
 std::atomic<bool> g_headBob{false};
@@ -69,7 +76,11 @@ std::atomic<int> g_gameCutsceneMode{1};
 #endif
 // Gameplay view: 0 = FIRST PERSON (the kit's normal view), 1 = THIRD: OVER
 // SHOULDER (stereo from behind CJ, level horizon, hands hidden).
+#ifdef SAVR_STEAM_FRAME
+std::atomic<int> g_viewMode{VIEW_OVER_SHOULDER};
+#else
 std::atomic<int> g_viewMode{0};
+#endif
 std::atomic<int> g_thirdPersonMove{0};
 std::atomic<bool> g_welcomeSeen{false};
 std::map<std::string, int> g_cutsceneCameras;
@@ -141,7 +152,12 @@ void Save() {
 }
 
 void Load() {
-    int movement=MOVEMENT_HEAD,turn=TURN_SMOOTH,sensitivity=100,snap=30,bob=0;
+    int movement=MOVEMENT_HEAD,sensitivity=100,snap=30,bob=0;
+#ifdef SAVR_STEAM_FRAME
+    int turn=comfort::PersonalDefaults()?TURN_SMOOTH:TURN_SNAP;
+#else
+    int turn=TURN_SMOOTH;
+#endif
     int chuteFollow=1,autoChute=0,chuteImmersive=0,flightTilt=0;
     int gestureRun=1,gestureSwim=1;
 #ifdef SAVR_STEAM_FRAME
@@ -160,7 +176,11 @@ void Load() {
     int cutsceneMode=1;
     int gameCutsceneMode=1;
 #endif
+#ifdef SAVR_STEAM_FRAME
+    int viewMode=VIEW_OVER_SHOULDER;
+#else
     int viewMode=0;
+#endif
     int thirdPersonMove=0;
     int welcomeSeen=0;
     int bind[BIND_SRC_COUNT]={kBindingDefault[0],kBindingDefault[1],
@@ -304,6 +324,12 @@ int DirectionStep(int direction) { return direction<0?-1:1; }
 } // namespace
 
 void Init() { EnsureInit(); }
+#ifdef SAVR_STEAM_FRAME
+void ResetComfortDefaults(bool personal) {
+    EnsureInit();g_turn=personal?TURN_SMOOTH:TURN_SNAP;g_turnSensitivity=100;
+    g_snapAngle=30;g_viewMode=VIEW_OVER_SHOULDER;g_headBob=false;Save();
+}
+#endif
 void UpdateRunToggle(bool enabled,bool held,bool crouch,bool l3,bool r3) {
     g_runEnabled.store(g_runToggle.Update(enabled,held,crouch,l3,r3));
 }
@@ -431,7 +457,12 @@ void CycleMovementMode(int direction) {
     Save();
 }
 int GetTurnMode() { EnsureInit(); return g_turn.load(); }
-const char* TurnModeName() { return GetTurnMode()==TURN_SNAP?"SNAP":"SMOOTH"; }
+const char* TurnModeName() {
+#ifdef SAVR_STEAM_FRAME
+    if(GetTurnMode()==TURN_OFF)return "OFF";
+#endif
+    return GetTurnMode()==TURN_SNAP?"SNAP":"SMOOTH";
+}
 void CycleTurnMode(int direction) {
     EnsureInit(); if (!direction) return;
     g_turn.store((g_turn.load()+TURN_COUNT+DirectionStep(direction))%TURN_COUNT);
@@ -446,7 +477,13 @@ void AdjustTurnSensitivity(int direction) {
 int GetSnapAngleDegrees() { EnsureInit(); return g_snapAngle.load(); }
 void AdjustSnapAngle(int direction) {
     EnsureInit(); if (!direction) return;
+#ifdef SAVR_STEAM_FRAME
+    constexpr int angles[]{15,30,45,60,90};
+    int index=0;for(int i=1;i<5;++i)if(std::abs(angles[i]-g_snapAngle.load())<std::abs(angles[index]-g_snapAngle.load()))index=i;
+    g_snapAngle=angles[std::clamp(index+DirectionStep(direction),0,4)];
+#else
     g_snapAngle.store(std::clamp(g_snapAngle.load()+DirectionStep(direction)*5,15,90));
+#endif
     Save();
 }
 bool HeadBobEnabled() { EnsureInit(); return g_headBob.load(); }

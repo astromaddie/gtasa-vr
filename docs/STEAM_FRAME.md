@@ -35,8 +35,8 @@ builds come out the same as before.
 - **Controllers.** The Frame controller profile comes first, then Index,
   then the original Touch map. A, B, X, Y and Menu are on the right
   controller, View is on the left. Hold View for a second to recentre (both
-  hands buzz). A short View press is back in the VR menu, and in play (no menu
-  open, no cutscene) it switches between first person and over the shoulder.
+  hands buzz). Hold for three seconds to recalibrate standing height as well.
+  A short View press goes back in menus; choose the view in LOCOMOTION.
   Clicking both sticks no longer recentres.
 - **Pause and cutscenes.** Menu opens the game's pause menu in play. During a
   story cutscene, hold Menu for half a second to skip it (a tap does nothing).
@@ -89,10 +89,9 @@ builds come out the same as before.
 
 ## Views, HUD and colour
 
-**Views.** LOCOMOTION, VIEW (the first row), or a short press of the left View
-button in play:
+**Views.** LOCOMOTION, VIEW (the first row):
 
-- **FIRST PERSON** is the normal view: you are in CJ's head, the controllers
+- **FIRST PERSON** is available from the view setting: you are in CJ's head, the controllers
   are his hands and you hold the guns.
 - **THIRD: OVER SHOULDER** is a stereo view from behind CJ, with head
   tracking and a level horizon. The camera only turns when you turn, with the
@@ -101,8 +100,11 @@ button in play:
   test from his head pulls it in at walls. CJ's body is drawn, your hands and
   the tracked guns are not. Controls are pad-style: the left stick walks
   relative to the view heading (whatever MOVE DIRECTION says), the right
-  trigger fires the weapon CJ has equipped, the grips step through his weapons
-  (left previous, right next), and the A/B/X/Y bindings are the usual ones.
+  trigger fires the weapon CJ has equipped. On Frame, left trigger targets,
+  the right stick aims while targeting, and bumpers cycle owned weapons
+  (left previous, right next). Physical D-pad directions reach the native pad.
+  First-person grips keep their grab/holster actions, and custom face-button
+  bindings remain unchanged. Index/Touch keep their existing grip fallback.
   LOCOMOTION, THIRD PERSON MOVE `< FACE MOVE | FACE CAMERA >` (saved as
   `ThirdPersonMove=` in vr_locomotion.ini) says how CJ turns. FACE MOVE, the
   default, is the classic third person: he turns to walk where the stick
@@ -480,3 +482,45 @@ screen ON/OFF`, `[cinema3d] anchor ... subtitle band`, `[hud.front] panel`,
 `[view] mode`, `[view.os]` lines, `[ps2.colour]` and `[graphics.colourfilter]`,
 `[hud.text]` (the `cinema subtitle` / `cinema help` rasters),
 `[cinema3d] help box shown`, `[vr] refresh:`, `[vr] eye resolution` and `[vr] eye image`.
+
+
+## Camera standard migration (2026-10-07; headset-unverified)
+
+Fresh Frame settings use third person and snap 30 degrees. Smooth turning
+(default speed 120 degrees/s, adjustable 30..360) and off remain available.
+Explicit saved choices win; the persistent `defaults_profile=frame_personal`
+selects smooth 120 and third person when Defaults is pressed.
+
+LOCOMOTION → CAMERA SETTINGS uses the existing panel assets. The simulation
+pauses while VR settings are open, and stereo rendering continues from the
+pre-menu gameplay camera with current head pose and settings. The yaw-only
+panel anchors to the room, sits to the right by default, and shares its pose
+with pointer hit testing. View recentres its anchor.
+
+The new atomic `vr_camera.ini` stores world size (25..400%, represented as
+0.25..4 native units/metre), signed `camera_closer` (-1..0.8), signed
+`camera_lower` (-1..1), height (-1..1 metres), head movement (0..2), seated
+mode, standing calibration, `settings_page_side=right|left|centre`, and
+`defaults_profile=standard|frame_personal`. Native line tests constrain the
+shown view while retaining requested camera values. Runtime eye positions
+remain physical metres; game, hand, weapon, and inverse point conversions
+use the same world scale. Existing settings and saves remain separate.
+
+Hold physical left grip and use right stick: left/right shrinks/grows the
+apparent world; up/down moves farther/higher or closer/lower. The stick is
+consumed before game/turn input, with Menu/View priority and a neutral latch
+after release or focus loss. Targeting, firing, two-hand grip contexts and
+vehicles retain their actions. In first person the modifier is available in
+the VR preview for scale only.
+
+Verified locally: ARM64 native build and DEX build; supported Frame, Index
+and Touch binding tables; existing production controls regression; actual
+comfort adapter saved/default values, calibration, signed adjustment and
+release/focus/menu behavior; actual native targeting queries, aim values,
+context fallbacks, and the settings pause guard. The target hooks retain
+the pinned 2.11.311 prologue checks and native fallback on mismatch.
+
+No migrated APK has been signed or installed. The previous personal signing
+key is absent from the build folder, and the Frame went offline. Wear
+acceptance (live adjustment, panel readability, pause/resume, recentring,
+aiming, and vehicle/first-person transitions) remains pending.

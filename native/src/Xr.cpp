@@ -16,6 +16,9 @@
 #include "InputBindings.h"
 #include "HudSettings.h"
 #include "Locomotion.h"
+#ifdef SAVR_STEAM_FRAME
+#include "CameraComfort.h"
+#endif
 #include "Log.h"
 #include "RenderDiagnosticsGl.h"
 #include "PerfTelemetry.h"
@@ -132,6 +135,9 @@ XrPosef        g_eyePose[2]{};          // per-eye poses in local space (IPD apa
 float          g_eyeFovXDeg = 90.0f;   // sane default until views are located
 XrPosef        g_renderHeadPose{};      // pose the game rendered the last frame at
 bool           g_renderHeadPoseValid = false;
+#ifdef SAVR_STEAM_FRAME
+XrVector3f g_renderEyeOffset[2]{{-.032f,0,0},{.032f,0,0}};
+#endif
 HandPose       g_handPose[2]{};         // per-hand tracked poses (guarded by g_headPoseMutex)
 
 // --- stereo eye-texture bridge (see Xr.h) ------------------------------------
@@ -595,6 +601,10 @@ std::atomic<int>      g_drivingVehicleType{driving::VEHICLE_BIKE};
 std::atomic<bool>     g_drivingCalibActive{false};
 std::atomic<int>      g_drivingCalibSel{0};
 std::atomic<int>      g_drivingCalibHand{0};
+#ifdef SAVR_STEAM_FRAME
+std::atomic<bool> g_cameraMenuActive{false};
+std::atomic<int> g_cameraMenuSelection{0};
+#endif
 std::atomic<bool>     g_locomotionActive{false}; // movement/turning submenu
 std::atomic<int>      g_locomotionSel{0};
 std::atomic<bool> g_packageHint{false};
@@ -689,6 +699,10 @@ PointerFrame g_pointer;
 // is the actual cure for the rotation ghosting. Guarded by g_headPoseMutex.
 XrPosef g_stereoRenderPose[kStereoSets]{};
 bool    g_stereoRenderPoseValid[kStereoSets] = {};
+#ifdef SAVR_STEAM_FRAME
+XrVector3f g_stereoEyeOffset[kStereoSets][2]{};
+float g_stereoWorldUnits[kStereoSets]{1,1,1};
+#endif
 #ifdef SAVR_STEAM_FRAME
 // 3D cinema (story cutscenes, Steam Frame). A ring slot flagged here holds two
 // parallel off-axis eye renders of the director camera whose image rectangle IS
@@ -2280,6 +2294,9 @@ struct State {
     XrAction    yAction{XR_NULL_HANDLE};
     XrAction    menuAction{XR_NULL_HANDLE};
     XrAction    viewAction{XR_NULL_HANDLE};       // Steam Frame / Index system button
+#ifdef SAVR_STEAM_FRAME
+    XrAction bumperAction{},dpadUpAction{},dpadDownAction{},dpadLeftAction{},dpadRightAction{},cameraGripAction{};
+#endif
     XrAction    stickClickAction{XR_NULL_HANDLE}; // L3/R3, per-hand subactions
     XrAction    aimAction{XR_NULL_HANDLE};
     XrAction    gripPoseAction{XR_NULL_HANDLE};
@@ -5349,6 +5366,14 @@ XrAction* ActionSlot(bindings::Act id) {
     case Act::Aim:        return &s.aimAction;
     case Act::GripPose:   return &s.gripPoseAction;
     case Act::Haptic:     return &s.hapticAction;
+#ifdef SAVR_STEAM_FRAME
+    case Act::Bumper:return &s.bumperAction;
+    case Act::DpadUp:return &s.dpadUpAction;
+    case Act::DpadDown:return &s.dpadDownAction;
+    case Act::DpadLeft:return &s.dpadLeftAction;
+    case Act::DpadRight:return &s.dpadRightAction;
+    case Act::CameraGrip:return &s.cameraGripAction;
+#endif
     }
     return nullptr;
 }
@@ -5407,6 +5432,12 @@ bool CreateInput() {
         }
     }
 
+#ifdef SAVR_STEAM_FRAME
+    for(const auto& def:bindings::kFrameActions) {
+        XrAction* slot=ActionSlot(def.id);
+        if(!slot || !CreateAction(*slot,ActionType(def.kind),def.name,def.localized,def.perHand))return false;
+    }
+#endif
     bool anySuggested = false;
 #ifdef SAVR_STEAM_FRAME
     // Frame controller first, then Index, then the Touch map as a last resort.
@@ -5901,6 +5932,11 @@ void SyncInput(XrTime displayTime) {
     sync.countActiveActionSets = 1;
     sync.activeActionSets      = &active;
     if (!XR_SUCCEEDED(xrSyncActions(s.session, &sync))) {
+#ifdef SAVR_STEAM_FRAME
+        float stick[2]{};
+        comfort::ProcessInput(stick,false,false,false,false,double(displayTime)*1e-9);
+        s.input = {};
+#endif
         return;
     }
 
@@ -5921,6 +5957,19 @@ void SyncInput(XrTime displayTime) {
     in.r3   = ReadBool(s.stickClickAction, s.handPaths[1]);
     in.thumbrest[0] = ReadBool(s.thumbrestAction, s.handPaths[0]);
     in.thumbrest[1] = ReadBool(s.thumbrestAction, s.handPaths[1]);
+#ifdef SAVR_STEAM_FRAME
+    in.bumpers[0]=ReadBool(s.bumperAction,s.handPaths[0]);
+    in.bumpers[1]=ReadBool(s.bumperAction,s.handPaths[1]);
+    in.dpad[0]=ReadBool(s.dpadUpAction);in.dpad[1]=ReadBool(s.dpadDownAction);
+    in.dpad[2]=ReadBool(s.dpadLeftAction);in.dpad[3]=ReadBool(s.dpadRightAction);
+    in.cameraGrip=ReadBool(s.cameraGripAction);
+    XrActionStateGetInfo cameraGet{XR_TYPE_ACTION_STATE_GET_INFO};
+    cameraGet.action=s.cameraGripAction;
+    XrActionStateBoolean cameraState{XR_TYPE_ACTION_STATE_BOOLEAN};
+    in.frameControls=XR_SUCCEEDED(xrGetActionStateBoolean(s.session,&cameraGet,&cameraState)) && cameraState.isActive;
+    comfort::ProcessInput(in.rightStick,in.cameraGrip&&in.grip[1]<.75f&&in.triggers[0]<.5f&&in.triggers[1]<.5f,
+        in.menu,in.view,g_sessionFocused.load(),double(displayTime)*1e-9);
+#endif
     UpdatePointer(in, displayTime);
     s.input = in;
 }
@@ -6064,6 +6113,29 @@ bool GetIpdMeters(float* ipdOut) {
 }
 #endif
 
+#ifdef SAVR_STEAM_FRAME
+bool GetEyeOffsetsMeters(float offsets[2][3]) {
+    std::lock_guard<std::mutex> lock(g_headPoseMutex);
+    if (!g_headPoseValid) return false;
+    const auto q=g_headPose.orientation;
+    const XrQuaternionf inverse{-q.x,-q.y,-q.z,q.w};
+    XrVector3f values[2];
+    for(int e=0;e<2;++e) {
+        values[e]=QuatRotate(inverse,{g_eyePose[e].position.x-g_headPose.position.x,
+            g_eyePose[e].position.y-g_headPose.position.y,
+            g_eyePose[e].position.z-g_headPose.position.z});
+        const auto v=values[e];
+        if(!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.z) ||
+           std::sqrt(v.x*v.x+v.y*v.y+v.z*v.z)>.1f)return false;
+    }
+    const float dx=values[1].x-values[0].x,dy=values[1].y-values[0].y,dz=values[1].z-values[0].z;
+    const float ipd=std::sqrt(dx*dx+dy*dy+dz*dz);
+    if(ipd<.045f||ipd>.085f)return false;
+    for(int e=0;e<2;++e){g_renderEyeOffset[e]=values[e];offsets[e][0]=values[e].x;offsets[e][1]=values[e].y;offsets[e][2]=values[e].z;}
+    return true;
+}
+#endif
+
 bool GetHeadPose(float positionOut[3], float orientationOut[4]) {
     return GetHeadPose(positionOut,orientationOut,nullptr);
 }
@@ -6156,7 +6228,10 @@ void SetMenuState(bool visible, int selection, int count, int category) {
 }
 
 void SetAnyMenuOpen(bool open) {
-    g_anyMenuOpen.store(open, std::memory_order_relaxed);
+    const bool previous=g_anyMenuOpen.exchange(open,std::memory_order_relaxed);
+#ifdef SAVR_STEAM_FRAME
+    if(open&&!previous)g_cinemaRecenterSerial.fetch_add(1,std::memory_order_relaxed);
+#endif
 }
 
 // "Menu open" for gameplay-gating purposes means ANY VR menu page is up, not
@@ -6286,6 +6361,11 @@ void SetDrivingCalibrationMenu(bool active, int selection, int hand) {
     g_drivingCalibHand.store(hand, std::memory_order_relaxed);
 }
 
+#ifdef SAVR_STEAM_FRAME
+void SetCameraMenu(bool active,int selection) {
+    g_cameraMenuActive=active;g_cameraMenuSelection=selection;
+}
+#endif
 void SetLocomotionMenu(bool active, int selection) {
     g_locomotionActive.store(active,std::memory_order_relaxed);
     g_locomotionSel.store(selection,std::memory_order_relaxed);
@@ -7053,6 +7133,11 @@ void SetStereoEyeTextures(const unsigned int* tex, const unsigned int* depth,
         std::lock_guard<std::mutex> lock(g_headPoseMutex);
         g_stereoRenderPose[ws]      = g_renderHeadPose;
         g_stereoRenderPoseValid[ws] = g_renderHeadPoseValid;
+#ifdef SAVR_STEAM_FRAME
+        g_stereoEyeOffset[ws][0]=g_renderEyeOffset[0];
+        g_stereoEyeOffset[ws][1]=g_renderEyeOffset[1];
+        g_stereoWorldUnits[ws]=comfort::UnitsPerMeter();
+#endif
         g_stereoHandPose[ws][0] = g_renderedHandPoseValid
             ? g_renderedHandPose[0] : g_handPose[0];
         g_stereoHandPose[ws][1] = g_renderedHandPoseValid
@@ -8834,12 +8919,31 @@ void BuildBasketballCalibMenu() {
               kPanelH - 18, 2, 150, 185, 150);
 }
 
+#ifdef SAVR_STEAM_FRAME
+void BuildCameraMenu() {
+    PanelClear();const int cx=kPanelW/2,top=64,rowH=38;
+    PanelText("CAMERA",cx,16,5,100,225,255);
+    const int sel=g_cameraMenuSelection.load();
+    PanelRowsSet(MR_CAMERA,0,comfort::kRows,top,rowH,4);
+    for(int row=0;row<comfort::kRows;++row){
+        char text[96];comfort::RowText(row,text,sizeof(text));const int y=top+row*rowH;
+        if(row==sel)PanelFillRect(26,y-4,kPanelW-26,y+24,120,40,110,235);
+        PanelText(text,cx,y,2,row==sel?255:200,row==sel?235:200,row==sel?120:200);
+    }
+    PanelText("LEFT GRIP + RIGHT STICK: LIVE ADJUST",cx,kPanelH-18,2,150,185,150);
+}
+#endif
 void BuildLocomotionMenu() {
     PanelClear();
     const int cx=kPanelW/2;
     PanelText("LOCOMOTION",cx,16,5,100,225,255);
     const int sel=g_locomotionSel.load(std::memory_order_relaxed);
-    char rows[16][72]{};
+#ifdef SAVR_STEAM_FRAME
+    constexpr int count=17;
+#else
+    constexpr int count=16;
+#endif
+    char rows[count][72]{};
     std::snprintf(rows[0],sizeof(rows[0]),"VIEW   < %s >",
                   locomotion::ViewModeName());
     std::snprintf(rows[1],sizeof(rows[1]),"MOVE DIRECTION   < %s >",
@@ -8868,12 +8972,17 @@ void BuildLocomotionMenu() {
     std::snprintf(rows[13],sizeof(rows[13]),"RECENTER VIEW");
     std::snprintf(rows[14],sizeof(rows[14]),"JETPACK   < %s >",
                   jetpack::ModeName());
+#ifdef SAVR_STEAM_FRAME
+    std::snprintf(rows[15],sizeof(rows[15]),"CAMERA SETTINGS");
+    std::snprintf(rows[16],sizeof(rows[16]),"BACK");
+#else
     std::snprintf(rows[15],sizeof(rows[15]),"BACK");
+#endif
     // 16 rows on the 512px panel: a 25px pitch from y=54 keeps the last row
     // and the hint line inside the panel.
     const int top=54,rowH=25;
-    PanelRowsSet(MR_LOCOMOTION, 0, 16, top, rowH, 4);
-    for (int i=0;i<16;++i) {
+    PanelRowsSet(MR_LOCOMOTION, 0, count, top, rowH, 4);
+    for (int i=0;i<count;++i) {
         const int y=top+i*rowH;
         if (i==sel) PanelFillRect(26,y-4,kPanelW-26,y+22,120,40,110,235);
         if (i==12) {
@@ -9217,6 +9326,11 @@ void BuildCalibMenu() {
 bool PresentDebugPanel(XrCompositionLayerQuad& quad) {
     if (s.debug.handle == XR_NULL_HANDLE || s.viewSpace == XR_NULL_HANDLE ||
         s.debug.poisoned) return false;
+#ifdef SAVR_STEAM_FRAME
+    const bool cameraMenu=g_cameraMenuActive.load();
+#else
+    const bool cameraMenu=false;
+#endif
     const bool mainMenu = g_mainMenuActive.load(std::memory_order_relaxed);
     const bool calibMenu = g_calibActive.load(std::memory_order_relaxed);
     const bool holsterCalibMenu = g_holsterCalibActive.load(std::memory_order_relaxed);
@@ -9241,7 +9355,7 @@ bool PresentDebugPanel(XrCompositionLayerQuad& quad) {
     const bool controlsMenuA = g_controlsMenuActive.load(std::memory_order_relaxed);
     const bool controlsTipsA = g_controlsTipsActive.load(std::memory_order_relaxed);
     const bool aboutMenuA = g_aboutActive.load(std::memory_order_relaxed);
-    const bool profilerPanel = !(mainMenu || calibMenu || holsterCalibMenu ||
+    const bool profilerPanel = !(cameraMenu || mainMenu || calibMenu || holsterCalibMenu ||
         holsterMenu || drivingMenu || drivingCalibMenu || locomotionMenu ||
         jetpackMenu || vehicleCameraMenu ||
         basketballMenu || basketballCalibMenu || hudMenu ||
@@ -9292,6 +9406,9 @@ bool PresentDebugPanel(XrCompositionLayerQuad& quad) {
         else if (holsterMenu)       BuildHolsterMenu();
         else if (drivingMenu)       BuildDrivingMenu();
         else if (drivingCalibMenu)  BuildDrivingCalibrationMenu();
+#ifdef SAVR_STEAM_FRAME
+        else if(cameraMenu)BuildCameraMenu();
+#endif
         else if (locomotionMenu)    BuildLocomotionMenu();
         else if (jetpackMenu)       BuildJetpackMenu();
         else if (vehicleCameraMenu) BuildVehicleCameraMenu();
@@ -9367,6 +9484,31 @@ bool PresentDebugPanel(XrCompositionLayerQuad& quad) {
     // Present the 512-pixel settings texture at a readable cockpit-menu size.
     quad.size              = {1.8f, 1.8f * static_cast<float>(kPanelH) /
                                     static_cast<float>(kPanelW)};
+#ifdef SAVR_STEAM_FRAME
+    static bool wasMenu=false;
+    static XrPosef menuAnchor{{0,0,0,1},{0,0,0}};
+    static int placedSide=-1;
+    static unsigned long long placedRecentre=0;
+    const auto recentre=g_cinemaRecenterSerial.load();
+    const int panelSide=comfort::PanelSide();
+    if(!profilerPanel && (!wasMenu||placedSide!=panelSide||placedRecentre!=recentre)) {
+        std::lock_guard<std::mutex> lock(g_headPoseMutex);
+        const auto forward=QuatRotate(g_headPose.orientation,{0,0,-1});
+        const float yaw=std::atan2(-forward.x,-forward.z);
+        menuAnchor.orientation={0,std::sin(yaw/2),0,std::cos(yaw/2)};
+        menuAnchor.position=g_headPose.position;
+        placedSide=panelSide;placedRecentre=recentre;
+    }
+    wasMenu=!profilerPanel;
+    if(!profilerPanel) {
+        const float distance=1.65f,width=1.8f;
+        const float offset=panelSide==2?0.f:(panelSide==0?1.f:-1.f)*
+            (std::atan(width/(2*distance))+.174532925f);
+        const XrQuaternionf yaw{0,std::sin(-offset/2),0,std::cos(-offset/2)};
+        quad.space=s.space;quad.pose.orientation=PtMul(menuAnchor.orientation,yaw);
+        quad.pose.position=PtAdd(menuAnchor.position,QuatRotate(quad.pose.orientation,{0,-.2f,-distance}));
+    }
+#endif
     if(fpsPanel) {
         quad.subImage.imageRect.offset={kPanelW/2-100,kPanelH/2-32};
         quad.subImage.imageRect.extent={200,64};
@@ -12282,7 +12424,7 @@ void DrawFrontHudForEye(const float* mvp, int e, unsigned int hudTex) {
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
-void DrawHandsForEye(const XrPosef& rp, int e, int fbW, int fbH,
+void DrawHandsForEye(const XrPosef& rp, const XrVector3f& eyeOffset, int e, int fbW, int fbH,
                      unsigned int gameDepthRbo, int gameDepthW, int gameDepthH,
                      float renderedNearZ, float renderedFarZ,
                      const LaserRay& laser, unsigned int weaponHandMask,
@@ -12333,7 +12475,11 @@ void DrawHandsForEye(const XrPosef& rp, int e, int fbW, int fbH,
     if (haveHands) EnsureHandProgram();
 
     const float sign = (e == 0) ? -1.0f : 1.0f;
+#ifdef SAVR_STEAM_FRAME
+    const XrVector3f rr = QuatRotate(rp.orientation, eyeOffset);
+#else
     const XrVector3f rr = QuatRotate(rp.orientation, {sign * kStereoHalfIpd, 0, 0});
+#endif
     const XrVector3f eyePos{rp.position.x + rr.x, rp.position.y + rr.y, rp.position.z + rr.z};
     float view[16], proj[16], mvp[16];
     MatView(view, rp.orientation, eyePos);
@@ -12930,6 +13076,8 @@ bool RenderStereoEyeProjection(XrCompositionLayerProjection& layer,
     // The pose these pixels were rendered at — the quad is anchored here so the
     // compositor can reproject to the live head pose (kills rotation ghosting).
     XrPosef rp{};
+    XrVector3f eyeOffsets[2]{{-.032f,0,0},{.032f,0,0}};
+    float worldUnits=1.f;
     HandPose bakedHands[2]{};
     LaserRay bakedLaser{};
     TwoHandVisualState bakedTwoHand{};
@@ -12944,6 +13092,10 @@ bool RenderStereoEyeProjection(XrCompositionLayerProjection& layer,
         std::lock_guard<std::mutex> lock(g_headPoseMutex);
         haveRenderPose = g_stereoRenderPoseValid[set];
         rp             = g_stereoRenderPose[set];
+#ifdef SAVR_STEAM_FRAME
+        eyeOffsets[0]=g_stereoEyeOffset[set][0];eyeOffsets[1]=g_stereoEyeOffset[set][1];
+        worldUnits=g_stereoWorldUnits[set];
+#endif
         bakedHands[0]  = g_stereoHandPose[set][0];   // pose the weapon was baked with
         bakedHands[1]  = g_stereoHandPose[set][1];
         bakedLaser     = g_stereoLaserRay[set];
@@ -13127,11 +13279,11 @@ bool RenderStereoEyeProjection(XrCompositionLayerProjection& layer,
                               g_stereoCinemaSubsBefore[set].load(std::memory_order_relaxed));
 #endif
         if (!cinemaSlot) DrawHandsForEye(
-            rp, e, chain.width, chain.height,
+            rp, eyeOffsets[e], e, chain.width, chain.height,
             g_stereoEyeDepth[set][e].load(std::memory_order_relaxed),
             ew, eh,
-            g_stereoEyeNear[set][e].load(std::memory_order_relaxed),
-            g_stereoEyeFar[set][e].load(std::memory_order_relaxed),
+            g_stereoEyeNear[set][e].load(std::memory_order_relaxed)/worldUnits,
+            g_stereoEyeFar[set][e].load(std::memory_order_relaxed)/worldUnits,
             bakedLaser, bakedWeaponHandMask,
             liveTracers, liveTracerCount,
             liveObjectiveMarkers, liveObjectiveMarkerCount,
@@ -13199,7 +13351,11 @@ bool RenderStereoEyeProjection(XrCompositionLayerProjection& layer,
         // orientation; the horizontal parallax is the IPD-shifted position plus
         // what is already baked into the pixels.
         const float sign = (e == 0) ? -1.0f : 1.0f;   // 0 = left, 1 = right
+#ifdef SAVR_STEAM_FRAME
+        const XrVector3f right = QuatRotate(rp.orientation, eyeOffsets[e]);
+#else
         const XrVector3f right = QuatRotate(rp.orientation, XrVector3f{sign * kStereoHalfIpd, 0.0f, 0.0f});
+#endif
         XrCompositionLayerProjectionView& v = views[e];
         v = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
         v.pose.orientation           = rp.orientation;
@@ -13796,6 +13952,9 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs) {
              g_drivingActive.load(std::memory_order_relaxed) ||
              g_drivingCalibActive.load(std::memory_order_relaxed) ||
              g_locomotionActive.load(std::memory_order_relaxed) ||
+#ifdef SAVR_STEAM_FRAME
+             g_cameraMenuActive.load(std::memory_order_relaxed) ||
+#endif
              g_jetpackMenuActive.load(std::memory_order_relaxed) ||
              g_vehicleCameraActive.load(std::memory_order_relaxed) ||
              g_basketballActive.load(std::memory_order_relaxed) ||

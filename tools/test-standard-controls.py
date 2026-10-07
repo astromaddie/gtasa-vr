@@ -3,7 +3,7 @@ from pathlib import Path
 import os
 import subprocess,sys,re
 R=Path(__file__).resolve().parents[1];O=R/'build/standard-controls-tests';O.mkdir(parents=True,exist_ok=True)
-loc=(R/'native/src/Locomotion.cpp').read_text(encoding='utf8').replace('#include "Log.h"','').replace('/sdcard/Android/data/com.rockstargames.gtasa/files/vr_locomotion.ini','test-locomotion.ini')
+loc=(R/'native/src/Locomotion.cpp').read_text(encoding='utf8').replace('#include "Log.h"','').replace('#include "StoragePaths.h"', '#include <string>\nnamespace savr::storage { inline const char* FilesPath(const char*) { return "test-locomotion.ini"; } }').replace('/sdcard/Android/data/com.rockstargames.gtasa/files/vr_locomotion.ini','test-locomotion.ini')
 cam=(R/'native/src/VrCamera.cpp').read_text(encoding='utf8');a=cam.index('                    const int seatedAppearance =');z=cam.index('                    // Suspension steps over kerbs',a)
 def fn(s,name):
  m=re.search(r'^bool '+name+r'\(',s,re.M);a=m.start();p=s.index('{',a)+1;d=1
@@ -141,6 +141,12 @@ int main(){
 }
 '''
 (O/'test.cpp').write_text(code,encoding='utf8')
-vc=Path(r'C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvars64.bat')
-cmd=O/'run.cmd';cmd.write_text(f'@echo off\ncall "{vc}" >nul\ncl /nologo /std:c++20 /EHsc /W3 /I"{R / "native/src"}" /I"{Path(os.environ["JAVA_HOME"]) / "include"}" /I"{Path(os.environ["JAVA_HOME"]) / "include/win32"}" "{O / "test.cpp"}" /Fe:"{O / "test.exe"}" /Fo:"{O / "test.obj"}"\nif errorlevel 1 exit /b 1\n"{O / "test.exe"}"\n',encoding='utf8')
-p=subprocess.run(['cmd','/c',str(cmd)],cwd=O,capture_output=True,text=True,encoding='utf8',errors='replace');print(p.stdout);print(p.stderr);sys.exit(p.returncode)
+if os.name == 'nt':
+ vc=Path(r'C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvars64.bat')
+ cmd=O/'run.cmd';cmd.write_text(f'@echo off\ncall "{vc}" >nul\ncl /nologo /std:c++20 /EHsc /W3 /I"{R / "native/src"}" "{O / "test.cpp"}" /Fe:"{O / "test.exe"}" /Fo:"{O / "test.obj"}"\nif errorlevel 1 exit /b 1\n"{O / "test.exe"}"\n',encoding='utf8')
+ command=['cmd','/c',str(cmd)]
+else:
+ compiler=os.environ.get('CXX','c++')
+ subprocess.run([compiler,'-std=c++20','-I',str(R/'native/src'),str(O/'test.cpp'),'-o',str(O/'test')],check=True)
+ command=[str(O/'test')]
+p=subprocess.run(command,cwd=O,capture_output=True,text=True,encoding='utf8',errors='replace');print(p.stdout);print(p.stderr);sys.exit(p.returncode)
