@@ -6,7 +6,8 @@
 
 | Area | Evidence and limit |
 |---|---|
-| Build and package | Prior runtime camera source `e7e8cb2ae8413412ba561689f8b014fd16dce484`; prior packaging repair `313999d742bc3f21c891a3e4bfd74e0d6011729d`. |
+| Fresh PR0 source checks | Camera comfort, Frame targeting and APK assembly tests passed at the immutable commit in PR0 metadata. A full package rebuild awaits the user-owned APK input. |
+| Prior build and package | Prior runtime camera source `e7e8cb2ae8413412ba561689f8b014fd16dce484`; prior packaging repair `313999d742bc3f21c891a3e4bfd74e0d6011729d`. |
 | Frame launch | The rebuilt ARM64 APK and Steam-title boot were verified unattended; session/profile suggestions and game frames were observed. |
 | Worn behavior | Prior builds were worn; current camera preview and all new physical adjustments remain pending. |
 | Save persistence | The save-folder link route exists, but writing and restoring an actual save through the link is not confirmed. |
@@ -29,3 +30,5 @@ The command builds a personal signed package and payload; it does not install or
 A focused headset acceptance run remains pending for installation, real input, tracking/recentering, stereo, menus, gameplay, pause/resume, save writes and reload, clean exit and actual performance. No Frame launch or mutation is part of this source-preparation task.
 
 The previous root README is preserved in [docs/README_PRE_PR0.md](docs/README_PRE_PR0.md). Current source identity, checks and blockers are listed in [docs/PR0_READINESS.md](docs/PR0_READINESS.md).
+
+Immutable tested source, final checks and open gates: [PR0 metadata](docs/PR0_METADATA.json).

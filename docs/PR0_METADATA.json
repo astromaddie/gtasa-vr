@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "milestone": "PR0",
+  "status": "EXPERIMENTAL",
+  "publication_status": "private preparation; no release published",
+  "tested_commit": "bc00f5d587524de2d073e89f068fa9b9fe1a561e",
+  "supported_targets": [
+    "Steam Frame Lepton / Android ARM64 / SteamVR OpenXR",
+    "Inherited Meta Quest target; outside PR0 acceptance"
+  ],
+  "validation": {
+    "commit": "bc00f5d587524de2d073e89f068fa9b9fe1a561e",
+    "commands": [
+      "python3 tools/test-camera-comfort.py",
+      "python3 tools/test-frame-targeting.py",
+      "python3 tools/test-apk-assembly.py"
+    ],
+    "result": "PASS; all three source and assembly tests passed.",
+    "full_build": "BLOCKED pending the user-owned GTA SA 2.11.311 ARM64 APK or split set; none was supplied for this run."
+  },
+  "full_application_build": "BLOCKED pending the user-owned GTA SA 2.11.311 ARM64 APK or split set; none was supplied for this run.",
+  "focused_headset_acceptance": "pending clean candidate acceptance",
+  "sustained_worn_performance": "unmeasured on current candidate",
+  "distribution_blockers": [
+    "A combined package contains user-supplied proprietary game libraries and data; source-kit permission does not permit their redistribution",
+    "Fresh full build needs the user-owned package; focused wearer acceptance remains open"
+  ],
+  "license_scope": "Retained component notices apply to their stated code; they do not grant redistribution rights to commercial ROMs, extracted media, saves or proprietary libraries.",
+  "changelog": "CHANGELOG.md",
+  "build_isolation": "Fresh local source checkout, empty shell HOME, env -i, disabled system/global Git config and no personal Git credentials. Root repositories remain private, so anonymous root cloning cannot be claimed before publication."
+}

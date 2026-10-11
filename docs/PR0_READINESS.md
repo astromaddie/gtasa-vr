@@ -17,6 +17,8 @@
 
   Requires JDK 21, Android SDK/NDK and Python 3. The script builds and verifies a personal package; it does not install or launch it. See [Steam Frame architecture and validation](STEAM_FRAME.md) and [NOTICE.md](../NOTICE.md).
 
+The immutable PR0 test source commit, supported targets and final check results are in [PR0_METADATA.json](PR0_METADATA.json).
+
 ## Evidence
 
 | Surface | Evidence |
