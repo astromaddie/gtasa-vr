@@ -4,6 +4,8 @@ This is my Steam Frame fork of [GTA San Andreas VR for Quest](https://github.com
 
 **EXPERIMENTAL.** I made this for personal use, and it is still a work in progress. It targets the Valve Steam Frame. You need your own copy of the Google Play GTA San Andreas **2.11.311 ARM64** game package, either as a merged APK or a supported split set. No game APK, commercial game data or signing key is included.
 
+**Steam Frame download:** Get the prebuilt compiled patchkit from the [v0.1.0 prerelease](https://github.com/astromaddie/gtasa-vr/releases/tag/v0.1.0). It is not a ready-to-install APK: use it with your own compatible Google Play GTA San Andreas 2.11.311 ARM64 APK to assemble the Frame APK locally. No game compiler is needed; the game APK, commercial data and signing key are not included.
+
 I've played it on my Frame. Stereo gameplay, menus, 3D cutscenes with subtitles and fades, and the third-person locked camera are working well.
 
 ## What this fork adds
