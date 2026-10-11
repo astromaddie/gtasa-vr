@@ -44,7 +44,7 @@ Personal package options:
   --python EXE               Python 3 executable (default: python3/python)
   --apktool FILE             apktool 3.0.3 jar
   --keystore FILE            Personal signing key (default: build/signing)
-  --allow-unofficial-source  Developer escape hatch; public master never uses it
+  --allow-unofficial-source  Allow merged/resigned backups; retail engine hash still checked
 
 The low-level build script never installs or launches the game.
 EOF
@@ -287,6 +287,35 @@ export JAVA_HOME="$JAVA_HOME_ARG"
 export ANDROID_HOME="$ANDROID_SDK"
 export ANDROID_SDK_ROOT="$ANDROID_SDK"
 
+if [ "$PACKAGE" -eq 1 ]; then
+  ASSEMBLE_ARGS=(
+    "$ROOT/tools/assemble.py"
+    --game-package "$GAME_PACKAGE"
+    --build-dir "$BUILD_ROOT"
+    --sdk "$ANDROID_SDK"
+    --java-home "$JAVA_HOME_ARG"
+    --apktool "$APKTOOL"
+    --native-lib "$NATIVE_BUILD/libsavr.so"
+    --loader-dex "$DEX_FILE"
+    --openxr-loader "$OPENXR_LOADER"
+    --keystore "$KEYSTORE"
+  )
+  if [ -n "$AUDIO_SOURCE" ]; then
+    ASSEMBLE_ARGS+=(--audio-source "$AUDIO_SOURCE")
+  fi
+  if [ "$SAVR_STEAM_FRAME" = "ON" ]; then
+    ASSEMBLE_ARGS+=(--steam-frame)
+  fi
+  if [ "$ALLOW_UNOFFICIAL_SOURCE" -eq 1 ]; then
+    ASSEMBLE_ARGS+=(--allow-unofficial-source)
+  fi
+
+  # AircraftHlodData.S embeds generated, package-specific geometry. Validate
+  # the supplied retail package and create that input before CMake starts.
+  echo "==> validate game package and generate aircraft HLOD"
+  "$PYTHON_EXE" "${ASSEMBLE_ARGS[@]}" --validate-only
+fi
+
 echo "==> libsavr.so ($CONFIGURATION, arm64-v8a)"
 "$CMAKE" \
   -S "$ROOT/native" \
@@ -337,28 +366,6 @@ echo "SHA256      : $(sha256_file "$DEX_FILE")"
 
 if [ "$PACKAGE" -eq 0 ]; then
   exit 0
-fi
-
-ASSEMBLE_ARGS=(
-  "$ROOT/tools/assemble.py"
-  --game-package "$GAME_PACKAGE"
-  --build-dir "$BUILD_ROOT"
-  --sdk "$ANDROID_SDK"
-  --java-home "$JAVA_HOME_ARG"
-  --apktool "$APKTOOL"
-  --native-lib "$NATIVE_LIBRARY"
-  --loader-dex "$DEX_FILE"
-  --openxr-loader "$OPENXR_LOADER"
-  --keystore "$KEYSTORE"
-)
-if [ -n "$AUDIO_SOURCE" ]; then
-  ASSEMBLE_ARGS+=(--audio-source "$AUDIO_SOURCE")
-fi
-if [ "$SAVR_STEAM_FRAME" = "ON" ]; then
-  ASSEMBLE_ARGS+=(--steam-frame)
-fi
-if [ "$ALLOW_UNOFFICIAL_SOURCE" -eq 1 ]; then
-  ASSEMBLE_ARGS+=(--allow-unofficial-source)
 fi
 
 "$PYTHON_EXE" "${ASSEMBLE_ARGS[@]}"

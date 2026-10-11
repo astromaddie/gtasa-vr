@@ -333,9 +333,12 @@ Frame helper `tools/build.sh` requires explicit paths to both files and
 checks their SHA-256 hashes. For download and SDK setup commands, see the
 [README build section](../README.md#build-the-frame-version).
 
-Supply your own Google Play GTA San Andreas 2.11.311 ARM64 merged APK or a
-supported split set. The PS2 audio pack is optional for Steam Frame; without
-it, the game uses its own audio. Build the personal APK and payload:
+Supply your own Google Play GTA San Andreas 2.11.311 ARM64 package or a
+supported split set. A merged backup made by a backup tool can use
+`--allow-unofficial-source`; this keeps the exact retail `libGame.so` hash
+check in place and records the input as unofficial. The PS2 audio pack is
+optional for Steam Frame; without it, the game uses its own audio. Build the
+personal APK and payload:
 
 ```sh
 /bin/bash tools/build.sh --steam-frame --package \
@@ -348,7 +351,8 @@ it, the game uses its own audio. Build the personal APK and payload:
 
 The result is `<build>/out/base.apk` plus `<build>/payload`. The native code
 can be rebuilt alone by running `ninja` in `<build>/native`; changes to the
-Java loader need a full build.
+Java loader need a full build. The combined APK contains commercial game data
+and is for your personal use; this source repository does not distribute it.
 
 ## Put it on the headset
 

@@ -71,7 +71,7 @@ sdkmanager --sdk_root="$ANDROID_HOME" \
 
 The build also needs the pinned Apktool 3.0.3 JAR and Khronos OpenXR Android loader 1.1.43 for arm64. Download the Apktool JAR from its [3.0.3 release](https://github.com/iBotPeaches/Apktool/releases/tag/v3.0.3) and the OpenXR loader [AAR from Maven Central](https://repo1.maven.org/maven2/org/khronos/openxr/openxr_loader_for_android/1.1.43/openxr_loader_for_android-1.1.43.aar). Extract the arm64 loader at `prefab/modules/openxr_loader/libs/android.arm64-v8a/libopenxr_loader.so` from the AAR. The build checks both files against their pinned SHA-256 hashes.
 
-Use the Google Play 2.11.311 ARM64 merged APK or a supported split set you own. The PS2 audio pack is optional for the Frame build.
+Use the Google Play 2.11.311 ARM64 package or a supported split set you own. A merged backup made by a backup tool can be used with `--allow-unofficial-source`; that option does not bypass the pinned retail `libGame.so` hash check. The build records such an input as unofficial. The PS2 audio pack is optional for the Frame build.
 
 ```sh
 /bin/bash tools/build.sh --steam-frame --package \
@@ -83,6 +83,8 @@ Use the Google Play 2.11.311 ARM64 merged APK or a supported split set you own. 
 ```
 
 For a split set, point `--game-package` at the supported archive or folder. The APK and payload are written under `.frame-build/out` and `.frame-build/payload`; the script builds a personal signed package and does not install or launch it.
+
+Add `--allow-unofficial-source` to the command above when using a merged or resigned backup. A generated combined APK contains commercial game data and is for your personal use; this repository does not distribute it.
 
 ## Install on Steam Frame
 
