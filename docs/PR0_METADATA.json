@@ -2,30 +2,33 @@
   "schema_version": 1,
   "milestone": "PR0",
   "status": "EXPERIMENTAL",
-  "publication_status": "private preparation; no release published",
-  "tested_commit": "bc00f5d587524de2d073e89f068fa9b9fe1a561e",
+  "publication_status": "private source preparation; no release action in this check",
+  "tested_commit": "5de655fcc1042f7254686d42428b26714f708220",
   "supported_targets": [
     "Steam Frame Lepton / Android ARM64 / SteamVR OpenXR",
     "Inherited Meta Quest target; outside PR0 acceptance"
   ],
   "validation": {
-    "commit": "bc00f5d587524de2d073e89f068fa9b9fe1a561e",
+    "commit": "5de655fcc1042f7254686d42428b26714f708220",
     "commands": [
       "python3 tools/test-camera-comfort.py",
       "python3 tools/test-frame-targeting.py",
-      "python3 tools/test-apk-assembly.py"
+      "python3 tools/test-apk-assembly.py",
+      "bash -n tools/steam_frame/deploy.sh",
+      "env -u FRAME_HOST bash tools/steam_frame/deploy.sh"
     ],
-    "result": "PASS; all three source and assembly tests passed.",
-    "full_build": "BLOCKED pending the user-owned GTA SA 2.11.311 ARM64 APK or split set; none was supplied for this run."
+    "host_result": "PASS; camera comfort, Frame targeting, and production APK assembly checks passed. Shell syntax passed. The deploy command stopped at the required-host guard before SSH or ADB.",
+    "native_build": {
+      "command": "tools/build.sh --steam-frame --android-sdk <SDK> --java-home <JDK> --openxr-loader <pinned-loader> --build-dir <fresh-external-directory>",
+      "result": "BLOCKED; clean CMake configuration completed, then Ninja could not find aircraft-hlod-global/aircraft.hlod included by native/src/AircraftHlodData.S.",
+      "input_dependency": "tools/assemble.py generates this HLOD pack from the game package data APK. No generated pack or placeholder was supplied.",
+      "toolchain": "Temurin JDK 21.0.7, Android NDK 27.2.12479018, CMake 3.22.1, Ninja 1.10.2, Khronos OpenXR loader 1.1.43 arm64.",
+      "openxr_loader_sha256": "713e3bb8d955254c670acc1c4899a65cb8c930e97dd9958bf37ea922d72b7a06"
+    },
+    "application_package": "NOT BUILT; the available local candidate has the expected version and ARM64 ABI but its signer does not match the pinned Google Play source signer. No signer bypass was used."
   },
-  "full_application_build": "BLOCKED pending the user-owned GTA SA 2.11.311 ARM64 APK or split set; none was supplied for this run.",
-  "focused_headset_acceptance": "pending clean candidate acceptance",
-  "sustained_worn_performance": "unmeasured on current candidate",
-  "distribution_blockers": [
-    "A combined package contains user-supplied proprietary game libraries and data; source-kit permission does not permit their redistribution",
-    "Fresh full build needs the user-owned package; focused wearer acceptance remains open"
-  ],
-  "license_scope": "Retained component notices apply to their stated code; they do not grant redistribution rights to commercial ROMs, extracted media, saves or proprietary libraries.",
+  "distribution_scope": "The source kit excludes the game package, commercial assets, personal signing keys, and generated per-install HLOD data. No combined APK is claimed distributable.",
+  "license_scope": "Retained component notices apply to their stated code; they do not grant redistribution rights to commercial game packages or extracted game data.",
   "changelog": "CHANGELOG.md",
-  "build_isolation": "Fresh local source checkout, empty shell HOME, env -i, disabled system/global Git config and no personal Git credentials. Root repositories remain private, so anonymous root cloning cannot be claimed before publication."
+  "build_isolation": "Fresh checkout at the immutable tested commit, temporary HOME, JVM user.home, env -i, system/global Git configuration disabled, and no personal Git credentials. Android SDK, NDK, Temurin JDK 21, CMake, Ninja, and the pinned public Khronos loader were explicit host inputs."
 }
