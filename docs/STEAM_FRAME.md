@@ -1,17 +1,16 @@
 # GTA San Andreas VR on the Steam Frame
 
-This branch runs the Quest kit on the Valve Steam Frame. The Frame runs
-Android apps inside a container called Lepton, on top of SteamVR's OpenXR
-runtime. The game itself is unchanged: it's the same Google Play build
-(2.11.311) with the same VR layer. What's different is how it's packaged,
-where its files live and how the controllers map.
+This is my Steam Frame fork of the Quest port. It runs the Google Play GTA San
+Andreas 2.11.311 ARM64 game through Lepton and SteamVR OpenXR, with persistent
+game files in the Frame's Documents folder.
 
-Status: it has been worn three times (2026-10-03, 2026-10-04 and 2026-10-05,
-see "Wear feedback" at the end). Menus, story cutscenes in 3D cinema,
-subtitles, fades and the third-person camera work. Everything changed after
-the second wear, including the round-3 fixes (laser dot, cutscene tooltips,
-subtitle gap, 120 Hz and 2160 per eye), builds on the host and has not been
-worn yet: "host build, headset-unverified" until someone has it on.
+I've played it on my Frame. Stereo gameplay, menus, 3D cutscenes with subtitles
+and fades, and the third-person locked camera are working well.
+
+The Frame build uses a third-person over-the-shoulder view by default. It also
+supports first-person play, a live camera preview in the paused VR settings,
+and camera adjustment with left grip plus the right stick. A third-person
+3D-screen view has not been implemented.
 
 ## What's different from the Quest build
 
@@ -37,7 +36,9 @@ builds come out the same as before.
   controller, View is on the left. Hold View for a second to recentre (both
   hands buzz). Hold for three seconds to recalibrate standing height as well.
   A short View press goes back in menus; choose the view in LOCOMOTION.
-  Clicking both sticks no longer recentres.
+  The left trigger targets, the right trigger fires, and the right stick aims
+  while targeting. Bumpers cycle owned weapons. All four left D-pad directions
+  are bound to the game's native pad. Clicking both sticks no longer recentres.
 - **Pause and cutscenes.** Menu opens the game's pause menu in play. During a
   story cutscene, hold Menu for half a second to skip it (a tap does nothing).
   Story cutscenes default to CINEMA 3D: a 2.56 x 1.44 m screen 2 m ahead,
@@ -60,8 +61,7 @@ builds come out the same as before.
   lower, because the text was centred in a tall box). The tutorial help box
   (the "press X to..." tooltips the opening cutscenes show) is drawn in the
   same band, under the subtitle text, or at the top of it when there are no
-  subtitles. It follows the HELP TEXT switch in the HUD menu. Host build, not
-  worn.
+  subtitles. It follows the HELP TEXT switch in the HUD menu.
 - **In-engine cutscenes.** The camera cuts you get in the middle of play
   (following CJ walking, mission cameras with the black letterbox bars) use
   the same 3D cinema screen. GAME CUTSCENES in the graphics menu has CINEMA,
@@ -154,7 +154,10 @@ screen (menus, flat CINEMA) is not filtered.
 
 ## Laser pointer, menu pointing and upright sprites
 
-Host build, not worn. Three rules shared with the other Steam Frame ports.
+The right controller's laser points into flat game menus and the VR settings
+panel. The beam and dot follow the submitted screen and panel poses, and the
+pointer is drawn above those panels so it remains visible when you aim at a
+menu row or slider.
 
 **The pointer is always on top.** In the flat screen (frontend, pause, the
 barber chair and similar) and in the VR menu, the right controller's aim pose
@@ -197,19 +200,14 @@ frame whose vertical follows world up (the head roll at the eye image's render
 pose is counter-rotated); the circular mask is rotation-invariant. The front HUD
 and the sky sun/moon were already upright.
 
-What to look at on the headset: the beam above the VR menu, above the 3D cinema
-and above the flat pause menu; the dot landing on the right row, whole, on a
-tilted panel, with no dither where it meets the menu; clicking rows,
-the side zones and the sliders; tilting your head while looking at a street
-lamp, a wet road or through a scope.
+The same layered pointer is used over the pause menu, the VR settings and the
+cinema screen.
 
 ## Display: 120 Hz and 2160 per eye
 
-Checked on the Frame with nobody wearing it (a98715f, 2026-10-05): SteamVR
-offered `{120}` and the log said so, AUTO picked 2160 per eye (100%, because the
-per-app resolution is 2160), and the title screen presented a steady 120 Hz
-for 75 s. The in-world frame rate needs someone wearing it, so it's still
-unmeasured.
+The Frame build requests a 120 Hz display rate and targets 2160 x 2160 per
+eye. That is a display configuration, not a benchmark or a promise that the
+game holds 120 frames per second in every scene.
 
 **Target.** 120 Hz at about 2160 x 2160 per eye (the panel's own resolution;
 the runtime recommends 1728 x 1728 by default, or 2160 with SteamVR's per-app
@@ -249,16 +247,10 @@ windows in a row below 90% of the display rate it logs once per session:
 The suggested rate is the highest of 120, 90 and 72 the measured fps would hold
 (72 at the lowest). Menus, loading and lost focus don't count windows.
 
-**Device check (unattended, nobody wearing it, 2026-10-05, build 19cf8a1).** It
-boots from the Steam title; `[vr] refresh: setting 120, offered {120},
-requested 120`; the eye resolution is 2160 at 100% (the runtime recommends 2160
-because the per-app resolution is set); the title/theater screen presents at
-121 Hz. The in-game frame rate is not measured yet, it needs a wearer.
-
-**Will it hold 120?** Unknown. SA in stereo at 2160 per eye is heavy and it
-may well not hold 120 in the world. The default stays 120 per the standard; if
-a wear shows otherwise, the log line above says which per-app rate to set, and
-this doc should then record the measured rate.
+The build requests the highest offered rate up to the selected setting. The
+Steam title's per-app refresh preference controls which rate SteamVR offers.
+The game loop follows the runtime's actual display period. No stable 120 fps
+gameplay benchmark is claimed here.
 
 **Resolution.** The default is an absolute ~2160 x 2160 per eye, whatever the
 runtime recommends. At session start the port takes the runtime's recommended
@@ -280,13 +272,6 @@ shows `[NEXT LAUNCH]`; it applies on restart. An older `vr_graphics.ini` (which
 holds the old 100% but no marker) is not treated as a choice and gets the
 computed default. Logs: `[vr] eye resolution`, `[vr] eye image WxH` and
 `[stereo] N eye-texture sets created WxH`.
-
-**Wear checklist for display.** 1) Set GTASAVR to 120 Hz in SteamVR's per-app
-settings (already done: 120 and resolution 2160). 2) Launch from Steam and look
-for the `[vr] refresh:` lines and for `[vr] eye resolution` / `[vr] eye image`
-(about 2160 per eye). 3) Play a few minutes in the world. If a
-`not holding` line appears, note the fps it reports and what you saw, and set
-the title to the rate it suggests.
 
 ## Round 3 (2026-10-05): laser dot, tooltips, subtitle gap, grip
 
@@ -341,33 +326,36 @@ check and the controls docs stay as they are.
 
 ## Build (Mac or Linux)
 
-You need the merged game APK, the PS2 audio pack (extracted is fine), an
-Android SDK with NDK 27.2, a JDK, apktool 3.0.3, and the Khronos OpenXR
-loader `.so` (`build-and-install.sh` normally fetches the last two). Run the
-validation step first, because it also generates the aircraft LOD data the
-native build needs:
+Use Python 3.10+, JDK 21, Android platform 35, build-tools 35.0.0, NDK
+27.2.12479018 and CMake 3.22.1. The Frame package also needs the pinned
+Apktool 3.0.3 JAR and Khronos OpenXR Android loader 1.1.43 for arm64. The
+Frame helper `tools/build.sh` requires explicit paths to both files and
+checks their SHA-256 hashes. For download and SDK setup commands, see the
+[README build section](../README.md#build-the-frame-version).
+
+Supply your own Google Play GTA San Andreas 2.11.311 ARM64 merged APK or a
+supported split set. The PS2 audio pack is optional for Steam Frame; without
+it, the game uses its own audio. Build the personal APK and payload:
 
 ```sh
-python3 tools/assemble.py --validate-only --steam-frame --allow-unofficial-source \
-  --game-package <merged.apk> --audio-source <audio dir or .7z> \
-  --build-dir <build> --sdk <sdk> --java-home <jdk> --apktool <apktool.jar>
-
-/bin/bash tools/build.sh --package --steam-frame --allow-unofficial-source \
-  --android-sdk <sdk> --java-home <jdk> --openxr-loader <libopenxr_loader.so> \
-  --apktool <apktool.jar> --build-dir <build> \
-  --game-package <merged.apk> --audio-source <audio dir or .7z>
+/bin/bash tools/build.sh --steam-frame --package \
+  --android-sdk "$ANDROID_HOME" --java-home "$JAVA_HOME" \
+  --openxr-loader "/path/to/libopenxr_loader.so" \
+  --apktool "/path/to/apktool_3.0.3.jar" \
+  --build-dir "$PWD/.frame-build" \
+  --game-package "/path/to/your/GTA-SA-2.11.311-ARM64.apk"
 ```
 
-You get `<build>/out/base.apk` (about 1.4 GB) and `<build>/payload` (about
-2.5 GB). Keep at least 8 GB free while it builds. For a native-only rebuild
-while iterating, run `ninja` in `<build>/native` (it takes about 40 s and
-leaves `libsavr.so`); the Java loader change needs the full build.
+The result is `<build>/out/base.apk` plus `<build>/payload`. The native code
+can be rebuilt alone by running `ninja` in `<build>/native`; changes to the
+Java loader need a full build.
 
 ## Put it on the headset
 
 ```sh
-tools/steam_frame/deploy.sh --apk <build>/out/base.apk \
-  --payload <build>/payload --register-title --no-adb
+export FRAME_HOST="steamos@YOUR_FRAME_ADDRESS"
+tools/steam_frame/deploy.sh --apk "$PWD/.frame-build/out/base.apk" \
+  --payload "$PWD/.frame-build/payload" --register-title --no-adb
 ```
 
 That copies the game data into `~/Documents/GTASAVR` over SSH, then puts the
@@ -377,28 +365,20 @@ from SSH by writing `steam://rungameid/<id>` into `~/.steam/steam.pipe`. The
 id is `(appid << 32) | 0x02000000`, and the appid is in Steam's
 `shortcuts.vdf`.
 
-`FRAME_HOST` is required and must name the user's own Frame SSH target, for
-example `steamos@frame.local`. Do not copy a host value from another setup.
+`FRAME_HOST` must name your own Frame SSH target, for example
+`steamos@frame.local`. Do not copy a host value from another setup.
 
-## Known gaps
+After the first launch, close the game and link its save folder into persistent
+Documents storage:
 
-- The game's own saves go to its app storage. On the Frame that's a folder
-  in the title's compatdata, which a Lepton reset can take with it. Run
-  `deploy.sh --link-saves` once, after the first launch and with the game
-  closed, to point that folder at `~/Documents/GTASAVR/saves`. The game
-  sees the link fine. Whether it writes saves through it is still to be
-  confirmed with a real save.
-- The game data is in the APK and in `data_main`, so it takes up space
-  twice.
-- Bumpers and the D-pad aren't bound yet.
-- What's been checked on the Frame (no one in the headset, 2026-10-03):
-  - The title installs and launches from Steam.
-  - The hooks patch the game fine.
-  - OpenXR comes up on SteamVR's GLES path with an sRGB swapchain.
-  - All three controller profiles are accepted.
-  - Data, PS2 audio and settings load from `~/Documents/GTASAVR`.
-  - The menus present at 72 fps with no failed frames.
-- Stereo gameplay has now been worn twice (see below).
+```sh
+tools/steam_frame/deploy.sh --no-adb --no-install --no-launch --link-saves
+```
+
+## Current limits
+
+- A third-person 3D-screen view is not implemented; third-person play uses the over-the-shoulder camera.
+- The retail game data is present in the APK and payload, so the installed game uses additional storage for the duplicate data.
 
 ## Wear feedback
 
@@ -491,9 +471,10 @@ Fresh Frame settings use third person and snap 30 degrees. Smooth turning
 Explicit saved choices win; the persistent `defaults_profile=frame_personal`
 selects smooth 120 and third person when Defaults is pressed.
 
-LOCOMOTION → CAMERA SETTINGS uses the existing panel assets. The simulation
-pauses while VR settings are open, and stereo rendering continues from the
-pre-menu gameplay camera with current head pose and settings. The yaw-only
+LOCOMOTION → CAMERA SETTINGS uses the existing panel assets for a live camera
+preview. Gameplay simulation pauses while VR settings are open; stereo keeps
+showing the gameplay view with the current head pose and camera settings as
+you adjust them. The yaw-only
 panel anchors to the room, sits to the right by default, and shares its pose
 with pointer hit testing. View recentres its anchor.
 
