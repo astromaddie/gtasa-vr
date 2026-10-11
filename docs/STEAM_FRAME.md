@@ -35,7 +35,8 @@ builds come out the same as before.
   then the original Touch map. A, B, X, Y and Menu are on the right
   controller, View is on the left. Hold View for a second to recentre (both
   hands buzz). Hold for three seconds to recalibrate standing height as well.
-  A short View press goes back in menus; choose the view in LOCOMOTION.
+  A short View press goes back in the VR menu or toggles the global first/third-person
+  view during controllable play. Holds still recentre and recalibrate.
   The left trigger targets, the right trigger fires, and the right stick aims
   while targeting. Bumpers cycle owned weapons. All four left D-pad directions
   are bound to the game's native pad. Clicking both sticks no longer recentres.
@@ -89,7 +90,11 @@ builds come out the same as before.
 
 ## Views, HUD and colour
 
-**Views.** LOCOMOTION, VIEW (the first row):
+**Views.** Short View toggles the global FIRST PERSON / THIRD: OVER SHOULDER
+choice during controllable play; LOCOMOTION, VIEW (the first row) selects the
+same saved setting. The global choice also applies during ordinary vehicle
+gameplay. Per-vehicle CAMERA VIEW settings remain available, while scenes such
+as Just Business and the Rhino can force their own camera behavior.
 
 - **FIRST PERSON** is available from the view setting: you are in CJ's head, the controllers
   are his hands and you hold the guns.

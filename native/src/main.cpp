@@ -10,6 +10,7 @@
 #include "Cheats.h"
 #include "Driving.h"
 #include "FrameTarget.h"
+#include "FrameViewButton.h"
 #include "HdWeapons.h"
 #include "ModelSets.h"
 #include "Holster.h"
@@ -1379,42 +1380,48 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
         }
         openPrev = openChord;
 
-        // Steam Frame system layer on the View button: a short press steps back
-        // in the VR menu (same as B), holding it for 1.0 s recentres with a
-        // short buzz on both hands. Ignored while the session is unfocused.
+        // Steam Frame system layer: short View backs out of the VR menu, or
+        // toggles the global first/third-person choice in controllable play.
+        // Holds recenter at 1 s and recalibrate standing height at 3 s.
         bool viewBack = false;
 #ifdef SAVR_STEAM_FRAME
         {
-            using ViewClock = std::chrono::steady_clock;
-            static bool viewPrev = false, viewFired = false, heightFired = false;
-            static ViewClock::time_point viewDownAt{};
-            const bool viewNow = in.view && xr::IsSessionFocused();
-            if (viewNow && !viewPrev) {
-                viewDownAt = ViewClock::now();
-                viewFired = false; heightFired = false;
-            } else if (viewNow && !viewFired &&
-                       ViewClock::now() - viewDownAt >= std::chrono::milliseconds(1000)) {
-                viewFired = true;
+            const bool viewGameplayEligible = inGameplay && playerExists &&
+                !formalCutscene && controlsEnabled && !widescreen;
+            const auto viewContext = menuPage != PG_NONE
+                ? savr::frameview::Context::Menu
+                : viewGameplayEligible ? savr::frameview::Context::Gameplay
+                                        : savr::frameview::Context::Ignore;
+            static savr::frameview::Button frameViewButton;
+            const auto nowMs = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            const auto viewEvent = frameViewButton.Update(
+                in.view, xr::IsSessionFocused(), viewContext, nowMs);
+            if (viewEvent == savr::frameview::Event::Recenter) {
                 vrcam::RequestRecenter();
                 xr::TriggerHaptic(0, 0.6f, 0.0f, 80.0f);
                 xr::TriggerHaptic(1, 0.6f, 0.0f, 80.0f);
                 LOGW("[savr-frame] View held 1.0 s: recentre");
-            } else if (!viewNow && viewPrev && !viewFired) {
-                viewBack = true;   // released before the hold threshold
             }
-            if(viewNow && !heightFired && ViewClock::now()-viewDownAt>=std::chrono::seconds(3)) {
-                heightFired=true;float p[3]{},q[4]{};
-                if(xr::GetHeadPose(p,q))comfort::CalibrateStanding(p[1]);
+            if (viewEvent == savr::frameview::Event::Recalibrate) {
+                float p[3]{},q[4]{};
+                if (xr::GetHeadPose(p,q)) comfort::CalibrateStanding(p[1]);
                 vrcam::RequestRecenter();
-                xr::TriggerHaptic(0,.6f,0,120);xr::TriggerHaptic(1,.6f,0,120);
+                xr::TriggerHaptic(0, .6f, 0, 120);
+                xr::TriggerHaptic(1, .6f, 0, 120);
             }
-            viewPrev = viewNow;
+            switch (savr::frameview::Button::Route(viewEvent, viewContext)) {
+            case savr::frameview::Action::Back:
+                viewBack = true;
+                break;
+            case savr::frameview::Action::ToggleGameplayView:
+                savr::locomotion::CycleViewMode(+1);
+                break;
+            case savr::frameview::Action::None:
+                break;
+            }
         }
-        // In gameplay (no menu, controls are the player's, no cutscene) a
-        // short View press switches FIRST PERSON <-> THIRD: OVER SHOULDER.
-        // In menus it stays "back".
-        // Gameplay camera mode is chosen in the existing settings page.
-        if(menuPage==PG_NONE)viewBack=false;
 #endif
 
         // Laser pointer on the VR menu panel (Steam Frame). Hovering a row

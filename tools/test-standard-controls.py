@@ -19,6 +19,7 @@ code=r'''
 #include "Symbols.h"
 #include "TrackingRecovery.h"
 #include "VehicleCabin.h"
+#include "FrameViewButton.h"
 #include <limits>
 #define LOGI(...) ((void)0)
 #define LOGW(...) ((void)0)
@@ -63,6 +64,16 @@ V3 Sample(V3 vehiclePosition,V3 vehicleRight,V3 vehicleForward,V3 vehicleUp,bool
 void Write(const char* text){FILE* f=std::fopen("test-locomotion.ini","w");CHECK(f);std::fputs(text,f);std::fclose(f);Load();}
 int main(){
  Write("BindA=1\nBindB=3\nBindX=2\nBindY=4\nBindL3=5\nBindR3=0\nMovementMode=2\nGestureSwim=0\n");
+ // Exercise the production View release classifier and route through the real
+ // persistent locomotion toggle; ordinary vehicle play uses this same global mode.
+ frameview::Button viewButton;
+ CHECK(viewButton.Update(true,true,frameview::Context::Gameplay,100)==frameview::Event::None);
+ CHECK(viewButton.Update(false,true,frameview::Context::Gameplay,200)==frameview::Event::ShortPress);
+ CHECK(frameview::Button::Route(frameview::Event::ShortPress,frameview::Context::Gameplay)==frameview::Action::ToggleGameplayView);
+ int viewBefore=ViewMode();CycleViewMode(+1);CHECK(ViewMode()!=viewBefore);
+ CHECK(viewButton.Update(true,true,frameview::Context::Menu,300)==frameview::Event::None);
+ CHECK(viewButton.Update(false,true,frameview::Context::Menu,400)==frameview::Event::ShortPress);
+ CHECK(frameview::Button::Route(frameview::Event::ShortPress,frameview::Context::Menu)==frameview::Action::Back);
  CHECK(GetButtonBinding(BIND_SRC_L3)==BIND_ACT_SPRINT && GetButtonBinding(BIND_SRC_R3)==BIND_ACT_CROUCH);
  CHECK(GetButtonBinding(BIND_SRC_A)==BIND_ACT_NONE && GetButtonBinding(BIND_SRC_X)==BIND_ACT_JUMP);
  CHECK(GetMovementMode()==2 && !GestureSwimEnabled());
