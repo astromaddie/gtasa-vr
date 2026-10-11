@@ -94,6 +94,27 @@ For a split set, point `--game-package` at the supported archive or folder. The 
 
 Add `--allow-unofficial-source` to the command above when using a merged or resigned backup. A generated combined APK contains commercial game data and is for your personal use; this repository does not distribute it.
 
+### ROM-free release kit
+
+Public Steam Frame kits contain the native library with an empty embedded aircraft-HLOD section, the loader DEX, pinned OpenXR loader, and the local packaging tools and notices. The runtime then reads `files/savr_aircraft.hlod` from the Steam Frame payload. Build the native kit without a game package:
+
+```sh
+/bin/bash tools/build.sh --steam-frame --public-kit \
+  --android-sdk "$ANDROID_HOME" --java-home "$JAVA_HOME" \
+  --openxr-loader "/path/to/libopenxr_loader.so" \
+  --build-dir "$PWD/.frame-public-build"
+```
+
+To make a personal install from an extracted release kit, run its `tools/package_from_release.py` with your own 2.11.311 APK and a private scratch directory. Add `--allow-unofficial-source` for a merged or resigned backup; the retail engine hash is still checked. The helper validates your APK, generates aircraft HLOD locally from its map textures, patches and signs your APK set, and stages the generated HLOD in the personal payload. The personalized APK, payload and signing key contain or derive from commercial game files and must stay private; none are part of the public kit.
+
+```sh
+python3 tools/package_from_release.py \
+  --release-kit "/path/to/extracted-release-kit" \
+  --game-package "$HOME/Downloads/GTA-SA-2.11.311.apk" \
+  --build-dir "$HOME/SAVRBuild" \
+  --allow-unofficial-source
+```
+
 ## Install and play on Steam Frame
 
 Create the first **GTASAVR** library entry with Valve's public [SteamOS Devkit Client Title Upload](https://partner.steamgames.com/doc/steamhardware/steamframe/loadgames). Pair the Frame with the client and upload a folder containing the APK with **Name** `GTASAVR`, **Local Folder** set to that folder, **Start Command** `GTASA-VR.apk`, and **Runtime** `Android`:

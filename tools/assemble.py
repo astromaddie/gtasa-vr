@@ -1450,6 +1450,7 @@ def stage_payload(
     payload: Path,
     build: Path,
     steam_frame: bool = False,
+    runtime_hlod: Path | None = None,
 ) -> dict:
     staging = payload.with_name(payload.name + ".staging")
     clean_directory(staging, build)
@@ -1518,6 +1519,27 @@ def stage_payload(
         )
     hands_manifest = write_tree_metadata(hands_root, hand_entries, "SAVR VR hands")
 
+    hlod_manifest: dict | None = None
+    if runtime_hlod is not None:
+        if not steam_frame:
+            raise KitError("--runtime-hlod is supported only with --steam-frame")
+        if not runtime_hlod.is_file() or runtime_hlod.stat().st_size == 0:
+            raise KitError("--runtime-hlod must be a generated, non-empty aircraft.hlod pack")
+        say("==> staging user-derived aircraft HLOD for Steam Frame runtime fallback")
+        files_root = staging / "files"
+        files_root.mkdir(parents=True, exist_ok=True)
+        destination = files_root / "savr_aircraft.hlod"
+        shutil.copy2(runtime_hlod, destination)
+        hlod_manifest = write_tree_metadata(
+            files_root,
+            [{
+                "path": destination.name,
+                "size": destination.stat().st_size,
+                "sha256": sha256_file(destination),
+            }],
+            "User-derived GTA SA aircraft HLOD",
+        )
+
     if payload.exists():
         ensure_inside(payload, build)
         shutil.rmtree(payload)
@@ -1529,10 +1551,13 @@ def stage_payload(
             data_manifest["totalBytes"]
             + (audio_manifest["totalBytes"] if audio_manifest else 0)
             + hands_manifest["totalBytes"]
+            + (hlod_manifest["totalBytes"] if hlod_manifest else 0)
         ),
     }
     if audio_manifest is not None:
         result["audio"] = audio_manifest
+    if hlod_manifest is not None:
+        result["files"] = hlod_manifest
     (payload / "payload-manifest.json").write_text(
         json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
@@ -1597,6 +1622,7 @@ def main() -> int:
     parser.add_argument("--native-lib")
     parser.add_argument("--loader-dex")
     parser.add_argument("--openxr-loader")
+    parser.add_argument("--runtime-hlod", help="locally generated aircraft.hlod to stage for external Steam Frame fallback")
     parser.add_argument("--keystore")
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument(
@@ -1659,9 +1685,12 @@ def main() -> int:
     native_lib = Path(args.native_lib).expanduser().resolve() if args.native_lib else build / "native" / "libsavr.so"
     loader_dex = Path(args.loader_dex).expanduser().resolve() if args.loader_dex else build / "classes.dex"
     openxr_loader = Path(args.openxr_loader).expanduser().resolve() if args.openxr_loader else None
+    runtime_hlod = Path(args.runtime_hlod).expanduser().resolve() if args.runtime_hlod else None
     keystore = Path(args.keystore).expanduser().resolve() if args.keystore else build / "signing" / "savr.keystore"
     if not args.validate_only and openxr_loader is None:
         raise KitError("--openxr-loader is required for assembly")
+    if runtime_hlod is not None and not args.steam_frame:
+        raise KitError("--runtime-hlod requires --steam-frame")
 
     destructive_paths = (
         *(candidate for _, candidate in disposable),
@@ -1685,6 +1714,8 @@ def main() -> int:
         ("Java", tools.java),
         ("keystore", keystore),
     ]
+    if runtime_hlod is not None:
+        protected_inputs.append(("runtime HLOD", runtime_hlod))
     if openxr_loader is not None:
         protected_inputs.append(("OpenXR loader", openxr_loader))
     for label, protected in protected_inputs:
@@ -1747,7 +1778,7 @@ def main() -> int:
             "the supplied update keystore does not match the existing personal APK set. "
             f"Input signer: {package.signer_sha256}; output signer: {output_signer}"
         )
-    payload_result = stage_payload(package, audio, payload, build, args.steam_frame)
+    payload_result = stage_payload(package, audio, payload, build, args.steam_frame, runtime_hlod)
     result = {
         "formatVersion": 1,
         "steamFrame": bool(args.steam_frame),

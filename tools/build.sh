@@ -21,6 +21,7 @@ AUDIO_SOURCE=""
 KEYSTORE=""
 PACKAGE=0
 ALLOW_UNOFFICIAL_SOURCE=0
+PUBLIC_KIT=0
 
 usage() {
   cat <<'EOF'
@@ -38,6 +39,7 @@ Build options:
 
 Personal package options:
   --package                  Build and verify the personal APK set and payload
+  --public-kit               Build a ROM-free Steam Frame native kit using the external HLOD fallback
   --game-package PATH        Original APK, split folder, or APK archive
   --audio-source PATH        Supported sound-mod folder or archive (optional with
                              --steam-frame: without it the APK's own audio is used)
@@ -188,6 +190,7 @@ while [ "$#" -gt 0 ]; do
     --audio-source|-AudioSource) AUDIO_SOURCE="${2:?missing audio source}"; shift 2 ;;
     --keystore|-Keystore) KEYSTORE="${2:?missing keystore}"; shift 2 ;;
     --package|-Package) PACKAGE=1; shift ;;
+    --public-kit) PUBLIC_KIT=1; shift ;;
     --allow-unofficial-source|-AllowUnofficialSource) ALLOW_UNOFFICIAL_SOURCE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     Debug|RelWithDebInfo|Release)
@@ -203,6 +206,11 @@ case "$CONFIGURATION" in
   Debug|RelWithDebInfo|Release) ;;
   *) die "invalid configuration '$CONFIGURATION'" ;;
 esac
+
+if [ "$PUBLIC_KIT" -eq 1 ]; then
+  [ "$SAVR_STEAM_FRAME" = "ON" ] || die "--public-kit requires --steam-frame"
+  [ "$PACKAGE" -eq 0 ] || die "--public-kit cannot be combined with --package"
+fi
 
 [ -n "$ANDROID_SDK" ] || die "Android SDK path is required (--android-sdk or ANDROID_SDK_ROOT)"
 [ -n "$JAVA_HOME_ARG" ] || die "JDK 21 path is required (--java-home or JAVA_HOME)"
@@ -278,6 +286,17 @@ BUILD_ROOT="$(cd "$BUILD_ROOT" && pwd -P)"
 [ ! -L "$NATIVE_BUILD" ] || die "native build directory must not be a symlink: $NATIVE_BUILD"
 [ ! -e "$NATIVE_BUILD" ] || [ -d "$NATIVE_BUILD" ] || die "native build path is not a directory: $NATIVE_BUILD"
 
+if [ "$PUBLIC_KIT" -eq 1 ]; then
+  HLOD_DIR="$BUILD_ROOT/aircraft-hlod-global"
+  HLOD_FILE="$HLOD_DIR/aircraft.hlod"
+  [ ! -L "$HLOD_DIR" ] || die "public-kit HLOD directory must not be a symlink: $HLOD_DIR"
+  [ ! -e "$HLOD_FILE" ] || [ -f "$HLOD_FILE" ] || die "public-kit HLOD path is not a regular file: $HLOD_FILE"
+  [ ! -L "$HLOD_FILE" ] || die "public-kit HLOD path must not be a symlink: $HLOD_FILE"
+  mkdir -p "$HLOD_DIR"
+  : > "$HLOD_FILE"
+  echo "==> public kit: empty aircraft HLOD enables player-provided runtime fallback"
+fi
+
 EXPECTED_OPENXR_HASH="713E3BB8D955254C670ACC1C4899A65CB8C930E97DD9958BF37EA922D72B7A06"
 OBSERVED_OPENXR_HASH="$(sha256_file "$OPENXR_LOADER")"
 [ "$OBSERVED_OPENXR_HASH" = "$EXPECTED_OPENXR_HASH" ] ||
@@ -309,6 +328,7 @@ if [ "$PACKAGE" -eq 1 ]; then
   if [ "$ALLOW_UNOFFICIAL_SOURCE" -eq 1 ]; then
     ASSEMBLE_ARGS+=(--allow-unofficial-source)
   fi
+  ASSEMBLE_ARGS+=(--runtime-hlod "$BUILD_ROOT/aircraft-hlod-global/aircraft.hlod")
 
   # AircraftHlodData.S embeds generated, package-specific geometry. Validate
   # the supplied retail package and create that input before CMake starts.

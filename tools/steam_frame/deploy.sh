@@ -95,6 +95,8 @@ if [[ -n "$payload" ]]; then
 		name="$(basename "$tree")"
 		if [[ "$name" == data_main ]]; then
 			dest="$data/data_main/"
+		elif [[ "$name" == files ]]; then
+			dest="$data/files/"
 		else
 			dest="$data/files/$name/"
 		fi
