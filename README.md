@@ -4,7 +4,7 @@ This is my Steam Frame fork of [GTA San Andreas VR for Quest](https://github.com
 
 **EXPERIMENTAL.** I made this for personal use, and it is still a work in progress. It targets the Valve Steam Frame. You need your own copy of the Google Play GTA San Andreas **2.11.311 ARM64** game package, either as a merged APK or a supported split set. No game APK, commercial game data or signing key is included.
 
-**Steam Frame download:** Get the prebuilt compiled patchkit from the [v0.1.0 prerelease](https://github.com/astromaddie/gtasa-vr/releases/tag/v0.1.0). It is not a ready-to-install APK: use it with your own compatible Google Play GTA San Andreas 2.11.311 ARM64 APK to assemble the Frame APK locally. No game compiler is needed; the game APK, commercial data and signing key are not included.
+**Steam Frame download:** Get the prebuilt compiled patchkit from the [v0.2.1 prerelease](https://github.com/astromaddie/gtasa-vr/releases/tag/v0.2.1). It is not a ready-to-install APK: use it with your own compatible Google Play GTA San Andreas 2.11.311 ARM64 APK to assemble the Frame APK locally. No game compiler is needed; the game APK, commercial data and signing key are not included.
 
 I've played it on my Frame. Stereo gameplay, menus, 3D cutscenes with subtitles and fades, and the third-person locked camera are working well.
 
@@ -15,6 +15,7 @@ I've played it on my Frame. Stereo gameplay, menus, 3D cutscenes with subtitles 
 - First-person play and a default **third-person over-the-shoulder** view with a level horizon and head tracking.
 - A third-person movement option for turning with the direction of travel or keeping CJ facing the view.
 - 3D stereo cutscenes with subtitles and fades, plus flat cinema and head-tracked cinematic options.
+- Hold A for half a second to skip supported cutscenes. A white ring fills clockwise beside “Hold to skip”; a tap keeps the scene playing.
 - Live camera previews in the paused VR settings menu. Adjust world size, camera distance and height while seeing the effect on the game.
 - Hold left grip and use the right stick to adjust world size, camera distance and height during play.
 - Snap, smooth or disabled stick turning, movement direction options, seated calibration and head movement settings.
@@ -53,6 +54,7 @@ The [Steam Frame guide](docs/STEAM_FRAME.md) covers the setup, controls, display
 | View, short press | Back in menus; switch view in play |
 | View, held | Recentre; hold longer to recalibrate standing height |
 | Right controller Menu | Pause |
+| A during a skippable cutscene, held half a second | Skip the cutscene |
 | Both grips + Menu or Y | Open the VR settings menu |
 
 Set GTASAVR's display rate in SteamVR's per-app settings. The render-scale default adapts to SteamVR's recommended eye size to target 2160×2160 per eye.
