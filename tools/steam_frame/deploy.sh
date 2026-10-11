@@ -27,8 +27,7 @@
 #   --no-adb           only SSH steps (payload, title); no Lepton Development
 #
 # Environment:
-#   FRAME_HOST       ssh target (default steamos@192.168.1.31, the Frame on
-#                    Wi-Fi; over USB networking use steamos@10.86.200.233)
+#   FRAME_HOST       required SSH target, for example steamos@frame.local
 #   FRAME_ADB_HOST   adb host (default: the host part of FRAME_HOST). Lepton
 #                    Development publishes its adbd on <host>:5555
 #   ADB              adb binary
@@ -50,7 +49,7 @@ title="GTASAVR"                  # Steam devkit titles must be alphanumeric
 title_apk="GTASA-VR.apk"         # fixed name: the title's argv stays valid across builds
 data="Documents/GTASAVR"         # relative to the Frame user's home; /sdcard/Documents/GTASAVR in Lepton
 
-frame_host="${FRAME_HOST:-steamos@192.168.1.31}"
+frame_host="${FRAME_HOST:-}"
 adb_host="${FRAME_ADB_HOST:-${frame_host#*@}}"
 adb_bin="${ADB:-${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools/adb}"
 [[ -x "$adb_bin" ]] || adb_bin="$(command -v adb || true)"
@@ -79,6 +78,7 @@ while (($#)); do
 	*) die "unknown option $1" ;;
 	esac
 done
+[[ -n "$frame_host" ]] || die 'set FRAME_HOST to steamos@<your-frame-host>'
 
 ssh_frame() { ssh -o ConnectTimeout=10 -o BatchMode=yes "$frame_host" "$@"; }
 # The app inside Lepton runs as its own Android user: everything it must read

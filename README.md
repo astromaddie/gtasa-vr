@@ -1,62 +1,31 @@
-# GTA San Andreas VR for Quest
+# GTA San Andreas VR on Steam Frame — experimental source
 
-Version `0.3.1 alpha`. Source code and build tools for the Quest VR mod.
+**Upstream Quest port:** [dubrovskiy-yevhen-stakelogic/gta-sa-vr-quest](https://github.com/dubrovskiy-yevhen-stakelogic/gta-sa-vr-quest). This repository is the [astromaddie Steam Frame fork](https://github.com/astromaddie/gtasa-vr/tree/steam-frame). It adds the Lepton manifest and Frame controller profiles, relocates persistent game files to Documents, and includes an experimental paused camera preview with physical grip-and-stick adjustment. Quest support remains in the fork.
 
-## Requirements
+**Status: EXPERIMENTAL.** This is personal-use source preparation only; repository visibility and release state are unchanged. Older builds were worn; the prior camera-migration source and packaging repair passed host checks, ARM64 package verification and an unattended Steam-title boot. The current preview, modifier controls, remaps and recentring have not been accepted while worn. See [Steam Frame architecture and validation](docs/STEAM_FRAME.md).
 
-- A complete Google Play GTA San Andreas `2.11.311` ARM64 APK split set.
-- The supported audio archive `gta-sa-ps2-style-mod-pack_1786856007_737162.7z`,
-  or its extracted audio directory. Select **Original plan mod pack** on the
-  [download page](https://libertycity.net/files/gta-san-andreas-ios-android/241069-gta-sa-classic-avanced-mod-pack.html).
-- Windows 10/11, Linux x86_64, or macOS, with an internet connection for tools.
-- Quest Developer Mode and authorized USB debugging for installation.
+| Area | Evidence and limit |
+|---|---|
+| Build and package | Prior runtime camera source `e7e8cb2ae8413412ba561689f8b014fd16dce484`; prior packaging repair `313999d742bc3f21c891a3e4bfd74e0d6011729d`. |
+| Frame launch | The rebuilt ARM64 APK and Steam-title boot were verified unattended; session/profile suggestions and game frames were observed. |
+| Worn behavior | Prior builds were worn; current camera preview and all new physical adjustments remain pending. |
+| Save persistence | The save-folder link route exists, but writing and restoring an actual save through the link is not confirmed. |
+| Performance | This README makes no current-source performance claim. Prior cadence observations do not establish a sustained rate. |
 
-## Build and install
+## Build from a fresh checkout
 
-1. Export the installed Google Play game from an Android device with
-   `EXPORT_PLAY_APKS.bat`. Keep `base.apk` and every exported split together.
-2. Run `BUILD_AND_INSTALL.bat` on Windows or `bash BUILD_AND_INSTALL.sh` on
-   Linux/macOS.
-3. Select the complete APK export and the supported audio input.
-4. Connect Quest, authorize USB debugging, and follow the installer prompts.
+Build on macOS or Linux with JDK 21, Android SDK/NDK and Python 3. The package input must come from the user's legally owned Google Play GTA San Andreas 2.11.311 ARM64 APK or supported split set. The optional audio archive is not included.
 
-The installer leaves the game stopped. Preserve the personal signing key for
-future installations. See [BUILDING.md](BUILDING.md) for command-line options.
-
-## Proper Fixes
-
-1. Supply an SA Mobile - Proper Fixes archive or extracted directory containing
-   `com.rockstargames.gtasa/files`.
-2. Run `INSTALL_PROPER_FIXES.bat` and select that input.
-3. Start the game, open **VR MENU > MODEL SET**, enable **PROPER FIXES**, and
-   fully restart the game.
-
-The script prepares and verifies the pack under `files/optionalmods/properfixes`.
-It retains the input pack and its credits. Set **PROPER FIXES** to **OFF** and
-restart to use the original game assets. `DISABLE_OPTIONAL_MODS.bat` disables
-optional model sets from the computer.
-
-To prepare the pack without installing it:
-
-```powershell
-./tools/install-optional-mod.ps1 -Kind properfixes -Archive <path> -PrepareOnly
+```sh
+git clone --branch steam-frame https://github.com/astromaddie/gtasa-vr.git
+cd gtasa-vr
+tools/build.sh --steam-frame --package \
+  --game-package /path/to/your/GTA-SA-2.11.311-ARM64.apk \
+  --build-dir "$PWD/.frame-build"
 ```
 
-## HD weapons
+The command builds a personal signed package and payload; it does not install or launch the game. Do not redistribute the supplied game package, derived assets or signing key. Prerequisites and packaging details are in [docs/STEAM_FRAME.md](docs/STEAM_FRAME.md); license scope is in [NOTICE.md](NOTICE.md).
 
-Run `INSTALL_HD_WEAPONS.bat` with a compatible mobile weapon pack, then enable
-**HD WEAPONS** in **VR MENU > MODEL SET** and fully restart the game. Weapon
-packs are supplied separately.
+A focused headset acceptance run remains pending for installation, real input, tracking/recentering, stereo, menus, gameplay, pause/resume, save writes and reload, clean exit and actual performance. No Frame launch or mutation is part of this source-preparation task.
 
-## Settings
-
-- `RESET_VR_SETTINGS.bat` or `bash RESET_VR_SETTINGS.sh` restores default VR
-  settings after confirmation, preserving saves and game assets.
-- `tools/export-savr-settings.ps1` exports VR settings to the computer.
-- `COLLECT_RENDER_REPORT.bat` collects a render diagnostic report.
-
-## License
-
-See [LICENSE](LICENSE), [NOTICE.md](NOTICE.md), and the licenses alongside
-third-party files. Game APKs, game assets, audio packs, and signing keys are
-provided locally and are not included in this source kit.
+The previous root README is preserved in [docs/README_PRE_PR0.md](docs/README_PRE_PR0.md). Current source identity, checks and blockers are listed in [docs/PR0_READINESS.md](docs/PR0_READINESS.md).

@@ -9,6 +9,10 @@
 - **VR hand assets** (`assets/vrhands/`): derived from UltimateXR SDK,
   copyright VRMADA, MIT License. Source attribution and license are beside
   the assets.
+- **sfvr adjustment and camera helpers** (`native/vendor/sfvr/`): MIT License,
+  copyright Madison (astromaddie). The copied license and README identify the
+  upstream project and the two included source modules. This notice applies
+  only to those helper files.
 - **gta-reversed / gta-reversed-modern**:
   [community reverse-engineering reference](https://github.com/gta-reversed/gta-reversed-modern)
   for original game behavior. The VR layer targets the retail mobile ARM64

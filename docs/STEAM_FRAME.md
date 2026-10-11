@@ -377,8 +377,8 @@ from SSH by writing `steam://rungameid/<id>` into `~/.steam/steam.pipe`. The
 id is `(appid << 32) | 0x02000000`, and the appid is in Steam's
 `shortcuts.vdf`.
 
-`FRAME_HOST` picks the SSH target. The default is the Frame on Wi-Fi,
-`steamos@192.168.1.31`.
+`FRAME_HOST` is required and must name the user's own Frame SSH target, for
+example `steamos@frame.local`. Do not copy a host value from another setup.
 
 ## Known gaps
 

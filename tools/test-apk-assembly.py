@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Regress classic APK ZIP headers and Frame-vs-Quest signing policy."""
-import ast,importlib.util,struct,sys,tempfile,zipfile,subprocess
+import ast,importlib.util,os,struct,sys,tempfile,zipfile,subprocess
 from pathlib import Path
 from types import SimpleNamespace
 root=Path(__file__).resolve().parent.parent if len(sys.argv)==1 else Path(sys.argv[1])
@@ -33,7 +33,9 @@ with tempfile.TemporaryDirectory(prefix='savr-apk-test-') as d:
     tag,size=struct.unpack_from('<HH',info.extra,cursor);assert tag!=1,'no stale ZIP64 extra';cursor+=4+size
   assert z.getinfo('assets/preserved.bin').extra==b'\x35\xd9\x04\x00KEEP'
  mod.audit_rewrite(old,new,{'classes.dex'},{'lib/arm64-v8a/libsavr.so'})
- zipalign=Path('/Users/mads/Library/Android/sdk/build-tools/35.0.0/zipalign')
+ sdk=Path(os.environ.get('ANDROID_SDK_ROOT') or os.environ.get('ANDROID_HOME') or
+          (Path.home()/('Library/Android/sdk' if sys.platform=='darwin' else 'Android/Sdk')))
+ zipalign=sdk/'build-tools/35.0.0/zipalign'
  if zipalign.is_file():
   aligned=p/'aligned.apk';subprocess.run([str(zipalign),'-P','16','-f','4',str(new),str(aligned)],check=True)
   subprocess.run([str(zipalign),'-c','-P','16','4',str(aligned)],check=True)
