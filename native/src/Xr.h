@@ -110,6 +110,10 @@ enum MenuRowsId {
 
 // Copy out the most recent controller state. Cheap; safe to call every frame.
 void GetInput(InputState& out);
+#ifdef SAVR_STEAM_FRAME
+// GameThread publishes one coherent cue value; present thread owns its GL draw.
+void PublishCutsceneSkip(bool eligible, float progress);
+#endif
 
 // Fire a controller vibration pulse on one hand (0 left, 1 right).
 void TriggerHaptic(int hand, float amplitude, float frequencyHz,

@@ -110,7 +110,7 @@ set_property(SOURCE src/AircraftHlodData.S PROPERTY OBJECT_DEPENDS
     "${AIRCRAFT_HLOD_PACK}")
 
 if(SAVR_STEAM_FRAME)
-    target_sources(savr PRIVATE src/CameraComfort.cpp
+    target_sources(savr PRIVATE src/CameraComfort.cpp src/CutsceneSkip.cpp
         vendor/sfvr/src/sfvr_adjust.c vendor/sfvr/src/sfvr_camera.c)
     target_include_directories(savr PRIVATE vendor/sfvr/include)
 endif()

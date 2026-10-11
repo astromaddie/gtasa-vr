@@ -41,7 +41,16 @@ builds come out the same as before.
   while targeting. Bumpers cycle owned weapons. All four left D-pad directions
   are bound to the game's native pad. Clicking both sticks no longer recentres.
 - **Pause and cutscenes.** Menu opens the game's pause menu in play. During a
-  story cutscene, hold Menu for half a second to skip it (a tap does nothing).
+  story cutscene, hold A for half a second to skip it (a tap does nothing).
+  A white ring around A fills clockwise beside “Hold to skip” in the lower
+  right of the picture. The Steam Frame hold supplies one engine-tick input
+  pulse to the native cinematic manager and authored script skip handlers,
+  including formal cinematics in missions whose mobile skip input is blocked.
+  Release A in the scene before starting the hold. View, grips, menus,
+  pause, focus loss and scene transitions cancel a pending hold. This does not
+  skip arbitrary scripted gameplay cameras or the specially handled `finale`.
+  This revised skip path is host-tested and **headset-unverified**; native trace,
+  safeguards and the wear checklist are in [CUTSCENE_SKIP.md](CUTSCENE_SKIP.md).
   Story cutscenes default to CINEMA 3D: a 2.56 x 1.44 m screen 2 m ahead,
   fixed in the room where the cutscene starts (a View-hold recentre moves it),
   showing the director camera in stereo from two parallel off-axis cameras

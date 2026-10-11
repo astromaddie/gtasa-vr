@@ -20,6 +20,7 @@
 #include "Locomotion.h"
 #ifdef SAVR_STEAM_FRAME
 #include "CameraComfort.h"
+#include "CutsceneSkip.h"
 #include <sfvr/sfvr_camera.h>
 #endif
 #include "Log.h"
@@ -5352,6 +5353,14 @@ void CycleOwnedWeapon(int direction) {
         }
     }
 }
+
+#ifdef SAVR_STEAM_FRAME
+bool (*g_origCutsceneSkipInput)(){};
+bool OnCutsceneSkipInput() {
+    return cutsceneskip::FilterNativeInput(g_origCutsceneSkipInput,
+        xr::IsSessionFocused(), xr::IsMenuVisible() || IsMobileMenuOpen());
+}
+#endif
 
 void OnUpdatePads() {
     g_origUpdatePads();
@@ -25327,7 +25336,8 @@ void OnScanWorld() {
 }
 
 void* InstallTrampoline(void* target, void* replacement,
-                        std::uintptr_t boatAlphaGotPage=0) {
+                        std::uintptr_t boatAlphaGotPage=0,
+                        std::uintptr_t cutsceneSkipGotPage=0) {
     const std::uintptr_t pageSize = static_cast<std::uintptr_t>(sysconf(_SC_PAGESIZE));
 
     void* tramp = mmap(nullptr, pageSize, PROT_READ | PROT_WRITE | PROT_EXEC,
@@ -25351,8 +25361,14 @@ void* InstallTrampoline(void* target, void* replacement,
         t[1]=0x580000e9u; // LDR X9, same literal (PC is trampoline+4)
         *reinterpret_cast<std::uintptr_t*>(t+8)=boatAlphaGotPage;
     }
+    // The exact skip-input prologue has an ADRP X8 in its fourth word. Keep
+    // its three stack instructions, replacing only ADRP with a literal load.
+    if (cutsceneSkipGotPage) {
+        t[3]=0x580000a8u; // LDR X8, literal at trampoline+32 (PC is +12)
+        *reinterpret_cast<std::uintptr_t*>(t+8)=cutsceneSkipGotPage;
+    }
     __builtin___clear_cache(reinterpret_cast<char*>(t),
-                            reinterpret_cast<char*>(t) + (boatAlphaGotPage?40:32));
+                            reinterpret_cast<char*>(t) + ((boatAlphaGotPage||cutsceneSkipGotPage)?40:32));
 
     auto* code = reinterpret_cast<uint32_t*>(target);
     const std::uintptr_t start = reinterpret_cast<std::uintptr_t>(code) & ~(pageSize - 1);
@@ -30699,6 +30715,23 @@ bool Install() {
     // Resolve-thread I/O: keep the first RenderScene hook free of settings-file
     // access even when the Graphics page has never been opened.
     EnsureGraphicsSettingsLoaded();
+#ifdef SAVR_STEAM_FRAME
+    // Predicate is also used by script skip labels. Wrap it only for formal
+    // cinematics; call the relocated original in every other context.
+    constexpr std::uint32_t skipInputPrologue[]{
+        0xa9be7bfdu, 0xf9000bf3u, 0x910003fdu, 0xf0002608u};
+    if (g.CCutsceneMgr_SkipButton &&
+        reinterpret_cast<std::uintptr_t>(g.CCutsceneMgr_SkipButton) == g.LoadBase + 0x374934u &&
+        std::memcmp(reinterpret_cast<void*>(g.CCutsceneMgr_SkipButton),
+                    skipInputPrologue, sizeof(skipInputPrologue)) == 0) {
+        g_origCutsceneSkipInput = reinterpret_cast<bool (*)()>(InstallTrampoline(
+            reinterpret_cast<void*>(g.CCutsceneMgr_SkipButton),
+            reinterpret_cast<void*>(&OnCutsceneSkipInput), 0, g.LoadBase + 0x837000u));
+    }
+    cutsceneskip::SetNativeInputFilterInstalled(g_origCutsceneSkipInput != nullptr);
+    if (!g_origCutsceneSkipInput)
+        LOGE("[cutscene.skip] hold disabled: native input filter fingerprint/install failed");
+#endif
     constexpr std::uint32_t textPrologue[]{0xd10183ffu,0xa9037bfdu,0xf90023f5u,0xa9054ff4u};
     if(g.CText_Get&&std::memcmp(g.CText_Get,textPrologue,sizeof(textPrologue))==0) {
         g_origGetText=reinterpret_cast<GetTextFn>(InstallTrampoline(g.CText_Get,reinterpret_cast<void*>(&OnGetText)));

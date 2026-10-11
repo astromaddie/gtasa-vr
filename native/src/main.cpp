@@ -18,6 +18,7 @@
 #include "Locomotion.h"
 #ifdef SAVR_STEAM_FRAME
 #include "CameraComfort.h"
+#include "CutsceneSkip.h"
 #endif
 #include "Log.h"
 #include "StoragePaths.h"
@@ -2396,6 +2397,21 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
     static bool providerUp = false, providerDown = false;
     static bool providerLeft = false, providerRight = false;
 
+#ifdef SAVR_STEAM_FRAME
+    static savr::cutsceneskip::Button cutsceneSkipButton;
+    const bool skipBlocked = in.menu || in.view || in.grip[0] >= 0.25f ||
+        in.grip[1] >= 0.25f || menuWasOpen || anyMenu || vrcam::IsMobileMenuOpen();
+    if (cutsceneSkipButton.Update(in.a, xrFocused, skipBlocked,
+                                 static_cast<std::uint64_t>(perf::MonotonicMs()))) {
+        LOGI("[cutscene.skip] A held 0.5 s: native cinematic finish (%.8s)",
+             g.CCutsceneMgr_ms_cutsceneName);
+        xr::TriggerHaptic(0, 0.6f, 160.0f, 80.0f);
+        xr::TriggerHaptic(1, 0.6f, 160.0f, 80.0f);
+    }
+    xr::PublishCutsceneSkip(cutsceneSkipButton.Eligible(), cutsceneSkipButton.Progress());
+    // Do not leave a synthetic Cross press in the first gameplay frames.
+    constexpr bool skipCross = false;
+#else
     // Skip a story cutscene: hold Menu for about half a second. The mobile
     // game skips by touching its on-screen arrow, and its own test
     // (CCutsceneMgr::IsCutsceneSkipButtonBeingPressed) also accepts a fresh
@@ -2428,6 +2444,7 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
     }
     const bool skipCross = skipPulseFrames > 0;
     if (skipPulseFrames > 0) --skipPulseFrames;
+#endif
 
     if (inGameplay && !anyMenu && !grips) {
         // The engine's stick Y runs the opposite way to OpenXR's, so it is flipped.
@@ -2551,7 +2568,7 @@ void SendInputToGame(JNIEnv* env, jclass clazz) {
         if (cutsceneRunning || controlsDisabled || !playerExists ||
             vrcam::IsMobileMenuOpen()) {
             LOGI("[input] Menu: pause menu not requested (cutscene=%d controlsDisabled=%d player=%d menuOpen=%d); "
-                 "in a cutscene hold Menu to skip",
+                 "cutscene skip uses a deliberate hold",
                  cutsceneRunning, controlsDisabled, playerExists,
                  vrcam::IsMobileMenuOpen());
         } else {

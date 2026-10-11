@@ -72,6 +72,9 @@
 #include "StoragePaths.h"
 
 namespace savr::xr {
+#ifdef SAVR_STEAM_FRAME
+void DrawCutsceneSkipOverlay(int width, int height, float displayAspect, float pictureBottom);
+#endif
 namespace {
 
 constexpr char kModVersion[] = "0.3.1.0";  // internal build id (4th digit)
@@ -111,6 +114,10 @@ struct HudTextTexture {
 HudTextTexture g_briefTextTexture;
 HudTextTexture g_cinemaSubtitleTexture;   // 3D cinema band: subtitles (Java style 2)
 HudTextTexture g_cinemaHelpTexture;       // 3D cinema band: tutorial help box (style 3)
+#ifdef SAVR_STEAM_FRAME
+HudTextTexture g_skipLabelTexture, g_skipButtonTexture;
+std::atomic<float> g_cutsceneSkipProgress{-1.0f}; // negative = unavailable
+#endif
 HudTextTexture g_bigTextTexture;
 HudTextTexture g_timerTextTexture;
 HudTextTexture g_breathTextTexture;
@@ -5221,6 +5228,11 @@ bool RenderTheaterQuad(XrSpace space, XrCompositionLayerQuad& quad,
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
     }
+#ifdef SAVR_STEAM_FRAME
+    if (source == TheaterFrameSource::GameSurface)
+        DrawCutsceneSkipOverlay(s.theater.width, s.theater.height,
+            static_cast<float>(s.theater.width) / s.theater.height, 0.92f);
+#endif
 
     // Late GL colours use the same legacy/display-referred byte space as the
     // already-encoded game frame (including the RGBA8 hand albedo), so keep sRGB
@@ -5979,6 +5991,13 @@ void SyncInput(XrTime displayTime) {
 void GetInput(InputState& out) {
     out = s.input;
 }
+
+#ifdef SAVR_STEAM_FRAME
+void PublishCutsceneSkip(bool eligible, float progress) {
+    g_cutsceneSkipProgress.store(eligible ? std::clamp(progress, 0.0f, 1.0f) : -1.0f,
+                                 std::memory_order_relaxed);
+}
+#endif
 
 void TriggerHaptic(int hand, float amplitude, float frequencyHz,
                    float durationMs) {
@@ -12804,6 +12823,20 @@ void main() {
     vec2 local = (screenUv - uDestinationRect.xy) / uDestinationRect.zw;
     if (local.x < 0.0 || local.y < 0.0 || local.x > 1.0 || local.y > 1.0)
         discard;
+    if (uUseTexture > 1.5) {
+        vec2 d = (local - 0.5) * 2.0;
+        float radius = length(d);
+        float aa = max(fwidth(radius), 0.001);
+        if (radius > 1.0 + aa) discard;
+        // Top-left coordinates: atan(x,-y) starts at 12 and grows clockwise.
+        float angle = mod(atan(d.x, -d.y) + 6.28318530718, 6.28318530718);
+        float filled = step(angle, uTint.x * 6.28318530718) * step(0.0001, uTint.x);
+        float ring = smoothstep(0.78 - aa, 0.78 + aa, radius);
+        float edge = 1.0 - smoothstep(1.0 - aa, 1.0 + aa, radius);
+        outColor = vec4(vec3(ring * mix(0.3, 1.0, filled)), 0.75 * edge);
+        if (filled > 0.5 && ring > 0.5) outColor = vec4(vec3(1.0), ring * edge);
+        return;
+    }
     outColor = texture(uTexture, local);
 }
 )";
@@ -12867,6 +12900,90 @@ constexpr float kCinemaSubtitleY = kCinemaPictureFrac;
 // The tutorial help box goes under the subtitle text (or at the top of the band
 // when there is none), this far below it.
 constexpr float kCinemaHelpGapM = 0.02f;
+
+void DrawCutsceneSkipOverlay(int width, int height, float displayAspect, float pictureBottom) {
+    float progress = g_cutsceneSkipProgress.load(std::memory_order_relaxed);
+    if (progress < 0.0f || !IsSessionFocused() || IsMenuVisible() ||
+        s.input.menu || s.input.view || s.input.grip[0] >= 0.25f ||
+        s.input.grip[1] >= 0.25f) return;
+    if (!s.input.a) progress = 0.0f; // release feedback without waiting for game tick
+    // Both theater and stereo call this, including copies without FXAA. Own all
+    // state we touch so callers need no shader-specific save/restore assumptions.
+    struct SavedState {
+        GLint program{}, vao{}, active{}, texture{}, sampler{}, viewport[4]{}, unpack{};
+        GLint srcRgb{}, dstRgb{}, srcAlpha{}, dstAlpha{}, eqRgb{}, eqAlpha{};
+        GLboolean mask[4]{}, depth{}, cull{}, scissor{}, blend{}, stencil{}, discard{};
+        SavedState() {
+            glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+            glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
+            glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+            glActiveTexture(GL_TEXTURE0);
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+            glGetIntegeri_v(GL_SAMPLER_BINDING, 0, &sampler);
+            glGetIntegerv(GL_VIEWPORT, viewport);
+            glGetIntegerv(GL_UNPACK_ALIGNMENT, &unpack);
+            glGetBooleanv(GL_COLOR_WRITEMASK, mask);
+            depth=glIsEnabled(GL_DEPTH_TEST); cull=glIsEnabled(GL_CULL_FACE);
+            scissor=glIsEnabled(GL_SCISSOR_TEST); blend=glIsEnabled(GL_BLEND);
+            stencil=glIsEnabled(GL_STENCIL_TEST); discard=glIsEnabled(GL_RASTERIZER_DISCARD);
+            glGetIntegerv(GL_BLEND_SRC_RGB, &srcRgb); glGetIntegerv(GL_BLEND_DST_RGB, &dstRgb);
+            glGetIntegerv(GL_BLEND_SRC_ALPHA, &srcAlpha); glGetIntegerv(GL_BLEND_DST_ALPHA, &dstAlpha);
+            glGetIntegerv(GL_BLEND_EQUATION_RGB, &eqRgb); glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &eqAlpha);
+        }
+        ~SavedState() {
+            glUseProgram(program); glBindVertexArray(vao);
+            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, texture);
+            glBindSampler(0, sampler); glActiveTexture(active);
+            glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, unpack);
+            glColorMask(mask[0], mask[1], mask[2], mask[3]);
+            const auto enable = [](GLenum cap, GLboolean enabled) {
+                if (enabled) glEnable(cap); else glDisable(cap);
+            };
+            enable(GL_DEPTH_TEST, depth); enable(GL_CULL_FACE, cull);
+            enable(GL_SCISSOR_TEST, scissor); enable(GL_BLEND, blend);
+            enable(GL_STENCIL_TEST, stencil); enable(GL_RASTERIZER_DISCARD, discard);
+            glBlendFuncSeparate(srcRgb, dstRgb, srcAlpha, dstAlpha);
+            glBlendEquationSeparate(eqRgb, eqAlpha);
+        }
+    } saved;
+    if (!BuildCinemaOverlayProgram()) return;
+    UpdateHudTextTexture(g_skipLabelTexture, u"Hold to skip", 0, 1);
+    UpdateHudTextTexture(g_skipButtonTexture, u"A", 0, 1);
+    glViewport(0, 0, width, height);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_STENCIL_TEST); glDisable(GL_RASTERIZER_DISCARD);
+    glEnable(GL_BLEND);
+    glBlendEquation(GL_FUNC_ADD);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(g_cinemaOverlayProgram);
+    glBindVertexArray(s.hudCompositeVertexArray);
+    glActiveTexture(GL_TEXTURE0);
+    glBindSampler(0, s.hudCompositeSampler);
+    glUniform1i(g_cinemaOverlayTextureUniform, 0);
+    // Corner prompt stays in the picture, above the dedicated subtitle band.
+    // Texture rects preserve the 4:1 Java raster in physical screen dimensions.
+    const float cy = pictureBottom - 0.045f * displayAspect;
+    constexpr float ringX = 0.765f, labelX = 0.878f, diameter = 0.038f;
+    glUniform1f(g_cinemaOverlayUseTextureUniform, 2.0f);
+    glUniform4f(g_cinemaOverlayTintUniform, progress, 0, 0, 0);
+    glUniform4f(g_cinemaOverlayDestUniform, ringX - diameter/2,
+        cy - diameter * displayAspect/2, diameter, diameter * displayAspect);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    const auto text = [&](const HudTextTexture& texture, float cx) {
+        if (!texture.visible || !texture.texture) return;
+        constexpr float w = 0.65f;
+        const float h = w * displayAspect / 4.0f;
+        glBindTexture(GL_TEXTURE_2D, texture.texture);
+        glUniform1f(g_cinemaOverlayUseTextureUniform, 1.0f);
+        glUniform4f(g_cinemaOverlayDestUniform, cx-w/2, cy-h/2, w, h);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+    };
+    text(g_skipButtonTexture, ringX);
+    text(g_skipLabelTexture, labelX);
+
+}
 
 void DrawCinemaOverlay(int targetWidth, int targetHeight, unsigned fadeRgba,
                        bool subtitlesBeforeFade) {
@@ -13324,6 +13441,12 @@ bool RenderStereoEyeProjection(XrCompositionLayerProjection& layer,
             }
         }
         if (!cinemaSlot) DrawScopeOverlay(chain.width, chain.height, bakedScope, rp);
+#ifdef SAVR_STEAM_FRAME
+        DrawCutsceneSkipOverlay(chain.width, chain.height,
+            cinemaSlot ? kCinemaScreenW / kCinemaTotalH :
+                static_cast<float>(chain.width) / chain.height,
+            cinemaSlot ? kCinemaPictureFrac : 0.92f);
+#endif
         EndXrGpuStage(overlayGpuTimer);
         RecordXrCpuStage(e, XrCpuStage::OverlaySubmit, overlayWallStartMs,
                          overlayCpuStartMs);
@@ -13867,8 +13990,18 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs) {
                 stereoProjectionOutcome = probeFailure;
             }
 
+            // Cached images include the cue. Redraw while it is published and
+            // once after disappearance to erase it; ordinary repeats stay zero-copy.
+            static bool cachedProjectionHasSkipCue = false;
+#ifdef SAVR_STEAM_FRAME
+            const bool skipCuePublished =
+                g_cutsceneSkipProgress.load(std::memory_order_relaxed) >= 0.0f;
+#else
+            constexpr bool skipCuePublished = false;
+#endif
+            const bool skipCueNeedsCopy = skipCuePublished || cachedProjectionHasSkipCue;
             bool projectionReady = false;
-            if (submitProjection && selectedStereoRepeat &&
+            if (!skipCueNeedsCopy && submitProjection && selectedStereoRepeat &&
                 projectedRepeatCount > 0 &&
                 BuildCachedStereoEyeProjection(
                     eyeProjection, eyeViews, candidate.sequence,
@@ -13886,6 +14019,7 @@ void RenderFrame(double consumerUpdateMs, double consumerUpdateCpuMs) {
                     submittedStereoSequenceAgeMs, stereoProjectionOutcome,
                     eyeReleaseFailureMask, fxaaStats);
                 projectionFullCopy = projectionReady;
+                if (projectionReady) cachedProjectionHasSkipCue = skipCuePublished;
             }
 
 #ifdef SAVR_STEAM_FRAME

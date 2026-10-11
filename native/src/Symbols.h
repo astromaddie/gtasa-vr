@@ -62,6 +62,11 @@ struct GameSymbols {
     void  (*CAudioEngine_PreloadCutscene)(void* self, short a, unsigned char b);
     void  (*implOnBackButtonPressed)(void* env, void* clazz);
     void  (*CCutsceneMgr_Skip)();
+    bool  (*CCutsceneMgr_SkipButton)();
+    bool  (*CCutsceneMgr_HasFinished)();
+    int*  CCutsceneMgr_ms_loadStatus;
+    int*  CCutsceneMgr_ms_playStatus;
+    float* CCutsceneMgr_ms_timer;
     void  (*CCutsceneMgr_Start)();
     bool* CCutsceneMgr_ms_running;
     char* CCutsceneMgr_ms_cutsceneName;
