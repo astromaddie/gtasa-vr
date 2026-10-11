@@ -1,5 +1,12 @@
 # Building
 
+This page documents the original Quest builder helpers. For the Steam Frame
+APK and payload, use the [Frame build guide](README.md#build-the-frame-apk-and-payload):
+that route uses Bash on macOS, Linux, or Windows WSL2 and accepts a supported
+merged/resigned backup with `--allow-unofficial-source` while retaining the
+pinned retail `libGame.so` hash check. The PowerShell commands below are not a
+Steam Frame build route.
+
 ## Windows
 
 Run `BUILD_AND_INSTALL.bat`, or prepare a build without a Quest:
@@ -31,10 +38,10 @@ Omit `--build-only` for installation. Output runs are stored under
 
 ## Inputs and signing
 
-The game input must contain the official Google Play `com.rockstargames.gtasa`
+For this Quest workflow, the game input must contain the official Google Play `com.rockstargames.gtasa`
 version `2.11.311` (`4234641`), its ARM64 library, the `data_main` split, and any
 installed locale/density splits. Selecting `base.apk` includes sibling splits.
-The builder verifies the official signer and supported `libGame.so` hash.
+The Quest builder verifies the official signer and supported `libGame.so` hash.
 
 The audio input must match `tools/audio-reference.json`. Only validated audio
 files are copied. Aircraft HLOD is generated locally from the supplied game

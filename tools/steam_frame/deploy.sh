@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install, launch and feed GTA San Andreas VR on a Valve Steam Frame (Android in
-# the Lepton container) from a Mac or Linux host. See docs/STEAM_FRAME.md.
+# the Lepton container) from x86-64 Linux, macOS or x86-64 Ubuntu in WSL2. See docs/STEAM_FRAME.md.
 #
 #   tools/steam_frame/deploy.sh [options]
 #
@@ -11,9 +11,10 @@
 #                      ~/Documents/GTASAVR (data_main -> data_main/, the rest
 #                      -> files/) with rsync over SSH. Several GB the first
 #                      time; later runs copy only what changed.
-#   --register-title   register ~/devkit-game/GTASAVR as a persistent Steam
-#                      library title (once). When the title exists, every
-#                      install also refreshes its copy of the APK.
+#   --register-title   developer-only registration via a separately maintained
+#                      devkit-utils checkout; public first uploads should use
+#                      Valve's SteamOS Devkit Client Title Upload instead.
+#                      When the title exists, installs refresh its APK copy.
 #   --link-saves       point the game's own save folder (Android app storage,
 #                      which lives in the title's compatdata and goes with a
 #                      Lepton reset) at ~/Documents/GTASAVR/saves. Needs one
@@ -38,8 +39,8 @@
 # and no focus from SteamVR: use it for logs, and launch the GTASAVR title from
 # the Steam library to play.
 #
-# Before any unattended run (--logcat), make sure nobody is wearing the
-# headset: a launch replaces whatever they are playing.
+# Before an unattended run (--logcat), close the active game: a launch replaces
+# the current session.
 set -euo pipefail
 
 kit="$(cd "$(dirname "$0")/../.." && pwd)"

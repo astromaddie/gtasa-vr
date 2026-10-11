@@ -324,14 +324,17 @@ SHOULDER on foot the grips step through weapons; with tracked hands it grabs
 the wheel and the holstered weapons. Nothing needed changing, so the bindings
 check and the controls docs stay as they are.
 
-## Build (Mac or Linux)
+## Build the APK and payload
 
-Use Python 3.10+, JDK 21, Android platform 35, build-tools 35.0.0, NDK
+Build on x86-64 Linux, macOS, or x86-64 Ubuntu under Windows WSL2. The Frame is an ARM64 run target; the NDK's Linux host tools are x86-64. Apple Silicon Macs need Rosetta for the pinned x86-64 tools.
+
+On Windows, install Ubuntu with [WSL2](https://learn.microsoft.com/windows/wsl/install), then install a Linux JDK 21 and the Linux Android SDK Command-Line Tools inside Ubuntu. For example, install OpenJDK with `sudo apt update && sudo apt install -y openjdk-21-jdk`, and download/extract the Linux SDK Command-Line Tools under `$HOME/Android/Sdk`. Keep the checkout, SDK and build output under the Linux home (for example, `~/src/gtasa-vr`), not on a Windows-mounted path. Existing Windows game packages remain accessible at `/mnt/c/...`; copying one into Linux first can improve file access speed. See Android's [SDK command-line tools](https://developer.android.com/tools/sdkmanager), [NDK downloads](https://developer.android.com/ndk/downloads), and the [README build section](../README.md#build-the-frame-apk-and-payload).
+
+Use Python 3.10+, JDK 21, Android SDK command-line tools (`sdkmanager`), platform 35, build-tools 35.0.0, NDK
 27.2.12479018 and CMake 3.22.1. The Frame package also needs the pinned
 Apktool 3.0.3 JAR and Khronos OpenXR Android loader 1.1.43 for arm64. The
 Frame helper `tools/build.sh` requires explicit paths to both files and
-checks their SHA-256 hashes. For download and SDK setup commands, see the
-[README build section](../README.md#build-the-frame-version).
+checks their SHA-256 hashes. The Android SDK is commonly `$HOME/Library/Android/sdk` on macOS and `$HOME/Android/Sdk` on Linux or WSL2. Accept the installed SDK package licenses with `sdkmanager --licenses` before building.
 
 Supply your own Google Play GTA San Andreas 2.11.311 ARM64 package or a
 supported split set. A merged backup made by a backup tool can use
@@ -346,7 +349,7 @@ personal APK and payload:
   --openxr-loader "/path/to/libopenxr_loader.so" \
   --apktool "/path/to/apktool_3.0.3.jar" \
   --build-dir "$PWD/.frame-build" \
-  --game-package "/path/to/your/GTA-SA-2.11.311-ARM64.apk"
+  --game-package "/mnt/c/Users/you/Downloads/GTA-SA-2.11.311-ARM64.apk"
 ```
 
 The result is `<build>/out/base.apk` plus `<build>/payload`. The native code
@@ -354,30 +357,35 @@ can be rebuilt alone by running `ninja` in `<build>/native`; changes to the
 Java loader need a full build. The combined APK contains commercial game data
 and is for your personal use; this source repository does not distribute it.
 
-## Put it on the headset
+The exact checked revision, supplied input classification and previous build
+checks are recorded in [PR0 readiness](PR0_READINESS.md).
+
+## Create the Steam title, copy data and play
+
+Use Valve's public [SteamOS Devkit Client Title Upload](https://partner.steamgames.com/doc/steamhardware/steamframe/loadgames) for the first library entry. Pair the Frame with the client, then upload a folder containing the APK with **Name** `GTASAVR`, **Local Folder** set to that folder, **Start Command** `GTASA-VR.apk`, and **Runtime** `Android`:
 
 ```sh
-export FRAME_HOST="steamos@YOUR_FRAME_ADDRESS"
-tools/steam_frame/deploy.sh --apk "$PWD/.frame-build/out/base.apk" \
-  --payload "$PWD/.frame-build/payload" --register-title --no-adb
+mkdir -p .frame-upload/gtasa
+cp .frame-build/out/base.apk .frame-upload/gtasa/GTASA-VR.apk
 ```
 
-That copies the game data into `~/Documents/GTASAVR` over SSH, then puts the
-APK in a persistent **GTASAVR** title in the Steam library. Launch that
-title to play. A game started over adb gets no controllers. You can also launch the title
-from SSH by writing `steam://rungameid/<id>` into `~/.steam/steam.pipe`. The
-id is `(appid << 32) | 0x02000000`, and the appid is in Steam's
-`shortcuts.vdf`.
+On Windows, copy `.frame-upload/gtasa` to your Windows Downloads folder (available inside WSL at `/mnt/c/Users/YOUR_WINDOWS_USERNAME/Downloads/`), then select that copied folder in the Devkit Client.
 
-`FRAME_HOST` must name your own Frame SSH target, for example
-`steamos@frame.local`. Do not copy a host value from another setup.
+The build computer needs OpenSSH and `rsync` for file transfer. Enable SSH to the Frame and set your own address. The helper copies the payload into persistent Documents and refreshes the APK in an existing `~/devkit-game/GTASAVR` folder; this SSH-only route needs no Lepton Development or ADB:
 
-After the first launch, close the game and link its save folder into persistent
-Documents storage:
+```sh
+export FRAME_HOST="steamos@FRAME_HOST_OR_IP"
+tools/steam_frame/deploy.sh --apk "$PWD/.frame-build/out/base.apk" \
+  --payload "$PWD/.frame-build/payload" --no-adb
+```
+
+If the Devkit Client stored the title elsewhere, upload the new APK through the client again. Launch **GTASAVR from the Steam library** so SteamVR supplies controller input. After the first launch, close the game and link its save folder into persistent Documents storage:
 
 ```sh
 tools/steam_frame/deploy.sh --no-adb --no-install --no-launch --link-saves
 ```
+
+Game files, settings and saves live under `~/Documents/GTASAVR`. For an ADB development install, add Android SDK platform-tools (`adb`) to the build computer, start **Lepton Development** and omit `--no-adb`; launch the Steam library title for play. `FRAME_HOST` must name your own Frame SSH target.
 
 ## Current limits
 
