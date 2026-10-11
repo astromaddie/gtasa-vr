@@ -2,8 +2,7 @@
   "schema_version": 1,
   "milestone": "PR0",
   "status": "EXPERIMENTAL",
-  "publication_status": "ready for public experimental source; no APK or game-data release",
-  "tested_source_commit": "f90113a2190eac0d8fdde33287e620ef730741bc",
+  "publication_status": "public experimental source; no APK or game-data release",
   "tested_build_script_patch_sha256": "971341447f946673a388fd2b62b637659e46b3e4f1a71331c23225706be3a48f",
   "final_build_script_patch_sha256": "72baf0c8315114e267f0810cdffcbd7bf92dd2c31a5bb28dfb07faf41f7374cd",
   "supported_targets": [
@@ -20,7 +19,8 @@
         "bash -n tools/steam_frame/deploy.sh",
         "bash -n tools/build.sh"
       ],
-      "deploy_host_guard": "Invoked without FRAME_HOST; stopped at the required-host guard before SSH or ADB. No install or launch occurred."
+      "deploy_host_guard": "Invoked without FRAME_HOST; stopped at the required-host guard before SSH or ADB. No install or launch occurred.",
+      "commit": "308a7d62fc599b769d07ab886b8547b73090895d"
     },
     "clean_build": {
       "result": "PASS",
@@ -64,13 +64,15 @@
         "android_15_plus_16k_elf_page_compatibility": "Not established; current target is Steam Frame Android 11."
       },
       "device_install_or_launch": false,
-      "private_artifact_receipt": "Recorded outside the repository; contains personal package and output hashes."
+      "private_artifact_receipt": "Recorded outside the repository; contains personal package and output hashes.",
+      "post_build_change": "Only build-script help wording changed after the full build; final committed production host checks passed."
     }
   },
   "distribution_scope": "Source only. The personal combined APK and payload contain proprietary game data and are not included, committed, or released. No game package, extracted game data, or personal signing key is part of the source kit.",
   "license_scope": "Retained component notices apply to their stated code; they do not grant redistribution rights to commercial game packages or extracted game data.",
   "changelog": "CHANGELOG.md",
   "build_isolation": "Fresh source export at the immutable source commit with the recorded build-script patch; env -i, isolated HOME, JVM user.home, and Gradle home; no personal Git credentials; public pinned source dependencies; max four build jobs. Shared host SDK/compiler tooling was explicit.",
-  "tested_commit": "f90113a2190eac0d8fdde33287e620ef730741bc",
-  "distribution_blockers": []
+  "tested_commit": "308a7d62fc599b769d07ab886b8547b73090895d",
+  "distribution_blockers": [],
+  "full_build_base_commit": "f90113a2190eac0d8fdde33287e620ef730741bc"
 }

@@ -7,3 +7,8 @@
 - Moved package validation and aircraft HLOD generation ahead of the native build, so a clean package build prepares its required generated input before CMake compiles.
 - Verified a fresh source build and personal package using a user-owned merged 2.11.311 ARM64 backup; the retail engine hash remained enforced. The private APK and game data were excluded from the source tree and release scope.
 - Updated PR0 readiness with build checks, source-only publication status, and the exact distinction between 16 KiB ZIP alignment and ELF page alignment for the Android 11 target.
+
+## 2026-10-11 — Public experimental source
+
+- Made the source repository public after clean build and source/history checks.
+- Retained the exact retail engine check for merged backups; no combined APK or game data was released.

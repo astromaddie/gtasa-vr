@@ -1,8 +1,9 @@
 # PR0 source readiness
 
-**EXPERIMENTAL — ready for public source.** This check produced a personal build for validation; no APK or game data is included in the source publication.
+**EXPERIMENTAL — public source.** This check produced a personal build for validation; no APK or game data is included in the source publication.
 
-- **Source commit:** `f90113a2190eac0d8fdde33287e620ef730741bc`, plus the `tools/build.sh` preflight-order change recorded in [PR0_METADATA.json](PR0_METADATA.json).
+- **Host-tested commit:** `308a7d62fc599b769d07ab886b8547b73090895d`.
+- **Full-build base:** `f90113a2190eac0d8fdde33287e620ef730741bc`, plus the `tools/build.sh` preflight-order change recorded in [PR0_METADATA.json](PR0_METADATA.json).
 - **Target:** Steam Frame Lepton, Android 11, ARM64, SteamVR OpenXR.
 - **Input:** user-owned Google Play GTA San Andreas 2.11.311 ARM64 backup, merged by a backup tool. Its source signer was not the pinned Google Play signer, so validation and packaging used the documented `--allow-unofficial-source` route. The mandatory retail `libGame.so` hash matched. The result records `officialSource=false`.
 - **Distribution:** the personal combined APK contains proprietary game files and is not part of this repository or a release. The source kit does not include a game package, extracted game data, or a personal signing key.
